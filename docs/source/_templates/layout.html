@@ -13,10 +13,10 @@
 
 {# Open Graph / Facebook #}
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://walkerchi.github.io/torch-sla/{{ pagename }}.html">
+<meta property="og:url" content="{{ site_url }}{{ pagename }}.html">
 <meta property="og:title" content="{{ og_title|default('torch-sla: PyTorch Sparse Matrix Solver | GPU Sparse Linear Algebra') }}">
 <meta property="og:description" content="{{ og_description|default('Solve torch sparse linear systems in PyTorch. GPU-accelerated sparse matrix solver with autograd support. Works with torch.sparse tensors.') }}">
-<meta property="og:image" content="https://walkerchi.github.io/torch-sla/_static/logo.jpg">
+<meta property="og:image" content="{{ site_url }}_static/logo.jpg">
 <meta property="og:image:alt" content="torch-sla: PyTorch Sparse Matrix Solver">
 <meta property="og:site_name" content="torch-sla - PyTorch Sparse Solver">
 <meta property="og:locale" content="en_US">
@@ -25,10 +25,10 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{ og_title|default('torch-sla: PyTorch Sparse Matrix Solver') }}">
 <meta name="twitter:description" content="{{ og_description|default('Solve torch sparse linear systems in PyTorch with GPU acceleration. Full autograd support.') }}">
-<meta name="twitter:image" content="https://walkerchi.github.io/torch-sla/_static/logo.jpg">
+<meta name="twitter:image" content="{{ site_url }}_static/logo.jpg">
 
 {# Additional SEO #}
-<link rel="canonical" href="https://walkerchi.github.io/torch-sla/{{ pagename }}.html">
+<link rel="canonical" href="{{ site_url }}{{ pagename }}.html">
 <meta name="theme-color" content="#9b59b6">
 
 {# Preconnect for performance #}
@@ -90,10 +90,10 @@
     "@context": "https://schema.org",
     "@type": "WebSite",
     "name": "torch-sla Documentation",
-    "url": "https://walkerchi.github.io/torch-sla/",
+    "url": "{{ site_url }}",
     "potentialAction": {
         "@type": "SearchAction",
-        "target": "https://walkerchi.github.io/torch-sla/search.html?q={search_term_string}",
+        "target": "{{ site_url }}search.html?q={search_term_string}",
         "query-input": "required name=search_term_string"
     }
 }
