@@ -16,8 +16,8 @@ autodoc_mock_imports = [
 
 # -- Project information -----------------------------------------------------
 project = 'torch-sla'
-copyright = '2024-2026, Walker Chi'
-author = 'Walker Chi'
+copyright = '2024-2026, Mingyuan Chi, Shizheng Wen'
+author = 'Mingyuan Chi, Shizheng Wen'
 version = '0.1.2'
 release = '0.1.2'
 
@@ -118,7 +118,7 @@ html_context = {
     'description': 'torch-sla: PyTorch Sparse Linear Algebra library. GPU-accelerated sparse solvers with autograd support. Works with torch.sparse tensors, COO/CSR formats. pip install torch-sla.',
     # Comprehensive keywords covering all search variations
     'keywords': 'torch sparse, torch sparse matrix, torch sparse tensor, pytorch sparse, pytorch sparse matrix, pytorch sparse solver, sparse linear algebra pytorch, torch.sparse, sparse linear algebra, GPU sparse solver, CUDA sparse, cuSOLVER, cuDSS, differentiable sparse solver, autograd sparse, scipy sparse pytorch, sparse COO, sparse CSR, FEM pytorch, CFD pytorch, spsolve pytorch',
-    'author': 'Walker Chi',
+    'author': 'Mingyuan Chi, Shizheng Wen',
     'og_title': 'torch-sla: PyTorch Sparse Linear Algebra with GPU Acceleration',
     'og_description': 'PyTorch Sparse Linear Algebra library. Solve Ax=b with GPU acceleration via CuPy/cuDSS. Full autograd support for differentiable sparse operations. pip install torch-sla.',
     'og_image': 'https://walkerchi.github.io/torch-sla/_static/logo.jpg',

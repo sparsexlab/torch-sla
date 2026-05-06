@@ -548,7 +548,7 @@ If you find this library useful, please cite our paper:
 ```bibtex
 @article{chi2026torchsla,
   title={torch-sla: Differentiable Sparse Linear Algebra with Adjoint Solvers and Sparse Tensor Parallelism for PyTorch},
-  author={Chi, Mingyuan},
+  author={Chi, Mingyuan and Wen, Shizheng},
   journal={arXiv preprint arXiv:2601.13994},
   year={2026},
   url={https://arxiv.org/abs/2601.13994}

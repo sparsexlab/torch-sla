@@ -366,8 +366,10 @@ torch-sla is released under the MIT License. See `LICENSE <https://github.com/wa
 Contact
 -------
 
-| **Author**: Walker Chi
-| **Email**: ``x@y`` where ``x = walker.chi.000`` and ``y = gmail.com``
+| **Author**: Mingyuan Chi
+| **Email**: walker.chi.000@gmail.com
+| **Author**: Shizheng Wen
+| **Email**: shizheng.wen@sam.math.ethz.ch
 
 Citation
 --------
@@ -378,7 +380,7 @@ If you use torch-sla in your research, please cite our paper:
 
    @article{chi2026torchsla,
      title={torch-sla: Differentiable Sparse Linear Algebra with Adjoint Solvers and Sparse Tensor Parallelism for PyTorch},
-     author={Chi, Mingyuan},
+     author={Chi, Mingyuan and Wen, Shizheng},
      journal={arXiv preprint arXiv:2601.13994},
      year={2026},
      url={https://arxiv.org/abs/2601.13994}

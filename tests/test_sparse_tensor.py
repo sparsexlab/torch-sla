@@ -105,12 +105,49 @@ class TestSparseTensorBasic:
         A_dense = torch.randn(10, 10, dtype=torch.float64)
         A_dense[A_dense.abs() < 0.5] = 0
         A_coo = A_dense.to_sparse_coo()
-        
+
         A = SparseTensor.from_torch_sparse(A_coo)
-        
+
         assert A.shape == (10, 10)
         torch.testing.assert_close(A.to_dense(), A_dense)
-    
+
+    def test_from_dense_preserves_grad(self):
+        """from_dense must keep the autograd graph so downstream .solve() is differentiable."""
+        Es = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        dense = torch.stack([
+            torch.stack([Es[0],           torch.tensor(-1.0, dtype=torch.float64), torch.tensor(0.0, dtype=torch.float64)]),
+            torch.stack([torch.tensor(-1.0, dtype=torch.float64), Es[1],           torch.tensor(-1.0, dtype=torch.float64)]),
+            torch.stack([torch.tensor(0.0, dtype=torch.float64), torch.tensor(-1.0, dtype=torch.float64), Es[2]]),
+        ])
+
+        A = SparseTensor.from_dense(dense)
+        assert A.values.requires_grad, "from_dense dropped the autograd graph"
+
+        b = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        x = A.solve(b)
+        x.sum().backward()
+        assert Es.grad is not None
+        assert torch.isfinite(Es.grad).all()
+
+    def test_from_torch_sparse_preserves_grad(self):
+        """from_torch_sparse must keep the autograd graph (regression test for GitHub issue)."""
+        Es = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64, requires_grad=True)
+        dense = torch.stack([
+            torch.stack([Es[0],           torch.tensor(-1.0, dtype=torch.float64), torch.tensor(0.0, dtype=torch.float64)]),
+            torch.stack([torch.tensor(-1.0, dtype=torch.float64), Es[1],           torch.tensor(-1.0, dtype=torch.float64)]),
+            torch.stack([torch.tensor(0.0, dtype=torch.float64), torch.tensor(-1.0, dtype=torch.float64), Es[2]]),
+        ])
+        coo = dense.to_sparse()
+
+        A = SparseTensor.from_torch_sparse(coo)
+        assert A.values.requires_grad, "from_torch_sparse dropped the autograd graph"
+
+        b = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+        x = A.solve(b)
+        x.sum().backward()
+        assert Es.grad is not None
+        assert torch.isfinite(Es.grad).all()
+
     def test_to_device_and_dtype(self):
         """Test moving tensor to device and changing dtype."""
         val, row, col, shape = create_tridiagonal_spd(10)

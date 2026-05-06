@@ -365,8 +365,10 @@ torch-sla 采用 MIT 许可证发布。详见 `LICENSE <https://github.com/walke
 联系方式
 --------
 
-| **作者**: Walker Chi
-| **邮箱**: ``x@y``，其中 ``x = walker.chi.000``，``y = gmail.com``
+| **作者**: Mingyuan Chi
+| **邮箱**: x = walker.chi.000@gmail.com
+| **作者**: Shizheng Wen
+| **邮箱**: shizheng.wen@sam.math.ethz.ch
 
 引用
 ----
@@ -377,7 +379,7 @@ torch-sla 采用 MIT 许可证发布。详见 `LICENSE <https://github.com/walke
 
    @article{chi2026torchsla,
      title={torch-sla: Differentiable Sparse Linear Algebra with Adjoint Solvers and Sparse Tensor Parallelism for PyTorch},
-     author={Chi, Mingyuan},
+     author={Chi, Mingyuan and Wen, Shizheng},
      journal={arXiv preprint arXiv:2601.13994},
      year={2026},
      url={https://arxiv.org/abs/2601.13994}

@@ -901,9 +901,9 @@ class SparseTensor:
         dim_n = sparse_dim[1] if sparse_dim[1] >= 0 else ndim + sparse_dim[1]
         
         if ndim == 2 and dim_m == 0 and dim_n == 1:
-            A_sparse = A.to_sparse_coo()
-            indices = A_sparse._indices()
-            values = A_sparse._values()
+            A_sparse = A.to_sparse_coo().coalesce()
+            indices = A_sparse.indices()
+            values = A_sparse.values()
             return cls(values, indices[0], indices[1], tuple(A.shape), sparse_dim=sparse_dim)
         
         perm = [i for i in range(ndim) if i not in (dim_m, dim_n)] + [dim_m, dim_n]
@@ -948,8 +948,9 @@ class SparseTensor:
         """
         if A.layout == torch.sparse_csr:
             A = A.to_sparse_coo()
-        indices = A._indices()
-        values = A._values()
+        A = A.coalesce()
+        indices = A.indices()
+        values = A.values()
         return cls(values, indices[0], indices[1], tuple(A.shape))
     
     # =========================================================================
