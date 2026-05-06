@@ -7,6 +7,9 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('../../'))
 
+# Site URL — override with DOCS_SITE_URL env var (adaptive deployment).
+SITE_URL = os.environ.get('DOCS_SITE_URL', 'https://www.torchsla.com/').rstrip('/') + '/'
+
 # -- Autodoc configuration ---------------------------------------------------
 # Mock optional dependencies that may not be installed
 autodoc_mock_imports = [
@@ -24,12 +27,12 @@ release = '0.1.2'
 # -- SEO & Metadata ----------------------------------------------------------
 # SEO-optimized title with high-value keywords
 html_short_title = 'torch-sla - PyTorch Sparse Linear Algebra'
-html_baseurl = 'https://walkerchi.github.io/torch-sla/'
+html_baseurl = SITE_URL
 
 # Open Graph metadata for social sharing
-ogp_site_url = 'https://walkerchi.github.io/torch-sla/'
+ogp_site_url = SITE_URL
 ogp_site_name = 'torch-sla: PyTorch Sparse Linear Algebra'
-ogp_image = 'https://walkerchi.github.io/torch-sla/_static/logo.jpg'
+ogp_image = SITE_URL + '_static/logo.jpg'
 ogp_description_length = 300
 ogp_type = 'website'
 ogp_description = 'torch-sla: PyTorch Sparse Linear Algebra library with GPU acceleration. Differentiable sparse solvers with autograd support for torch.sparse tensors.'
@@ -121,7 +124,8 @@ html_context = {
     'author': 'Mingyuan Chi, Shizheng Wen',
     'og_title': 'torch-sla: PyTorch Sparse Linear Algebra with GPU Acceleration',
     'og_description': 'PyTorch Sparse Linear Algebra library. Solve Ax=b with GPU acceleration via CuPy/cuDSS. Full autograd support for differentiable sparse operations. pip install torch-sla.',
-    'og_image': 'https://walkerchi.github.io/torch-sla/_static/logo.jpg',
+    'og_image': SITE_URL + '_static/logo.jpg',
+    'site_url': SITE_URL,
     'twitter_card': 'summary_large_image',
     'google_site_verification': '',  # Add your Google Search Console verification code here
     # Language selector
@@ -135,7 +139,6 @@ html_context = {
 # Sitemap for search engines (requires sphinx-sitemap)
 sitemap_url_scheme = '{link}'
 sitemap_locales = ['en', 'zh']
-html_extra_path = ['robots.txt']
 
 # Search engine optimization
 html_use_index = True
@@ -144,3 +147,19 @@ html_copy_source = True
 html_show_sourcelink = True
 html_show_sphinx = False
 html_show_copyright = True
+
+
+def setup(app):
+    """Emit robots.txt with current SITE_URL into the build output."""
+    def write_robots(app, exception):
+        if exception is not None:
+            return
+        path = os.path.join(app.outdir, 'robots.txt')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(
+                "User-agent: *\n"
+                "Allow: /\n\n"
+                f"Sitemap: {SITE_URL}sitemap.xml\n"
+                "Crawl-delay: 1\n"
+            )
+    app.connect('build-finished', write_robots)

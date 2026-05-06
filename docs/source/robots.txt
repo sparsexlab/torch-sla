@@ -1,5 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://walkerchi.github.io/torch-sla/sitemap.xml
-

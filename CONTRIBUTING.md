@@ -272,7 +272,7 @@ pip install nvmath-python[cu12]
 
 ## 📚 Resources
 
-- **Documentation**: https://walkerchi.github.io/torch-sla/
+- **Documentation**: https://www.torchsla.com/
 - **GitHub**: https://github.com/walkerchi/torch-sla
 - **Issues**: https://github.com/walkerchi/torch-sla/issues
 

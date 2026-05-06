@@ -1,8 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://walkerchi.github.io/torch-sla/sitemap.xml
-
-# Crawl-delay for polite crawling
-Crawl-delay: 1
-
