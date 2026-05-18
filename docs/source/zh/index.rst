@@ -22,7 +22,7 @@ torch-sla: PyTorch 稀疏线性代数
      <a href="https://arxiv.org/abs/2601.13994"><img src="https://img.shields.io/badge/arXiv-2601.13994-b31b1b.svg" alt="arXiv"></a>
      <a href="https://github.com/walkerchi/torch-sla"><img src="https://img.shields.io/badge/GitHub-torch--sla-blue?logo=github" alt="GitHub"></a>
      <a href="https://pypi.org/project/torch-sla/"><img src="https://img.shields.io/pypi/v/torch-sla?color=green" alt="PyPI"></a>
-     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+     <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
    </p>
 
 为什么选择 torch-sla？
@@ -360,7 +360,7 @@ torch-sla vs PETSc
 许可证
 ------
 
-torch-sla 采用 MIT 许可证发布。详见 `LICENSE <https://github.com/walkerchi/torch-sla/blob/main/LICENSE>`_。
+torch-sla 采用 Apache License 2.0 发布。版权所有 2024-2026 Mingyuan Chi 与 Shizheng Wen。详见 `LICENSE <https://github.com/walkerchi/torch-sla/blob/main/LICENSE>`_。
 
 联系方式
 --------

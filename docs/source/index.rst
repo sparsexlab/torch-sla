@@ -23,7 +23,7 @@ torch-sla: PyTorch Sparse Linear Algebra
      <a href="https://arxiv.org/abs/2601.13994"><img src="https://img.shields.io/badge/arXiv-2601.13994-b31b1b.svg" alt="arXiv"></a>
      <a href="https://github.com/walkerchi/torch-sla"><img src="https://img.shields.io/badge/GitHub-torch--sla-blue?logo=github" alt="GitHub"></a>
      <a href="https://pypi.org/project/torch-sla/"><img src="https://img.shields.io/pypi/v/torch-sla?color=green" alt="PyPI"></a>
-     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+     <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
    </p>
 
 Why torch-sla?
@@ -361,7 +361,7 @@ Indices and Search
 License
 -------
 
-torch-sla is released under the MIT License. See `LICENSE <https://github.com/walkerchi/torch-sla/blob/main/LICENSE>`_ for details.
+torch-sla is released under the Apache License 2.0. Copyright 2024-2026 Mingyuan Chi and Shizheng Wen. See `LICENSE <https://github.com/walkerchi/torch-sla/blob/main/LICENSE>`_ for details.
 
 Contact
 -------

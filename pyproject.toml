@@ -7,7 +7,7 @@ name = "torch-sla"
 version = "0.2.0"
 description = "PyTorch Sparse Linear Algebra - Differentiable sparse solvers with CUDA support"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [
     {name = "Mingyuan Chi", email = "walker.chi.000@gmail.com"},
     {name = "Shizheng Wen", email = "shizheng.wen@sam.math.ethz.ch"}
@@ -32,7 +32,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
