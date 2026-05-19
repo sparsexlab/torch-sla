@@ -538,6 +538,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - Code conventions
 - Testing guidelines
 - Benchmark standards
+- [Release process](CONTRIBUTING.md#-release-process) (push a `vX.Y.Z` tag → auto-publish to PyPI)
 
 Quick conventions:
 - Benchmarks: `benchmarks/benchmark_<feature>.py` → `results/benchmark_<feature>/`

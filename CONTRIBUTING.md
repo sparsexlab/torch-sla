@@ -230,6 +230,51 @@ docs(examples): add distributed computing example
 perf(det): optimize CPU sparse LU decomposition
 ```
 
+## 📦 Release Process
+
+Releases to [PyPI](https://pypi.org/project/torch-sla/) are fully automated. Pushing a tag matching `v*` triggers `.github/workflows/publish.yml`, which builds the sdist + wheel and uploads them via PyPI Trusted Publishing (OIDC — no API token needed).
+
+### Standard release (push tag → auto-publish)
+
+```bash
+# 1. Bump version in pyproject.toml (and anywhere else it lives)
+vim pyproject.toml
+
+# 2. Commit and tag
+git add pyproject.toml
+git commit -m "chore: bump version to X.Y.Z"
+git tag vX.Y.Z
+
+# 3. Push commit + tag — this triggers the publish workflow
+git push origin main
+git push origin vX.Y.Z
+```
+
+Watch the run at https://github.com/sparsexlab/torch-sla/actions/workflows/publish.yml. When it goes green, the new version is live on PyPI.
+
+### Optional: also create a GitHub Release (with changelog)
+
+The `release: published` event is kept as a secondary trigger. If you want a GitHub Release page with release notes:
+
+1. Push the tag as above (publish workflow runs once via `push: tags`).
+2. Go to https://github.com/sparsexlab/torch-sla/releases/new , pick the existing tag, write notes, click **Publish release**.
+
+Creating a Release from an existing tag does **not** re-trigger the workflow, so PyPI won't get a duplicate upload.
+
+### Test PyPI dry-run
+
+Before a real release, you can publish to [Test PyPI](https://test.pypi.org/project/torch-sla/) without tagging:
+
+1. Actions → "Publish to PyPI" → **Run workflow**
+2. Set `test_pypi` to `true` and run on `main`
+
+### Important rules
+
+- **Never reuse a version number.** PyPI permanently reserves every version that has ever been uploaded — even deleted/yanked ones. If `X.Y.Z` was ever pushed, you must bump to a new number.
+- **Tag must start with `v`** (e.g. `v0.2.2`, not `0.2.2`). The workflow trigger is `tags: ['v*']`.
+- **Version in `pyproject.toml` must match the tag.** The build uses whatever `pyproject.toml` says; mismatches will publish under the wrong version and confuse users.
+- **Trusted Publishing is configured on PyPI for this repo + workflow + `pypi` environment.** Renaming the workflow file, the environment, or moving the repo will break uploads until you re-add the trusted publisher on PyPI.
+
 ## 🚀 Performance Guidelines
 
 ### CPU vs CUDA
