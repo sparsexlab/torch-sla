@@ -11,7 +11,7 @@ from setuptools import setup, find_packages
 from setuptools.command.build_ext import build_ext
 
 # Version
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 
 def get_long_description():
