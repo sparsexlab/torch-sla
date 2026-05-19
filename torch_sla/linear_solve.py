@@ -380,6 +380,7 @@ def spsolve(
     is_spd: bool = False,
     preconditioner: str = "jacobi",
     mixed_precision: bool = False,
+    verbose: bool = False,
 ) -> torch.Tensor:
     """
     Solve the Sparse Linear Equation Ax = b with gradient support.
@@ -497,6 +498,14 @@ def spsolve(
     if method not in valid_methods and method != "auto":
         raise ValueError(f"Method '{method}' not supported by backend '{backend}'. "
                         f"Available methods: {valid_methods}")
+
+    if verbose:
+        dtype_str = str(val.dtype).replace("torch.", "")
+        print(
+            f"[torch-sla] solve: n={n}, nnz={val.numel()}, dtype={dtype_str}, "
+            f"device={device.type}, symmetric={bool(is_symmetric)}, spd={bool(is_spd)}, "
+            f"backend={backend}, method={method}"
+        )
 
     # ========================================================================
     # SciPy backend (CPU)

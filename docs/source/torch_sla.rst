@@ -239,6 +239,11 @@ get_available_backends
 
 .. autofunction:: torch_sla.get_available_backends
 
+show_backends
+~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.show_backends
+
 get_backend_methods
 ~~~~~~~~~~~~~~~~~~~
 

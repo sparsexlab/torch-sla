@@ -71,6 +71,7 @@ from .sparse_tensor import (
 from .backends import (
     # Backend utilities
     get_available_backends,
+    show_backends,
     get_backend_methods,
     get_default_method,
     select_backend,
@@ -142,6 +143,7 @@ __all__ = [
     "get_available_gpu_memory",
     # Backend utilities
     "get_available_backends",
+    "show_backends",
     "get_backend_methods",
     "get_default_method",
     "select_backend",

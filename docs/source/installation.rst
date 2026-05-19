@@ -29,25 +29,31 @@ Or install from GitHub for the latest development version:
 Optional Dependencies
 ---------------------
 
-For additional backends and features:
+The core install pulls in ``torch``, ``numpy``, ``scipy``, and ``ninja`` — enough to
+run CPU solvers out of the box. GPU users can pick the backend(s) they need:
 
 .. code-block:: bash
 
-    # With cuDSS support (requires CUDA 12+)
-    pip install torch-sla[cuda]
+    # GPU users: choose one or both CUDA 12+ backends
+    pip install torch-sla[cupy]     # + CuPy backend
+    pip install torch-sla[cudss]    # + cuDSS backend (fastest direct solver on GPU)
 
-    # Full installation with all optional dependencies
+    # Full installation with all runtime backends (does not include dev/docs)
     pip install torch-sla[all]
 
-    # For development
+    # For development tools (pytest, black, isort, mypy)
     pip install torch-sla[dev]
+
+    # For documentation tools (sphinx, furo)
+    pip install torch-sla[docs]
 
 .. raw:: html
 
    <div class="recommendation-box">
-     <h4><span class="gradient-text">cuDSS Now on PyPI!</span></h4>
-     <p>CUDA backends use <code>nvmath-python</code> (for cuDSS) and <code>cupy-cuda12x</code> (for CuPy).
-     Installing <code>torch-sla[cuda]</code> will automatically install them.</p>
+     <h4><span class="gradient-text">Verify your environment</span></h4>
+     <p>After installation, you can inspect which backends are available on your machine:</p>
+     <pre><code>import torch_sla
+torch_sla.show_backends()</code></pre>
    </div>
 
 Backend Requirements

@@ -175,6 +175,53 @@ def get_available_backends() -> List[str]:
     return backends
 
 
+# Per-backend status descriptors used by show_backends()
+_BACKEND_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
+    'scipy':   {'device': 'CPU',  'install': 'pip install scipy'},
+    'eigen':   {'device': 'CPU',  'install': 'JIT-compiled C++ extension (requires a C++ compiler)'},
+    'pytorch': {'device': 'CPU/CUDA', 'install': 'bundled with torch (always available)'},
+    'cupy':    {'device': 'CUDA', 'install': 'pip install torch-sla[cupy]'},
+    'cudss':   {'device': 'CUDA', 'install': 'pip install torch-sla[cudss]'},
+}
+
+
+def show_backends() -> None:
+    """Print a formatted status report of all backends.
+
+    Shows which backends are available on the current machine and gives
+    installation hints for the ones that are not. Useful right after
+    ``pip install torch-sla`` to verify the runtime environment.
+
+    Example
+    -------
+    >>> import torch_sla
+    >>> torch_sla.show_backends()
+    torch-sla backend status (CUDA: available)
+      scipy    [CPU]      available
+      eigen    [CPU]      available
+      pytorch  [CPU/CUDA] available
+      cupy     [CUDA]     not available — pip install torch-sla[cupy]
+      cudss    [CUDA]     not available — pip install torch-sla[cudss]
+    """
+    checks = [
+        ('scipy',   is_scipy_available()),
+        ('eigen',   is_eigen_available()),
+        ('pytorch', is_pytorch_available()),
+        ('cupy',    is_cupy_available()),
+        ('cudss',   is_cudss_available()),
+    ]
+    cuda_status = 'available' if _check_cuda() else 'not available'
+    print(f"torch-sla backend status (CUDA: {cuda_status})")
+    for name, ok in checks:
+        info = _BACKEND_DESCRIPTIONS[name]
+        device = f"[{info['device']}]"
+        if ok:
+            status = "available"
+        else:
+            status = f"not available — {info['install']}"
+        print(f"  {name:<8} {device:<11} {status}")
+
+
 def get_backend_methods(backend: str) -> List[str]:
     """Get list of methods supported by a backend"""
     return BACKEND_METHODS.get(backend, [])

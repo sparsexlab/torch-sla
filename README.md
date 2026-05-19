@@ -42,19 +42,28 @@
 # Basic installation
 pip install torch-sla
 
-# With cuDSS support (CUDA 12+, recommended for GPU)
-pip install torch-sla[cuda]
+# GPU users: choose one or both CUDA 12+ backends
+pip install torch-sla[cupy]    # + CuPy backend
+pip install torch-sla[cudss]   # + cuDSS backend (fastest direct solver on GPU)
 
-# Full installation with all dependencies
+# Full installation with all runtime backends (does not include dev/docs)
 pip install torch-sla[all]
 
 # From source (for development)
 git clone https://github.com/walkerchi/torch-sla.git
 cd torch-sla
-pip install -e ".[dev]"
+pip install -e ".[dev]"     # development tools (pytest, black, isort, mypy)
+pip install -e ".[docs]"    # documentation tools (sphinx, furo)
 ```
 
-> **Note**: CUDA backends use `nvmath-python` (for cuDSS) and `cupy-cuda12x` (for CuPy). Installing `torch-sla[cuda]` will automatically include them.
+> **Note**: The core install (`pip install torch-sla`) pulls in `torch`, `numpy`, `scipy`, and `ninja` — enough to run CPU solvers out of the box. `torch-sla[all]` additionally bundles `pytest`, `nvmath-python`, and `cupy-cuda12x`, but **does not** include `[dev]` or `[docs]` — install those separately if needed.
+
+After installation, you can inspect which backends are available on your machine:
+
+```python
+import torch_sla
+torch_sla.show_backends()
+```
 
 ## Quick Start
 

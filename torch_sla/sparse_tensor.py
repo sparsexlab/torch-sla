@@ -2182,6 +2182,7 @@ class SparseTensor:
         atol: float = 1e-10,
         maxiter: int = 10000,
         tol: float = 1e-12,
+        verbose: bool = False,
     ) -> torch.Tensor:
         """
         Solve the sparse linear system Ax = b.
@@ -2211,7 +2212,11 @@ class SparseTensor:
             Maximum iterations for iterative solvers. Default: 10000.
         tol : float, optional
             Relative tolerance for direct solvers. Default: 1e-12.
-            
+        verbose : bool, optional
+            If True, print a one-line summary of the auto-selected backend,
+            method, and detected matrix properties (symmetric, SPD).
+            Default: False.
+
         Returns
         -------
         torch.Tensor
@@ -2258,18 +2263,20 @@ class SparseTensor:
             batch_shape = self.batch_shape
             vals_flat = self.values.reshape(-1, self.nnz)
             b_flat = b.reshape(-1, M)
-            
+
             results = []
             for i in range(vals_flat.size(0)):
+                # Only print on the first batch element to avoid spam
                 x = spsolve(
                     vals_flat[i], self.row_indices, self.col_indices,
                     (M, N), b_flat[i],
                     backend=backend, method=method,
                     atol=atol, maxiter=maxiter, tol=tol,
-                    is_symmetric=is_sym, is_spd=is_spd
+                    is_symmetric=is_sym, is_spd=is_spd,
+                    verbose=verbose and i == 0,
                 )
                 results.append(x)
-            
+
             return torch.stack(results).reshape(*batch_shape, N)
         else:
             return spsolve(
@@ -2277,7 +2284,8 @@ class SparseTensor:
                 (M, N), b,
                 backend=backend, method=method,
                 atol=atol, maxiter=maxiter, tol=tol,
-                is_symmetric=is_sym, is_spd=is_spd
+                is_symmetric=is_sym, is_spd=is_spd,
+                verbose=verbose,
             )
     
     def solve_batch(
