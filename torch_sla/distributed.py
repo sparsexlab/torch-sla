@@ -951,6 +951,7 @@ class DSparseMatrix:
         self._csr_cache = None
         self._diag_cache = None
         self._diag_inv_cache = None
+        self._owned_block_csr = None
         self._send_buffers_cache = {}
         self._recv_buffers_cache = {}
         self._send_indices_cached = {}
@@ -1014,6 +1015,28 @@ class DSparseMatrix:
                 torch.zeros_like(diag)
             )
         return self._diag_inv_cache
+
+    def _get_owned_block_csr(self) -> Optional[torch.Tensor]:
+        """
+        Cached CSR of the owned diagonal block A_oo (owned x owned).
+
+        This is the local subdomain operator (no halo coupling) used by the
+        block-Jacobi / additive-Schwarz preconditioner. Returns None if the
+        owned block has no entries.
+        """
+        if not hasattr(self, '_owned_block_csr') or self._owned_block_csr is None:
+            no = self.num_owned
+            mask = (self.local_row < no) & (self.local_col < no)
+            if not bool(mask.any()):
+                self._owned_block_csr = None
+                return None
+            idx = torch.stack([self.local_row[mask], self.local_col[mask]], dim=0)
+            coo = torch.sparse_coo_tensor(
+                idx, self.local_values[mask], (no, no),
+                device=self.device, dtype=self.local_values.dtype,
+            )
+            self._owned_block_csr = coo.to_sparse_csr()
+        return self._owned_block_csr
     
     def solve(
         self,
@@ -1433,20 +1456,35 @@ class DSparseMatrix:
     def _local_solve_approx(
         self,
         b_owned: torch.Tensor,
-        maxiter: int = 5
+        maxiter: int = 5,
+        omega: float = 0.8,
     ) -> torch.Tensor:
         """
-        Approximate local solve for block-Jacobi preconditioner.
-        Uses few iterations of Jacobi or CG.
+        Approximate local solve A_oo x ~= b_owned for the block-Jacobi
+        (restricted additive Schwarz) preconditioner.
+
+        Runs ``maxiter`` damped-Jacobi sweeps on the *owned diagonal block*:
+
+            x_{k+1} = x_k + omega * D_oo^{-1} (b_owned - A_oo @ x_k)
+
+        This is a fixed *linear* operator (so it is a valid CG preconditioner,
+        unlike inner CG), needs no halo exchange (owned block only), and uses
+        the local off-diagonal coupling -- so it is genuinely stronger than a
+        single diagonal Jacobi step. Pure PyTorch, works on CPU and CUDA.
         """
         D_inv = self._get_diagonal_inv()[:self.num_owned]
-        x = torch.zeros_like(b_owned)
-        
-        # Simple Jacobi iterations (fast, no halo exchange needed)
-        for _ in range(maxiter):
-            # Only use diagonal part for approximate solve
-            x = D_inv * b_owned
-        
+        A_oo = self._get_owned_block_csr()
+
+        # First sweep from x0 = 0 is just the damped diagonal solve.
+        x = omega * D_inv * b_owned
+        if A_oo is None:
+            return x
+
+        for _ in range(maxiter - 1):
+            # residual on the owned block, then damped diagonal correction
+            r = b_owned - torch.mv(A_oo, x)
+            x = x + omega * D_inv * r
+
         return x
     
     def _apply_ssor(self, r: torch.Tensor, omega: float = 1.5) -> torch.Tensor:
