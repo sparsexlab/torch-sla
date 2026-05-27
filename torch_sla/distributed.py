@@ -846,13 +846,14 @@ class DSparseMatrix:
         if not DIST_AVAILABLE or not dist.is_initialized():
             return None
         
-        backend = dist.get_backend()
-        
-        # NCCL doesn't support true async in the same way, use streams
-        if backend == 'nccl' and x.is_cuda:
-            return self._halo_exchange_cuda_async(x)
-        else:
-            return self._halo_exchange_gloo_async(x)
+        # Use async point-to-point (isend/irecv) for ALL backends, including
+        # NCCL. The previous NCCL branch (_halo_exchange_cuda_async) issued
+        # *blocking* dist.send/dist.recv on a side CUDA stream -- those block
+        # the host thread until the transfer completes, so they do NOT overlap
+        # with the interior compute (the whole point of matvec_overlap). NCCL
+        # supports isend/irecv as genuine async work handles, so the unified
+        # path below actually overlaps communication with computation.
+        return self._halo_exchange_async_p2p(x)
     
     def _halo_exchange_cuda_async(self, x: torch.Tensor):
         """Async halo exchange using CUDA streams."""
@@ -889,8 +890,8 @@ class DSparseMatrix:
         
         return {'type': 'cuda', 'stream': self._comm_stream, 'recv_buffers': recv_buffers}
     
-    def _halo_exchange_gloo_async(self, x: torch.Tensor):
-        """Async halo exchange using Gloo isend/irecv."""
+    def _halo_exchange_async_p2p(self, x: torch.Tensor):
+        """Async halo exchange via non-blocking isend/irecv (gloo and NCCL)."""
         send_buffers = self._get_send_buffers(x.dtype)
         recv_buffers = self._get_recv_buffers(x.dtype)
         
