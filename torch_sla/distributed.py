@@ -891,10 +891,19 @@ class DSparseMatrix:
         return {'type': 'cuda', 'stream': self._comm_stream, 'recv_buffers': recv_buffers}
     
     def _halo_exchange_async_p2p(self, x: torch.Tensor):
-        """Async halo exchange via non-blocking isend/irecv (gloo and NCCL)."""
+        """Async halo exchange via non-blocking P2P (gloo and NCCL).
+
+        Uses ``dist.batch_isend_irecv`` so NCCL groups the sends and receives
+        into one P2P transaction. A naive isend/irecv loop deadlocks on NCCL
+        once payloads grow past a few KB: both ranks post isend first and
+        then irecv, so the NCCL stream is blocked waiting on the peer's irecv
+        which has not yet been issued. batch_isend_irecv lets NCCL pair the
+        ops correctly and is also the only form that genuinely overlaps with
+        compute on NCCL.
+        """
         send_buffers = self._get_send_buffers(x.dtype)
         recv_buffers = self._get_recv_buffers(x.dtype)
-        
+
         # Fill send buffers
         for neighbor_id in self.partition.neighbor_partitions:
             send_idx = self._send_indices_cached.get(neighbor_id)
@@ -902,15 +911,15 @@ class DSparseMatrix:
                 send_idx = self.partition.send_indices[neighbor_id].to(self.device)
                 self._send_indices_cached[neighbor_id] = send_idx
             send_buffers[neighbor_id].copy_(x[send_idx])
-        
-        # Start async communication
-        requests = []
+
+        # Build a single grouped P2P transaction for all neighbors
+        ops = []
         for neighbor_id in self.partition.neighbor_partitions:
-            req = dist.isend(send_buffers[neighbor_id], dst=neighbor_id)
-            requests.append(req)
-            req = dist.irecv(recv_buffers[neighbor_id], src=neighbor_id)
-            requests.append(req)
-        
+            ops.append(dist.P2POp(dist.isend, send_buffers[neighbor_id], neighbor_id))
+            ops.append(dist.P2POp(dist.irecv, recv_buffers[neighbor_id], neighbor_id))
+
+        requests = dist.batch_isend_irecv(ops) if ops else []
+
         return {'type': 'gloo', 'requests': requests, 'recv_buffers': recv_buffers}
     
     def _wait_halo_exchange(self, handle, x: torch.Tensor):
