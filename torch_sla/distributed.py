@@ -712,24 +712,22 @@ class DSparseMatrix:
     
     def matvec_overlap(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Matrix-vector product with communication-computation overlap.
-        
-        This optimized version overlaps halo communication with computation:
-        1. Start async halo exchange
-        2. Compute interior part (rows that don't depend on halo)
-        3. Wait for halo exchange to complete
-        4. Compute boundary part (rows that depend on halo)
-        5. Combine results
-        
-        Note: This is only beneficial in true distributed settings where
-        there is actual network latency to hide. In single-process mode,
-        this falls back to regular matvec.
-        
+        Matrix-vector product with optional communication-computation overlap.
+
+        The overlap path issues an async halo exchange, runs the interior SpMV
+        (rows independent of halo) while comm is in flight, then waits and runs
+        the boundary SpMV. Whether overlap actually wins depends on the ratio
+        of comm time to host-side P2P setup overhead, which varies wildly with
+        interconnect (NVLink vs PCIe vs Ethernet), problem size, and number of
+        ranks. To stay honest we **auto-calibrate** on first use: time both the
+        overlap path and the plain halo+matvec sequential path a few times,
+        cache the faster choice, and dispatch to it for subsequent calls.
+
         Parameters
         ----------
         x : torch.Tensor
             Local vector [num_local]
-            
+
         Returns
         -------
         y : torch.Tensor
@@ -737,37 +735,105 @@ class DSparseMatrix:
         """
         # In single-process mode, overlap has overhead with no benefit
         if not DIST_AVAILABLE or not dist.is_initialized():
-            self.halo_exchange(x)
-            return self.matvec(x, exchange_halo=False)
-        
+            return self._matvec_sequential(x)
+
         # Build interior/boundary decomposition if not cached
         if not hasattr(self, '_interior_csr') or self._interior_csr is None:
             self._build_interior_boundary_decomposition()
-        
-        # Check if overlap is worthwhile (need significant interior portion)
+
+        # Not enough interior work to justify overlap overhead — static fallback
         if self._overlap_stats.get('interior_ratio', 0) < 0.1:
-            # Not enough interior work to justify overlap overhead
-            self.halo_exchange(x)
-            return self.matvec(x, exchange_halo=False)
-        
-        # Start async halo exchange
+            return self._matvec_sequential(x)
+
+        # Dynamic fallback: time both paths once, then use the faster one. The
+        # decision is cached per-matrix; if matrix values change call
+        # _invalidate_cache() (which also clears _overlap_decision).
+        if getattr(self, '_overlap_decision', None) is None:
+            self._calibrate_overlap_vs_sequential(x)
+
+        if self._overlap_decision == 'sequential':
+            return self._matvec_sequential(x)
+        return self._matvec_overlap_path(x)
+
+    def _matvec_sequential(self, x: torch.Tensor) -> torch.Tensor:
+        """Plain halo_exchange + local matvec (no overlap)."""
+        self.halo_exchange(x)
+        return self.matvec(x, exchange_halo=False)
+
+    def _matvec_overlap_path(self, x: torch.Tensor) -> torch.Tensor:
+        """Async halo + interior SpMV + wait + boundary SpMV (overlap path)."""
+        # NVTX ranges make the phases visible in Nsight Systems so we can
+        # verify whether async halo P2P actually runs concurrent with the
+        # interior SpMV on the GPU timeline.
+        nvtx = torch.cuda.nvtx
+
+        nvtx.range_push("matvec_overlap.halo_async_start")
         comm_handle = self.halo_exchange_async(x)
-        
-        # Compute interior part while communication is in progress
-        # y_interior = A_interior @ x (only uses owned nodes, no halo)
+        nvtx.range_pop()
+
+        nvtx.range_push("matvec_overlap.interior_spmv")
         y = torch.zeros(self.num_local, dtype=x.dtype, device=self.device)
         if self._interior_csr is not None and self._interior_csr._nnz() > 0:
             y.add_(torch.mv(self._interior_csr, x))
-        
-        # Wait for halo exchange to complete
+        nvtx.range_pop()
+
+        nvtx.range_push("matvec_overlap.halo_wait")
         if comm_handle is not None:
             self._wait_halo_exchange(comm_handle, x)
-        
-        # Compute boundary part (needs halo values)
+        nvtx.range_pop()
+
+        nvtx.range_push("matvec_overlap.boundary_spmv")
         if self._boundary_csr is not None and self._boundary_csr._nnz() > 0:
             y.add_(torch.mv(self._boundary_csr, x))
-        
+        nvtx.range_pop()
+
         return y
+
+    def _calibrate_overlap_vs_sequential(self, x: torch.Tensor, n_iters: int = 5) -> None:
+        """
+        Time the overlap and sequential matvec paths on this matrix and cache
+        the faster one in ``self._overlap_decision`` ('overlap' or 'sequential').
+
+        We measure wall-clock per path with a sync+barrier on each side so the
+        timing reflects the full GPU+host cost. Profiling on A100 PCIe showed
+        ``dist.batch_isend_irecv`` carries ~2.5 ms host overhead per call,
+        which can dwarf the actual halo transfer; on faster interconnects
+        (NVLink, IB) the overlap path can win by a meaningful margin. The
+        right answer is therefore hardware-dependent and best measured.
+        """
+        import time
+        # Warm both paths once so we don't bill JIT / lazy-init into the timing
+        _ = self._matvec_overlap_path(x)
+        _ = self._matvec_sequential(x)
+        if x.is_cuda:
+            torch.cuda.synchronize(self.device)
+        if dist.is_initialized():
+            dist.barrier()
+
+        def _time_path(fn):
+            if x.is_cuda:
+                torch.cuda.synchronize(self.device)
+            if dist.is_initialized():
+                dist.barrier()
+            t0 = time.perf_counter()
+            for _ in range(n_iters):
+                _ = fn(x)
+            if x.is_cuda:
+                torch.cuda.synchronize(self.device)
+            if dist.is_initialized():
+                dist.barrier()
+            return (time.perf_counter() - t0) / n_iters
+
+        t_overlap = _time_path(self._matvec_overlap_path)
+        t_seq = _time_path(self._matvec_sequential)
+
+        self._overlap_decision = 'overlap' if t_overlap < t_seq else 'sequential'
+        # Stash the timings so callers / debuggers can inspect why
+        if not hasattr(self, '_overlap_stats') or self._overlap_stats is None:
+            self._overlap_stats = {}
+        self._overlap_stats['calibrated_overlap_ms'] = t_overlap * 1e3
+        self._overlap_stats['calibrated_sequential_ms'] = t_seq * 1e3
+        self._overlap_stats['calibrated_decision'] = self._overlap_decision
     
     def _build_interior_boundary_decomposition(self):
         """
@@ -962,6 +1028,9 @@ class DSparseMatrix:
         self._diag_cache = None
         self._diag_inv_cache = None
         self._owned_block_csr = None
+        self._interior_csr = None
+        self._boundary_csr = None
+        self._overlap_decision = None
         self._send_buffers_cache = {}
         self._recv_buffers_cache = {}
         self._send_indices_cached = {}
