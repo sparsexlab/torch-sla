@@ -963,33 +963,21 @@ def pcg_solve_optimized(
 
     Optimizations:
     - Cached CSR matrix (no repeated COO->CSR conversion)
-    - **All vector buffers pre-allocated; updates done in-place** (``add_``,
-      ``mul_``, ``torch.mul(..., out=...)``) so the only n-sized allocation
-      per iter is the ``A @ p`` result that PyTorch sparse mv produces (no
-      ``out=`` exposed). Cuts peak memory from ~10x to ~2x the minimum
-      working set on large problems.
-    - Two ``.item()`` syncs per iter (alpha, beta scalars) so ``add_/mul_``
-      can take a Python float. The sync overhead (~10-30 us each) is
-      dwarfed on large problems by what is saved in allocation churn.
+    - **Pre-allocated buffers + in-place updates** (``addcmul_``, ``mul_``,
+      ``.copy_``) so the only n-sized allocation per iter is the ``A @ p``
+      result (PyTorch sparse mv exposes no ``out=``). The preconditioned
+      residual ``z`` is reused via ``z.copy_(preconditioner(r))``.
+    - Sync-free ``alpha`` / ``beta`` as 0-d GPU tensors fed to
+      ``addcmul_``/``mul_`` (avoids the ``.item()`` -> Python scalar host
+      sync per iter).
     - Only checks convergence every ``check_interval`` iterations.
     """
     device = A.device
     dtype = A.dtype
     n = A.n
 
-    # When no preconditioner is given, inline the default Jacobi so we can
-    # fuse ``D_inv * r`` into a pre-allocated z buffer with ``out=``. Custom
-    # preconditioners go through the callable path (which may allocate).
-    use_inline_jacobi = preconditioner is None
-    D_inv = None
-    if use_inline_jacobi:
-        diag = A.diagonal
-        if dtype.is_floating_point:
-            eps_val = torch.finfo(dtype).eps * 100
-        else:  # complex
-            eps_val = torch.finfo(torch.float64).eps * 100
-        ones = torch.ones_like(diag)
-        D_inv = 1.0 / torch.where(diag.abs() > eps_val, diag, ones)
+    if preconditioner is None:
+        preconditioner = jacobi_preconditioner(A)
 
     # Initial residual
     if x0 is None:
@@ -1001,10 +989,7 @@ def pcg_solve_optimized(
 
     # Pre-allocate the preconditioned-residual buffer z (reused every iter).
     z = torch.empty_like(r)
-    if use_inline_jacobi:
-        torch.mul(D_inv, r, out=z)
-    else:
-        z.copy_(preconditioner(r))
+    z.copy_(preconditioner(r))
     p = z.clone()
     rz_old = torch.vdot(r, z)
 
@@ -1039,10 +1024,7 @@ def pcg_solve_optimized(
                 return SolveResult(x, i + 1, residual_sq.sqrt().item(), True)
 
         # Preconditioned residual -- in-place into pre-allocated z buffer
-        if use_inline_jacobi:
-            torch.mul(D_inv, r, out=z)
-        else:
-            z.copy_(preconditioner(r))
+        z.copy_(preconditioner(r))
 
         rz_new = torch.vdot(r, z)
         beta = rz_new / rz_old  # 0-d tensor, stays on GPU
