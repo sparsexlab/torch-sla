@@ -1319,6 +1319,45 @@ class SparseTensor:
             verbose=verbose
         )
     
+    def detect_matrix_type(self) -> str:
+        """Detect the most specialised cuDSS matrix-type label for ``self``.
+
+        Returns one of ``"general"``, ``"symmetric"``, ``"spd"``,
+        ``"hermitian"``, ``"hpd"``. Used by ``solve(..., matrix_type="auto")``
+        on the cuDSS backend to pick the cheapest factorisation
+        (Cholesky / LDL^H) the matrix supports.
+
+        The underlying test is conservative -- the positive-definiteness
+        check is Gershgorin-based, which is sufficient but not
+        necessary. A truly SPD/HPD matrix that is not strictly
+        diagonally dominant may report as plain symmetric/hermitian;
+        this is safe (cuDSS will simply use the slightly more
+        expensive indefinite factorisation).
+
+        Returns
+        -------
+        str
+            ``"general"`` | ``"symmetric"`` | ``"spd"`` |
+            ``"hermitian"`` | ``"hpd"``.
+
+        Raises
+        ------
+        ValueError
+            If called on a batched or block-sparse tensor; matrix-type
+            classification is only defined for a single 2-D matrix.
+        """
+        if self.is_batched or len(self.block_shape) > 0:
+            raise ValueError(
+                "detect_matrix_type() only supports a non-batched, "
+                "non-block-sparse 2-D matrix; got "
+                f"is_batched={self.is_batched}, "
+                f"block_shape={self.block_shape}."
+            )
+        from .backends.nvmath_backend import detect_matrix_type as _impl
+        return _impl(
+            self.values, self.row_indices, self.col_indices, self.sparse_shape
+        )
+
     def T(self) -> "SparseTensor":
         """
         Transpose the sparse dimensions.
