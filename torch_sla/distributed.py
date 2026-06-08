@@ -712,24 +712,22 @@ class DSparseMatrix:
     
     def matvec_overlap(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Matrix-vector product with communication-computation overlap.
-        
-        This optimized version overlaps halo communication with computation:
-        1. Start async halo exchange
-        2. Compute interior part (rows that don't depend on halo)
-        3. Wait for halo exchange to complete
-        4. Compute boundary part (rows that depend on halo)
-        5. Combine results
-        
-        Note: This is only beneficial in true distributed settings where
-        there is actual network latency to hide. In single-process mode,
-        this falls back to regular matvec.
-        
+        Matrix-vector product with optional communication-computation overlap.
+
+        The overlap path issues an async halo exchange, runs the interior SpMV
+        (rows independent of halo) while comm is in flight, then waits and runs
+        the boundary SpMV. Whether overlap actually wins depends on the ratio
+        of comm time to host-side P2P setup overhead, which varies wildly with
+        interconnect (NVLink vs PCIe vs Ethernet), problem size, and number of
+        ranks. To stay honest we **auto-calibrate** on first use: time both the
+        overlap path and the plain halo+matvec sequential path a few times,
+        cache the faster choice, and dispatch to it for subsequent calls.
+
         Parameters
         ----------
         x : torch.Tensor
             Local vector [num_local]
-            
+
         Returns
         -------
         y : torch.Tensor
@@ -737,37 +735,105 @@ class DSparseMatrix:
         """
         # In single-process mode, overlap has overhead with no benefit
         if not DIST_AVAILABLE or not dist.is_initialized():
-            self.halo_exchange(x)
-            return self.matvec(x, exchange_halo=False)
-        
+            return self._matvec_sequential(x)
+
         # Build interior/boundary decomposition if not cached
         if not hasattr(self, '_interior_csr') or self._interior_csr is None:
             self._build_interior_boundary_decomposition()
-        
-        # Check if overlap is worthwhile (need significant interior portion)
+
+        # Not enough interior work to justify overlap overhead — static fallback
         if self._overlap_stats.get('interior_ratio', 0) < 0.1:
-            # Not enough interior work to justify overlap overhead
-            self.halo_exchange(x)
-            return self.matvec(x, exchange_halo=False)
-        
-        # Start async halo exchange
+            return self._matvec_sequential(x)
+
+        # Dynamic fallback: time both paths once, then use the faster one. The
+        # decision is cached per-matrix; if matrix values change call
+        # _invalidate_cache() (which also clears _overlap_decision).
+        if getattr(self, '_overlap_decision', None) is None:
+            self._calibrate_overlap_vs_sequential(x)
+
+        if self._overlap_decision == 'sequential':
+            return self._matvec_sequential(x)
+        return self._matvec_overlap_path(x)
+
+    def _matvec_sequential(self, x: torch.Tensor) -> torch.Tensor:
+        """Plain halo_exchange + local matvec (no overlap)."""
+        self.halo_exchange(x)
+        return self.matvec(x, exchange_halo=False)
+
+    def _matvec_overlap_path(self, x: torch.Tensor) -> torch.Tensor:
+        """Async halo + interior SpMV + wait + boundary SpMV (overlap path)."""
+        # NVTX ranges make the phases visible in Nsight Systems so we can
+        # verify whether async halo P2P actually runs concurrent with the
+        # interior SpMV on the GPU timeline.
+        nvtx = torch.cuda.nvtx
+
+        nvtx.range_push("matvec_overlap.halo_async_start")
         comm_handle = self.halo_exchange_async(x)
-        
-        # Compute interior part while communication is in progress
-        # y_interior = A_interior @ x (only uses owned nodes, no halo)
+        nvtx.range_pop()
+
+        nvtx.range_push("matvec_overlap.interior_spmv")
         y = torch.zeros(self.num_local, dtype=x.dtype, device=self.device)
         if self._interior_csr is not None and self._interior_csr._nnz() > 0:
             y.add_(torch.mv(self._interior_csr, x))
-        
-        # Wait for halo exchange to complete
+        nvtx.range_pop()
+
+        nvtx.range_push("matvec_overlap.halo_wait")
         if comm_handle is not None:
             self._wait_halo_exchange(comm_handle, x)
-        
-        # Compute boundary part (needs halo values)
+        nvtx.range_pop()
+
+        nvtx.range_push("matvec_overlap.boundary_spmv")
         if self._boundary_csr is not None and self._boundary_csr._nnz() > 0:
             y.add_(torch.mv(self._boundary_csr, x))
-        
+        nvtx.range_pop()
+
         return y
+
+    def _calibrate_overlap_vs_sequential(self, x: torch.Tensor, n_iters: int = 5) -> None:
+        """
+        Time the overlap and sequential matvec paths on this matrix and cache
+        the faster one in ``self._overlap_decision`` ('overlap' or 'sequential').
+
+        We measure wall-clock per path with a sync+barrier on each side so the
+        timing reflects the full GPU+host cost. Profiling on A100 PCIe showed
+        ``dist.batch_isend_irecv`` carries ~2.5 ms host overhead per call,
+        which can dwarf the actual halo transfer; on faster interconnects
+        (NVLink, IB) the overlap path can win by a meaningful margin. The
+        right answer is therefore hardware-dependent and best measured.
+        """
+        import time
+        # Warm both paths once so we don't bill JIT / lazy-init into the timing
+        _ = self._matvec_overlap_path(x)
+        _ = self._matvec_sequential(x)
+        if x.is_cuda:
+            torch.cuda.synchronize(self.device)
+        if dist.is_initialized():
+            dist.barrier()
+
+        def _time_path(fn):
+            if x.is_cuda:
+                torch.cuda.synchronize(self.device)
+            if dist.is_initialized():
+                dist.barrier()
+            t0 = time.perf_counter()
+            for _ in range(n_iters):
+                _ = fn(x)
+            if x.is_cuda:
+                torch.cuda.synchronize(self.device)
+            if dist.is_initialized():
+                dist.barrier()
+            return (time.perf_counter() - t0) / n_iters
+
+        t_overlap = _time_path(self._matvec_overlap_path)
+        t_seq = _time_path(self._matvec_sequential)
+
+        self._overlap_decision = 'overlap' if t_overlap < t_seq else 'sequential'
+        # Stash the timings so callers / debuggers can inspect why
+        if not hasattr(self, '_overlap_stats') or self._overlap_stats is None:
+            self._overlap_stats = {}
+        self._overlap_stats['calibrated_overlap_ms'] = t_overlap * 1e3
+        self._overlap_stats['calibrated_sequential_ms'] = t_seq * 1e3
+        self._overlap_stats['calibrated_decision'] = self._overlap_decision
     
     def _build_interior_boundary_decomposition(self):
         """
@@ -846,13 +912,14 @@ class DSparseMatrix:
         if not DIST_AVAILABLE or not dist.is_initialized():
             return None
         
-        backend = dist.get_backend()
-        
-        # NCCL doesn't support true async in the same way, use streams
-        if backend == 'nccl' and x.is_cuda:
-            return self._halo_exchange_cuda_async(x)
-        else:
-            return self._halo_exchange_gloo_async(x)
+        # Use async point-to-point (isend/irecv) for ALL backends, including
+        # NCCL. The previous NCCL branch (_halo_exchange_cuda_async) issued
+        # *blocking* dist.send/dist.recv on a side CUDA stream -- those block
+        # the host thread until the transfer completes, so they do NOT overlap
+        # with the interior compute (the whole point of matvec_overlap). NCCL
+        # supports isend/irecv as genuine async work handles, so the unified
+        # path below actually overlaps communication with computation.
+        return self._halo_exchange_async_p2p(x)
     
     def _halo_exchange_cuda_async(self, x: torch.Tensor):
         """Async halo exchange using CUDA streams."""
@@ -889,11 +956,20 @@ class DSparseMatrix:
         
         return {'type': 'cuda', 'stream': self._comm_stream, 'recv_buffers': recv_buffers}
     
-    def _halo_exchange_gloo_async(self, x: torch.Tensor):
-        """Async halo exchange using Gloo isend/irecv."""
+    def _halo_exchange_async_p2p(self, x: torch.Tensor):
+        """Async halo exchange via non-blocking P2P (gloo and NCCL).
+
+        Uses ``dist.batch_isend_irecv`` so NCCL groups the sends and receives
+        into one P2P transaction. A naive isend/irecv loop deadlocks on NCCL
+        once payloads grow past a few KB: both ranks post isend first and
+        then irecv, so the NCCL stream is blocked waiting on the peer's irecv
+        which has not yet been issued. batch_isend_irecv lets NCCL pair the
+        ops correctly and is also the only form that genuinely overlaps with
+        compute on NCCL.
+        """
         send_buffers = self._get_send_buffers(x.dtype)
         recv_buffers = self._get_recv_buffers(x.dtype)
-        
+
         # Fill send buffers
         for neighbor_id in self.partition.neighbor_partitions:
             send_idx = self._send_indices_cached.get(neighbor_id)
@@ -901,15 +977,15 @@ class DSparseMatrix:
                 send_idx = self.partition.send_indices[neighbor_id].to(self.device)
                 self._send_indices_cached[neighbor_id] = send_idx
             send_buffers[neighbor_id].copy_(x[send_idx])
-        
-        # Start async communication
-        requests = []
+
+        # Build a single grouped P2P transaction for all neighbors
+        ops = []
         for neighbor_id in self.partition.neighbor_partitions:
-            req = dist.isend(send_buffers[neighbor_id], dst=neighbor_id)
-            requests.append(req)
-            req = dist.irecv(recv_buffers[neighbor_id], src=neighbor_id)
-            requests.append(req)
-        
+            ops.append(dist.P2POp(dist.isend, send_buffers[neighbor_id], neighbor_id))
+            ops.append(dist.P2POp(dist.irecv, recv_buffers[neighbor_id], neighbor_id))
+
+        requests = dist.batch_isend_irecv(ops) if ops else []
+
         return {'type': 'gloo', 'requests': requests, 'recv_buffers': recv_buffers}
     
     def _wait_halo_exchange(self, handle, x: torch.Tensor):
@@ -951,6 +1027,10 @@ class DSparseMatrix:
         self._csr_cache = None
         self._diag_cache = None
         self._diag_inv_cache = None
+        self._owned_block_csr = None
+        self._interior_csr = None
+        self._boundary_csr = None
+        self._overlap_decision = None
         self._send_buffers_cache = {}
         self._recv_buffers_cache = {}
         self._send_indices_cached = {}
@@ -1014,6 +1094,28 @@ class DSparseMatrix:
                 torch.zeros_like(diag)
             )
         return self._diag_inv_cache
+
+    def _get_owned_block_csr(self) -> Optional[torch.Tensor]:
+        """
+        Cached CSR of the owned diagonal block A_oo (owned x owned).
+
+        This is the local subdomain operator (no halo coupling) used by the
+        block-Jacobi / additive-Schwarz preconditioner. Returns None if the
+        owned block has no entries.
+        """
+        if not hasattr(self, '_owned_block_csr') or self._owned_block_csr is None:
+            no = self.num_owned
+            mask = (self.local_row < no) & (self.local_col < no)
+            if not bool(mask.any()):
+                self._owned_block_csr = None
+                return None
+            idx = torch.stack([self.local_row[mask], self.local_col[mask]], dim=0)
+            coo = torch.sparse_coo_tensor(
+                idx, self.local_values[mask], (no, no),
+                device=self.device, dtype=self.local_values.dtype,
+            )
+            self._owned_block_csr = coo.to_sparse_csr()
+        return self._owned_block_csr
     
     def solve(
         self,
@@ -1433,20 +1535,35 @@ class DSparseMatrix:
     def _local_solve_approx(
         self,
         b_owned: torch.Tensor,
-        maxiter: int = 5
+        maxiter: int = 5,
+        omega: float = 0.8,
     ) -> torch.Tensor:
         """
-        Approximate local solve for block-Jacobi preconditioner.
-        Uses few iterations of Jacobi or CG.
+        Approximate local solve A_oo x ~= b_owned for the block-Jacobi
+        (restricted additive Schwarz) preconditioner.
+
+        Runs ``maxiter`` damped-Jacobi sweeps on the *owned diagonal block*:
+
+            x_{k+1} = x_k + omega * D_oo^{-1} (b_owned - A_oo @ x_k)
+
+        This is a fixed *linear* operator (so it is a valid CG preconditioner,
+        unlike inner CG), needs no halo exchange (owned block only), and uses
+        the local off-diagonal coupling -- so it is genuinely stronger than a
+        single diagonal Jacobi step. Pure PyTorch, works on CPU and CUDA.
         """
         D_inv = self._get_diagonal_inv()[:self.num_owned]
-        x = torch.zeros_like(b_owned)
-        
-        # Simple Jacobi iterations (fast, no halo exchange needed)
-        for _ in range(maxiter):
-            # Only use diagonal part for approximate solve
-            x = D_inv * b_owned
-        
+        A_oo = self._get_owned_block_csr()
+
+        # First sweep from x0 = 0 is just the damped diagonal solve.
+        x = omega * D_inv * b_owned
+        if A_oo is None:
+            return x
+
+        for _ in range(maxiter - 1):
+            # residual on the owned block, then damped diagonal correction
+            r = b_owned - torch.mv(A_oo, x)
+            x = x + omega * D_inv * r
+
         return x
     
     def _apply_ssor(self, r: torch.Tensor, omega: float = 1.5) -> torch.Tensor:
