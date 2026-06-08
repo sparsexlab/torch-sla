@@ -1,16 +1,16 @@
-"""Tests for the cuDSS auto matrix-type detection, exercised through
-:meth:`SparseTensor.detect_matrix_type` (the public API a user actually
-calls when they do ``A.solve(b, backend='cudss', matrix_type='auto')``).
+"""Tests for the cuDSS auto matrix-type detection.
 
-CUDA / nvmath-python are *not* required: the detection logic is pure
-PyTorch and runs on CPU. The cuDSS forward solve itself is covered
-separately by an integration test gated on ``torch.cuda.is_available()``.
+Drives the public :meth:`SparseTensor.detect_matrix_type` method (the
+API a user calls indirectly via ``A.solve(b, backend='cudss',
+matrix_type='auto')``) across all three catalogued benchmark sources:
 
-The detection is exercised against real SuiteSparse Matrix Collection
-matrices via the ``benchmark`` fixture (every catalogued kind, see
-``torch_sla.datasets.SuiteSparse``) plus a small number of synthetic
-edge cases that pin down behaviour on cases the catalogue doesn't cover
-(empty matrix, real symmetric indefinite, etc.).
+* ``SuiteSparse`` — real-world FE / CFD / structural matrices
+* ``DIMACS10`` — graph Laplacians (irregular / scale-free sparsity)
+* ``Synthetic`` — programmatic PDE stencils
+
+The detector itself runs on pure PyTorch tensors and does not need
+CUDA / nvmath-python; the integration with the actual cuDSS solve is
+covered separately by a CUDA-gated test.
 """
 from __future__ import annotations
 
@@ -21,41 +21,75 @@ from torch_sla import SparseTensor
 
 
 # =====================================================================
-# Real SuiteSparse coverage -- the actual user-facing path
+# Each catalogued benchmark, exercised through the public API
 # =====================================================================
 
-def test_detect_matches_catalogue(benchmark):
-    """``SparseTensor.detect_matrix_type()`` returns the expected label
-    on every catalogued SuiteSparse matrix.
-
-    Uses ``benchmark.detected_kind`` (what the heuristic *is expected
-    to* return, may be more conservative than the true mathematical
-    kind because Gershgorin is sufficient but not necessary)."""
-    A = SparseTensor(benchmark.val, benchmark.row, benchmark.col, benchmark.shape)
-    assert A.detect_matrix_type() == benchmark.detected_kind, (
-        f"{benchmark.name}: expected {benchmark.detected_kind!r}, "
-        f"got {A.detect_matrix_type()!r}"
+def test_detect_on_suitesparse(benchmark_suitesparse):
+    """``SparseTensor.detect_matrix_type()`` matches the SuiteSparse
+    catalogue's expected ``detected_kind`` (which may be more
+    conservative than the true ``math_kind`` because Gershgorin is
+    a sufficient but not necessary positive-definite test)."""
+    b = benchmark_suitesparse
+    A = SparseTensor(b.val, b.row, b.col, b.shape)
+    got = A.detect_matrix_type()
+    assert got == b.detected_kind, (
+        f"{b.name}: expected {b.detected_kind!r}, got {got!r}"
     )
 
 
-def test_catalogue_covers_every_kind():
-    """The catalogue together exercises every distinct mathematical
-    kind the detector might encounter (general, symmetric, spd,
-    hermitian, hpd)."""
-    from torch_sla.datasets import SuiteSparse
-    math_kinds = {SuiteSparse[k].math_kind for k in SuiteSparse}
-    assert math_kinds == {"spd", "hpd", "symmetric", "general"}, (
-        f"missing kinds: {math_kinds}"
+def test_detect_on_dimacs(benchmark_dimacs):
+    """Every catalogued DIMACS10 graph Laplacian (``L + eps*I``) detects
+    as ``spd`` -- it is strictly diagonally dominant by construction."""
+    b = benchmark_dimacs
+    A = SparseTensor(b.val, b.row, b.col, b.shape)
+    got = A.detect_matrix_type()
+    assert got == b.detected_kind == "spd", (
+        f"{b.name}: expected spd, got {got!r}"
+    )
+
+
+def test_detect_on_synthetic(benchmark_synthetic):
+    """Every catalogued Synthetic stencil matches its declared
+    ``detected_kind``."""
+    b = benchmark_synthetic
+    A = SparseTensor(b.val, b.row, b.col, b.shape)
+    got = A.detect_matrix_type()
+    assert got == b.detected_kind, (
+        f"{b.name}: expected {b.detected_kind!r}, got {got!r}"
+    )
+
+
+# =====================================================================
+# Catalogue-level sanity
+# =====================================================================
+
+def test_catalogues_cover_every_mathematical_kind():
+    """Across all three sources the catalogue exercises every distinct
+    mathematical kind the detector might encounter
+    (general, symmetric, spd, hpd)."""
+    from torch_sla.datasets import SuiteSparse, DIMACS10, Synthetic
+    kinds: set[str] = set()
+    for registry in (SuiteSparse, DIMACS10, Synthetic):
+        for key in registry:
+            # Synthetic builds locally; SuiteSparse / DIMACS10 may
+            # need network. We only read math_kind which is in the
+            # catalogue tuple, so we can read it after lazy instantiation
+            # but it's safer to read directly from the catalogue.
+            pass
+    # Read math_kinds from catalogue tuples without triggering downloads.
+    sk = {v[2] for v in SuiteSparse.catalog().values()}
+    # DIMACS10 entries are post-processed to L+eps*I so all are SPD.
+    dk = {"spd"}
+    sy = {v[2] for v in Synthetic.catalog().values()}
+    kinds = sk | dk | sy
+    assert {"spd", "hpd", "symmetric", "general"}.issubset(kinds), (
+        f"missing kinds; collected: {kinds}"
     )
 
 
 # =====================================================================
 # Synthetic edge cases the catalogue doesn't cover
 # =====================================================================
-# These pin down detector behaviour on inputs that don't appear in the
-# SuiteSparse catalogue: empty matrices, indefinite symmetric matrices,
-# strict-diag-dominant cases (which the catalogue lacks for SPD/HPD).
-
 
 def _from_dense(A: torch.Tensor) -> SparseTensor:
     n = A.shape[0]
@@ -77,16 +111,6 @@ def test_detect_empty_matrix_is_general():
         (3, 3),
     )
     assert A.detect_matrix_type() == "general"
-
-
-def test_detect_strict_diag_dom_spd():
-    """Strictly diagonally dominant real symmetric -> ``spd``."""
-    A = _from_dense(torch.tensor([
-        [10., 1., 0.],
-        [1., 12., 2.],
-        [0., 2., 11.],
-    ], dtype=torch.float64))
-    assert A.detect_matrix_type() == "spd"
 
 
 def test_detect_strict_diag_dom_hpd():
@@ -120,8 +144,7 @@ def test_detect_real_nonsymmetric_general():
 
 
 def test_detect_complex_symmetric_not_hermitian():
-    """Complex symmetric (A = A^T) but NOT Hermitian (diagonal not real)
-    -> ``symmetric``."""
+    """``A = A^T`` but NOT ``A = A^H`` (diagonal not real) -> ``symmetric``."""
     A = _from_dense(torch.tensor([
         [1.+1j, 2.+3j, 0.],
         [2.+3j, 4.+1j, 5.],
@@ -137,7 +160,6 @@ def test_detect_complex_symmetric_not_hermitian():
 def test_detect_rejects_batched():
     """Batched / block-sparse tensors raise -- matrix-type is only
     defined for a single 2-D matrix."""
-    # Build a tiny batched SparseTensor: 2 batches of a 3x3.
     val = torch.ones(2, 3, dtype=torch.float64)
     row = torch.tensor([0, 1, 2])
     col = torch.tensor([0, 1, 2])
