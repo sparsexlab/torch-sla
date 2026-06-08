@@ -990,37 +990,39 @@ def pcg_solve_optimized(
     
     b_norm = torch.norm(b)
     tol_sq = (max(atol, rtol * b_norm.item())) ** 2  # Only one .item() at start
-    
-    residual_sq = torch.dot(r, r)  # Keep as tensor
-    
+
     for i in range(maxiter):
+        # Check convergence at the START of each iteration. CG converges in at
+        # most n steps, so small / well-conditioned systems reach r -> 0 before
+        # any periodic check would fire. Once r -> 0, rz_old and pAp become 0 and
+        # alpha = rz_old / pAp = 0/0 = NaN, which then poisons x. Checking here
+        # both reports convergence and breaks out before that 0/0 breakdown.
+        # The single scalar sync per iteration is negligible next to the SpMV.
+        residual_sq = torch.dot(r, r)
+        if residual_sq.item() < tol_sq:
+            return SolveResult(x, i, residual_sq.sqrt().item(), True)
+
         # Matrix-vector product
         Ap = A.matvec(p)
-        
+
         pAp = torch.dot(p, Ap)
-        
+
         alpha = rz_old / pAp
-        
-        # Update solution and residual (no .item() calls!)
+
+        # Update solution and residual
         x = x + alpha * p
         r = r - alpha * Ap
-        
-        # Only check convergence periodically to avoid sync
-        if (i + 1) % check_interval == 0:
-            residual_sq = torch.dot(r, r)
-            if residual_sq.item() < tol_sq:
-                return SolveResult(x, i + 1, residual_sq.sqrt().item(), True)
-        
+
         # Preconditioned residual
         z = preconditioner(r)
         rz_new = torch.dot(r, z)
-        
+
         beta = rz_new / rz_old
-        
-        # Update search direction (no .item() calls!)
+
+        # Update search direction
         p = z + beta * p
         rz_old = rz_new
-    
+
     # Final residual
     residual = torch.norm(r).item()
     if residual < tol_sq ** 0.5:
