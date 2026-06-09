@@ -97,20 +97,27 @@ def _ensure_downloaded(group: str, name: str) -> str:
     )
 
 
-def _load_as_triple(path: str, *, dtype) -> Tuple[torch.Tensor, torch.Tensor,
-                                                  torch.Tensor, Tuple[int, int]]:
-    A = mmread(path).tocoo()
+def _scipy_to_triple(
+    A: "str | sp.spmatrix",
+    *,
+    dtype: Optional[np.dtype] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Tuple[int, int]]:
+    """Convert a scipy sparse matrix (or a path to a Matrix Market file) to
+    a ``(val, row, col, shape)`` COO triple of torch tensors.
+
+    Parameters
+    ----------
+    A : str or scipy.sparse.spmatrix
+        Either a ``.mtx`` path (loaded via :func:`scipy.io.mmread`) or an
+        already-built scipy sparse matrix.
+    dtype : numpy dtype, optional
+        If given, the values are cast to this dtype before conversion.
+    """
+    if isinstance(A, str):
+        A = mmread(A)
+    A = A.tocoo()
     if dtype is not None:
         A = A.astype(dtype)
-    val = torch.from_numpy(A.data)
-    row = torch.from_numpy(A.row.astype(np.int64))
-    col = torch.from_numpy(A.col.astype(np.int64))
-    return val, row, col, (A.shape[0], A.shape[1])
-
-
-def _scipy_to_triple(A: sp.spmatrix) -> Tuple[torch.Tensor, torch.Tensor,
-                                              torch.Tensor, Tuple[int, int]]:
-    A = A.tocoo()
     val = torch.from_numpy(np.ascontiguousarray(A.data))
     row = torch.from_numpy(A.row.astype(np.int64))
     col = torch.from_numpy(A.col.astype(np.int64))
@@ -169,9 +176,9 @@ class _SuiteSparse(BenchmarkCollection):
                 f"{sorted(_SUITESPARSE_CATALOG)}"
             )
         group, name, math_kind, det_kind, _notes = _SUITESPARSE_CATALOG[key]
-        dt = np.complex128 if "complex" in key else np.float64
+        dt = np.complex128 if self.dtype_for(key).is_complex else np.float64
         path = _ensure_downloaded(group, name)
-        val, row, col, shape = _load_as_triple(path, dtype=dt)
+        val, row, col, shape = _scipy_to_triple(path, dtype=dt)
         bench = Benchmark(
             name=f"{group}/{name}",
             val=val, row=row, col=col, shape=shape,
@@ -188,6 +195,9 @@ class _SuiteSparse(BenchmarkCollection):
 
     def notes(self, key: str) -> str:
         return _SUITESPARSE_CATALOG[key][4]
+
+    def dtype_for(self, key: str) -> torch.dtype:
+        return torch.complex128 if "complex" in key else torch.float64
 
     def catalog(self) -> dict:
         return dict(_SUITESPARSE_CATALOG)
@@ -293,6 +303,10 @@ class _DIMACS10(BenchmarkCollection):
 
     def notes(self, key: str) -> str:
         return _DIMACS10_CATALOG[key][2]
+
+    def dtype_for(self, key: str) -> torch.dtype:
+        # Regularised Laplacians are always real.
+        return torch.float64
 
     def catalog(self) -> dict:
         return dict(_DIMACS10_CATALOG)
@@ -438,6 +452,12 @@ class _Synthetic(BenchmarkCollection):
 
     def notes(self, key: str) -> str:
         return _SYNTHETIC_CATALOG[key][4]
+
+    def dtype_for(self, key: str) -> torch.dtype:
+        # Currently only the Helmholtz stencil generates a complex matrix.
+        # When more complex builders are added, prefer a tuple-stored
+        # dtype over key-string matching.
+        return torch.complex128 if "helmholtz" in key else torch.float64
 
     def catalog(self) -> dict:
         return dict(_SYNTHETIC_CATALOG)
