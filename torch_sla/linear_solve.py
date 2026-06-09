@@ -51,6 +51,7 @@ from .backends import (
     is_pytorch_available,
     is_cupy_available,
     is_cudss_available,
+    is_pyamg_available,
     select_backend,
     select_method,
     BACKEND_METHODS,
@@ -93,6 +94,41 @@ class SparseLinearSolveScipySuperLU(Function):
         # makes the Wirtinger gradient correct.
         gradb = scipy_solve(torch.conj_physical(val), col, row, (shape[1], shape[0]), gradu,
                            method=method, atol=atol, maxiter=maxiter)
+        gradval = -gradb[row] * torch.conj_physical(u[col])
+        if gradval.dim() == 2:
+            gradval = gradval.sum(-1)
+        return gradval, None, None, None, gradb, None, None, None
+
+
+class SparseLinearSolvePyAMG(Function):
+    """PyAMG-hybrid standalone solver with gradient support.
+
+    Forward: build a multigrid hierarchy via PyAMG on CPU, run V-cycle
+    iterations on whatever device the inputs live on.  Backward: same
+    AMG hierarchy on the transpose (real symmetric -> reuse; complex
+    or non-symmetric -> rebuild on the conjugate transpose).
+    """
+
+    @staticmethod
+    def forward(ctx, val, row, col, shape, b, tol, maxiter, method):
+        from .backends.pyamg_backend import pyamg_solve
+        u = pyamg_solve(val, row, col, shape, b,
+                        tol=tol, maxiter=maxiter, method=method)
+        ctx.save_for_backward(val, row, col, u)
+        ctx.shape = shape
+        ctx.tol = tol
+        ctx.maxiter = maxiter
+        ctx.method = method
+        return u
+
+    @staticmethod
+    def backward(ctx, gradu):
+        from .backends.pyamg_backend import pyamg_solve
+        val, row, col, u = ctx.saved_tensors
+        shape = ctx.shape
+        gradb = pyamg_solve(torch.conj_physical(val), col, row,
+                            (shape[1], shape[0]), gradu,
+                            tol=ctx.tol, maxiter=ctx.maxiter, method=ctx.method)
         gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -591,8 +627,30 @@ def spsolve(
         rtol = 1e-10  # Relative tolerance (stricter for better accuracy)
         return SparseLinearSolvePyTorch.apply(val, row, col, shape, b, method, atol, rtol, maxiter, preconditioner, mixed_precision)
 
+    # ========================================================================
+    # PyAMG-hybrid backend (CPU setup + torch.sparse V-cycle; cross-platform)
+    # ========================================================================
+    elif backend == "pyamg":
+        if not is_pyamg_available():
+            raise RuntimeError(
+                "PyAMG backend is not available. Install with: pip install pyamg"
+            )
+        # PyAMG drives both the CPU coarsening setup and the V-cycle as a
+        # standalone iterative solver. ``method`` selects the AMG variant
+        # (Ruge-Stuben classical = default; smoothed_aggregation as a
+        # plug-in for unstructured / vector PDEs).
+        amg_method = "ruge_stuben" if method in ("auto", "amg",
+                                                 "ruge_stuben") else method
+        if amg_method == "sa":
+            amg_method = "smoothed_aggregation"
+        return SparseLinearSolvePyAMG.apply(val, row, col, shape, b,
+                                            atol, maxiter, amg_method)
+
     else:
-        raise ValueError(f"Unknown backend: {backend}. Available: scipy, eigen, pytorch, cupy, cudss")
+        raise ValueError(
+            f"Unknown backend: {backend}. "
+            f"Available: scipy, eigen, pytorch, cupy, cudss, pyamg"
+        )
 
 
 def spsolve_coo(A: torch.Tensor, b: torch.Tensor, **kwargs) -> torch.Tensor:
