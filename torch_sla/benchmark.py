@@ -1,19 +1,28 @@
 """Sparse-solve benchmarking utilities.
 
-Exposes the :class:`Benchmark` container that bundles a sparse matrix
-``A`` together with a list of ``(x_ref, b)`` test cases where
-``A @ x_ref == b`` by construction. Indexing yields a single case;
-``Benchmark.evaluate(solver, indices, metric)`` runs a user-supplied
-solver and returns the error against the stored reference.
+Exposes two pieces of API:
 
-Datasets such as :class:`torch_sla.datasets.SuiteSparse` return
-``Benchmark`` instances so plotting / regression code can iterate them
-uniformly without re-implementing case generation.
+* :class:`Benchmark` -- a container that bundles a sparse matrix ``A``
+  together with a list of ``(x_ref, b)`` test cases where
+  ``A @ x_ref == b`` by construction. Indexing yields a single case;
+  :meth:`Benchmark.evaluate` runs a user-supplied solver and returns
+  the error against the stored reference.
+
+* :class:`BenchmarkCollection` -- an abstract base for any lazy
+  ``Mapping[str, Benchmark]`` catalogue. The concrete catalogues live
+  in :mod:`torch_sla.datasets` (SuiteSparse / DIMACS10 / Synthetic) and
+  all subclass this ABC, so downstream code can type-annotate against
+  the common interface.
+
+A :func:`plot_errors` helper sits next to ``Benchmark`` for quick
+boxplot visualisation across multiple benchmarks.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple, Union
+import abc
+from collections.abc import Mapping
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -231,3 +240,49 @@ def plot_errors(
     ax.grid(True, axis="y", alpha=0.3)
     ax.tick_params(axis="x", rotation=30)
     return ax
+
+
+# ====================================================================== #
+# Abstract base for any benchmark catalogue
+# ====================================================================== #
+class BenchmarkCollection(Mapping, abc.ABC):
+    """Abstract base for a lazy ``Mapping[str, Benchmark]`` catalogue.
+
+    Subclasses store a *catalogue* (static dict of keys -> metadata),
+    and materialise individual :class:`Benchmark` instances on demand
+    via ``__getitem__``. Iterating / ``len()`` only touches the
+    catalogue, never the network -- expensive work happens lazily, per
+    accessed key.
+
+    A concrete subclass must implement:
+
+    * :attr:`source_name` -- human display label (e.g. ``"SuiteSparse"``)
+    * :meth:`catalog` -- returns the static catalogue dict
+    * :meth:`notes` -- a one-line description per key
+    * the standard :meth:`__getitem__` / :meth:`__iter__` / :meth:`__len__`
+      from ``Mapping``
+
+    Concrete subclasses live in :mod:`torch_sla.datasets` (the three
+    module-level singletons :data:`~torch_sla.datasets.SuiteSparse`,
+    :data:`~torch_sla.datasets.DIMACS10`,
+    :data:`~torch_sla.datasets.Synthetic`).
+    """
+
+    @property
+    @abc.abstractmethod
+    def source_name(self) -> str:
+        """Human-readable name of the matrix source, e.g. ``'SuiteSparse'``."""
+
+    @abc.abstractmethod
+    def catalog(self) -> Dict[str, Any]:
+        """Static catalogue (no network). Maps key -> raw metadata tuple."""
+
+    @abc.abstractmethod
+    def notes(self, key: str) -> str:
+        """One-line description of the benchmark with this key."""
+
+    def __repr__(self) -> str:
+        return f"{self.source_name}({len(self)} entries)"
+
+
+__all__ = ["Benchmark", "BenchmarkCollection", "plot_errors"]

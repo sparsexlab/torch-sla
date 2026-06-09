@@ -22,7 +22,6 @@ environment variable, defaulting to ``~/.cache/torch_sla/datasets``::
 
 from __future__ import annotations
 
-import abc
 import io as _io
 import os
 import tarfile
@@ -36,7 +35,7 @@ import scipy.sparse as sp
 import torch
 from scipy.io import mmread
 
-from .benchmark import Benchmark
+from .benchmark import Benchmark, BenchmarkCollection
 
 
 # ---------------------------------------------------------------------- #
@@ -60,48 +59,6 @@ class DatasetUnavailable(RuntimeError):
     Library code raises this rather than calling ``pytest.skip``; tests
     catch it and skip individually.
     """
-
-
-# ====================================================================== #
-# Abstract base for any benchmark catalogue
-# ====================================================================== #
-class BenchmarkCollection(Mapping, abc.ABC):
-    """Abstract base for a lazy ``Mapping[str, Benchmark]`` catalogue.
-
-    Subclasses store a *catalogue* (static dict of keys -> metadata
-    tuples), and materialise individual :class:`Benchmark` instances on
-    demand via ``__getitem__``. Iterating / ``len()`` only touches the
-    catalogue, never the network -- expensive work happens lazily, per
-    accessed key.
-
-    A concrete subclass must implement:
-
-    * :attr:`source_name` -- human display label (e.g. ``"SuiteSparse"``)
-    * :meth:`catalog` -- returns the static catalogue dict
-    * :meth:`notes` -- a one-line description per key
-    * the standard :meth:`__getitem__` / :meth:`__iter__` / :meth:`__len__`
-      from ``Mapping``
-
-    Concrete instances are exposed as module-level singletons
-    (:data:`SuiteSparse`, :data:`DIMACS10`, :data:`Synthetic`), and
-    collectively as the two-level :data:`Benchmarks` mapping.
-    """
-
-    @property
-    @abc.abstractmethod
-    def source_name(self) -> str:
-        """Human-readable name of the matrix source, e.g. ``'SuiteSparse'``."""
-
-    @abc.abstractmethod
-    def catalog(self) -> Dict[str, Any]:
-        """Static catalogue (no network). Maps key -> raw metadata tuple."""
-
-    @abc.abstractmethod
-    def notes(self, key: str) -> str:
-        """One-line description of the benchmark with this key."""
-
-    def __repr__(self) -> str:
-        return f"{self.source_name}({len(self)} entries)"
 
 
 # ====================================================================== #
@@ -571,7 +528,7 @@ def iter_benchmarks(
 
 
 __all__ = [
-    "Benchmarks", "BenchmarkCollection",
+    "Benchmarks",
     "SuiteSparse", "DIMACS10", "Synthetic",
     "DatasetUnavailable", "cache_dir", "iter_benchmarks",
     "poisson_2d", "poisson_3d", "anisotropic_2d",
