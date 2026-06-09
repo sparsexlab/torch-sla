@@ -20,7 +20,7 @@ test is skipped via :func:`pytest.skip` rather than failing -- so the
 library is air-gapped-CI friendly.
 
 Tests that genuinely want exhaustive coverage can iterate
-``torch_sla.datasets.all_benchmarks()`` directly.
+``torch_sla.datasets.iter_benchmarks()`` directly.
 """
 from __future__ import annotations
 
@@ -28,82 +28,82 @@ import pytest
 
 from torch_sla.benchmark import Benchmark
 from torch_sla.datasets import (
-    DIMACS10,
+    Benchmarks,
     DatasetUnavailable,
-    SuiteSparse,
     Synthetic,
 )
 
 
-def _get(registry, key: str) -> Benchmark:
+def _safe_get(source: str, key: str) -> Benchmark:
     try:
-        return registry[key]
+        return Benchmarks[source][key]
     except DatasetUnavailable as e:
-        pytest.skip(f"{key!r}: {e}")
+        pytest.skip(f"{source}:{key}: {e}")
 
 
 # ---------------------------------------------------------------------- #
 # By source
 # ---------------------------------------------------------------------- #
-@pytest.fixture(params=list(SuiteSparse.keys()))
+@pytest.fixture(params=list(Benchmarks["suitesparse"].keys()))
 def benchmark_suitesparse(request) -> Benchmark:
     """Each catalogued SuiteSparse matrix, one per test invocation.
 
     Needs network on first call; subsequent runs hit the cache.
     """
-    return _get(SuiteSparse, request.param)
+    return _safe_get("suitesparse", request.param)
 
 
-@pytest.fixture(params=list(DIMACS10.keys()))
+@pytest.fixture(params=list(Benchmarks["dimacs10"].keys()))
 def benchmark_dimacs(request) -> Benchmark:
     """Each catalogued DIMACS10 graph Laplacian.
 
     Downloaded from the SuiteSparse mirror (group ``DIMACS10``) and
     converted to ``L + eps*I`` so the solve target is SPD.
     """
-    return _get(DIMACS10, request.param)
+    return _safe_get("dimacs10", request.param)
 
 
-@pytest.fixture(params=list(Synthetic.keys()))
+@pytest.fixture(params=list(Benchmarks["synthetic"].keys()))
 def benchmark_synthetic(request) -> Benchmark:
     """Each Synthetic PDE stencil. No network required."""
-    return _get(Synthetic, request.param)
+    return _safe_get("synthetic", request.param)
 
 
 # ---------------------------------------------------------------------- #
-# By dtype (mix all three sources)
+# By dtype (mix all sources)
 # ---------------------------------------------------------------------- #
-# Hardcoded carve-out at the catalogue-key level, so we don't have to
+# Hardcoded carve-out at the catalogue-key level so we don't have to
 # instantiate every benchmark (which would trigger network downloads
-# during pytest collection) just to read its dtype.
-_COMPLEX_SUITESPARSE = {k for k in SuiteSparse if "complex" in k}
-_COMPLEX_SYNTHETIC = {k for k in Synthetic if "helmholtz" in k}
+# during pytest collection) just to read its dtype. ``"complex"`` in the
+# SuiteSparse key and ``"helmholtz"`` in the Synthetic key are the only
+# complex-dtype entries; everything else is real.
+def _is_complex_key(source: str, key: str) -> bool:
+    if source == "suitesparse":
+        return "complex" in key
+    if source == "synthetic":
+        return "helmholtz" in key
+    return False  # DIMACS10 entries are real Laplacians
 
-_REAL_KEYS = (
-    [("suitesparse", k) for k in SuiteSparse if k not in _COMPLEX_SUITESPARSE]
-    + [("dimacs10", k) for k in DIMACS10]
-    + [("synthetic", k) for k in Synthetic if k not in _COMPLEX_SYNTHETIC]
-)
-_COMPLEX_KEYS = (
-    [("suitesparse", k) for k in _COMPLEX_SUITESPARSE]
-    + [("synthetic", k) for k in _COMPLEX_SYNTHETIC]
-)
-_REGISTRIES = {"suitesparse": SuiteSparse, "dimacs10": DIMACS10,
-               "synthetic": Synthetic}
+
+_ALL_KEYS = [
+    (src, key) for src, coll in Benchmarks.items() for key in coll
+]
+_REAL_KEYS = [(s, k) for s, k in _ALL_KEYS if not _is_complex_key(s, k)]
+_COMPLEX_KEYS = [(s, k) for s, k in _ALL_KEYS if _is_complex_key(s, k)]
 
 
 @pytest.fixture(params=_REAL_KEYS, ids=[f"{s}:{k}" for s, k in _REAL_KEYS])
 def benchmark_real(request) -> Benchmark:
     """Every real-dtype benchmark across all three sources."""
     source, key = request.param
-    return _get(_REGISTRIES[source], key)
+    return _safe_get(source, key)
 
 
 @pytest.fixture(params=_COMPLEX_KEYS, ids=[f"{s}:{k}" for s, k in _COMPLEX_KEYS])
 def benchmark_complex(request) -> Benchmark:
     """Every complex-dtype benchmark across all three sources."""
     source, key = request.param
-    return _get(_REGISTRIES[source], key)
+    return _safe_get(source, key)
 
 
 # ---------------------------------------------------------------------- #

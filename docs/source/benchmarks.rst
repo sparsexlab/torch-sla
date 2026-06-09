@@ -10,17 +10,30 @@ Benchmark Catalogue
 
 torch-sla ships a small, opinionated catalogue of sparse test matrices
 behind a uniform :class:`~torch_sla.benchmark.Benchmark` interface.
-Three families are exposed; all are reached via
-``torch_sla.datasets``::
+Three families are exposed; the entry point is the hierarchical
+:data:`~torch_sla.datasets.Benchmarks` mapping (``source -> catalogue ->
+benchmark``)::
 
-    from torch_sla.datasets import SuiteSparse, DIMACS10, Synthetic, all_benchmarks
+    from torch_sla.datasets import Benchmarks
 
-    bench = SuiteSparse["complex_hpd"]          # lazy download from heroku mirror
-    bench = DIMACS10["delaunay_small"]          # ditto, plus Laplacian regularisation
-    bench = Synthetic["poisson_2d_64"]          # built on the fly, no network
+    bench = Benchmarks["suitesparse"]["complex_hpd"]    # lazy download
+    bench = Benchmarks["dimacs10"]["delaunay_small"]    # Laplacian regularisation
+    bench = Benchmarks["synthetic"]["poisson_2d_64"]    # built on the fly, no network
 
-    for name, bench in all_benchmarks().items():
-        print(name, bench.shape, bench.math_kind)
+Module-level singletons (:data:`~torch_sla.datasets.SuiteSparse`,
+:data:`~torch_sla.datasets.DIMACS10`, :data:`~torch_sla.datasets.Synthetic`)
+are equivalent shortcuts to each child collection. Every collection is
+a :class:`~torch_sla.datasets.BenchmarkCollection`
+(``Mapping[str, Benchmark]``) -- iteration only reads the static
+catalogue, individual ``__getitem__`` calls trigger any download.
+
+To sweep across every entry lazily, use the generator
+:func:`~torch_sla.datasets.iter_benchmarks`::
+
+    from torch_sla.datasets import iter_benchmarks
+
+    for source, key, bench in iter_benchmarks(sources={"synthetic", "suitesparse"}):
+        print(f"{source}:{key}", bench.shape, bench.math_kind)
 
 Each :class:`~torch_sla.benchmark.Benchmark` packages a matrix together
 with three random ``(x_ref, b)`` reference cases (``b = A @ x_ref``).

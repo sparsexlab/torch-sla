@@ -22,12 +22,14 @@ environment variable, defaulting to ``~/.cache/torch_sla/datasets``::
 
 from __future__ import annotations
 
+import abc
 import io as _io
 import os
 import tarfile
 import urllib.request
+import warnings
 from collections.abc import Mapping
-from typing import Any, Callable, Dict, Iterator, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 import numpy as np
 import scipy.sparse as sp
@@ -58,6 +60,48 @@ class DatasetUnavailable(RuntimeError):
     Library code raises this rather than calling ``pytest.skip``; tests
     catch it and skip individually.
     """
+
+
+# ====================================================================== #
+# Abstract base for any benchmark catalogue
+# ====================================================================== #
+class BenchmarkCollection(Mapping, abc.ABC):
+    """Abstract base for a lazy ``Mapping[str, Benchmark]`` catalogue.
+
+    Subclasses store a *catalogue* (static dict of keys -> metadata
+    tuples), and materialise individual :class:`Benchmark` instances on
+    demand via ``__getitem__``. Iterating / ``len()`` only touches the
+    catalogue, never the network -- expensive work happens lazily, per
+    accessed key.
+
+    A concrete subclass must implement:
+
+    * :attr:`source_name` -- human display label (e.g. ``"SuiteSparse"``)
+    * :meth:`catalog` -- returns the static catalogue dict
+    * :meth:`notes` -- a one-line description per key
+    * the standard :meth:`__getitem__` / :meth:`__iter__` / :meth:`__len__`
+      from ``Mapping``
+
+    Concrete instances are exposed as module-level singletons
+    (:data:`SuiteSparse`, :data:`DIMACS10`, :data:`Synthetic`), and
+    collectively as the two-level :data:`Benchmarks` mapping.
+    """
+
+    @property
+    @abc.abstractmethod
+    def source_name(self) -> str:
+        """Human-readable name of the matrix source, e.g. ``'SuiteSparse'``."""
+
+    @abc.abstractmethod
+    def catalog(self) -> Dict[str, Any]:
+        """Static catalogue (no network). Maps key -> raw metadata tuple."""
+
+    @abc.abstractmethod
+    def notes(self, key: str) -> str:
+        """One-line description of the benchmark with this key."""
+
+    def __repr__(self) -> str:
+        return f"{self.source_name}({len(self)} entries)"
 
 
 # ====================================================================== #
@@ -141,8 +185,8 @@ _SUITESPARSE_CATALOG: Dict[str, Tuple[str, str, str, str, str]] = {
 }
 
 
-class _SuiteSparse(Mapping):
-    """Lazy ``Mapping[str, Benchmark]`` over a curated SuiteSparse subset.
+class _SuiteSparse(BenchmarkCollection):
+    """Lazy catalogue over a curated SuiteSparse Matrix Collection subset.
 
     Each value is a :class:`Benchmark` with three random ``(x_ref, b)``
     reference cases. Matrices are downloaded from the heroku mirror on
@@ -153,6 +197,8 @@ class _SuiteSparse(Mapping):
     >>> bench.math_kind, bench.detected_kind
     ('hpd', 'hermitian')
     """
+
+    source_name = "SuiteSparse"
 
     def __init__(self):
         self._loaded: dict = {}
@@ -236,8 +282,8 @@ def _adjacency_to_regularised_laplacian(
     return L + eps * sp.eye(n, format="csr")
 
 
-class _DIMACS10(Mapping):
-    """Lazy ``Mapping[str, Benchmark]`` of DIMACS10 graph-Laplacian benchmarks.
+class _DIMACS10(BenchmarkCollection):
+    """Lazy catalogue of DIMACS10 graph-Laplacian benchmarks.
 
     The DIMACS10 Implementation Challenge focuses on graph partitioning;
     its matrices are sparse adjacency matrices of undirected real-world
@@ -252,6 +298,8 @@ class _DIMACS10(Mapping):
     >>> bench.shape
     (1024, 1024)
     """
+
+    source_name = "DIMACS10"
 
     def __init__(self):
         self._loaded: dict = {}
@@ -387,8 +435,8 @@ _SYNTHETIC_CATALOG: Dict[str, Tuple[Callable, Dict[str, Any], str, str, str]] = 
 }
 
 
-class _Synthetic(Mapping):
-    """Lazy ``Mapping[str, Benchmark]`` of programmatic PDE stencils.
+class _Synthetic(BenchmarkCollection):
+    """Lazy catalogue of programmatic PDE-stencil benchmarks.
 
     No network required -- the matrices are built on demand via
     ``scipy.sparse`` Kronecker products. Useful for parameter sweeps
@@ -400,6 +448,8 @@ class _Synthetic(Mapping):
     >>> bench.shape
     (4096, 4096)
     """
+
+    source_name = "Synthetic"
 
     def __init__(self):
         self._loaded: dict = {}
@@ -440,31 +490,90 @@ Synthetic = _Synthetic()
 
 
 # ====================================================================== #
-# Convenience: every benchmark in one place
+# Top-level two-level Mapping: source -> collection -> Benchmark
 # ====================================================================== #
-def all_benchmarks() -> Dict[str, Benchmark]:
-    """Return a flat ``{qualified_name: Benchmark}`` over every catalogue
-    (SuiteSparse, DIMACS10, Synthetic). Network failures degrade
-    gracefully -- the offending entry is omitted.
+class _Benchmarks(Mapping):
+    """Two-level mapping over every catalogued source.
 
-    Keys are prefixed by source: ``"suitesparse:real_spd"``,
-    ``"dimacs10:delaunay_small"``, ``"synthetic:poisson_2d_64"``.
+    ``Benchmarks[source_key]`` returns a :class:`BenchmarkCollection`;
+    that collection in turn returns a :class:`Benchmark` per key. The
+    hierarchy is preserved on purpose -- it lets iteration stay lazy
+    (no surprise downloads when you only want to enumerate keys) and
+    keeps the per-source metadata distinct from the per-matrix data.
+
+    >>> from torch_sla.datasets import Benchmarks
+    >>> Benchmarks["suitesparse"]["real_spd"].shape
+    (4884, 4884)
+    >>> for src, coll in Benchmarks.items():
+    ...     print(src, coll.source_name, len(coll))
+    suitesparse SuiteSparse 5
+    dimacs10 DIMACS10 4
+    synthetic Synthetic 6
     """
-    out: Dict[str, Benchmark] = {}
-    for prefix, registry in (("suitesparse", SuiteSparse),
-                             ("dimacs10", DIMACS10),
-                             ("synthetic", Synthetic)):
-        for key in registry:
+
+    def __init__(self):
+        # Insertion order is the iteration order users will see.
+        self._children: Dict[str, BenchmarkCollection] = {
+            "suitesparse": SuiteSparse,
+            "dimacs10":    DIMACS10,
+            "synthetic":   Synthetic,
+        }
+
+    def __getitem__(self, key: str) -> BenchmarkCollection:
+        return self._children[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._children)
+
+    def __len__(self) -> int:
+        return len(self._children)
+
+    def __repr__(self) -> str:
+        parts = ", ".join(f"{k}({len(v)})" for k, v in self._children.items())
+        return f"Benchmarks({parts})"
+
+
+Benchmarks = _Benchmarks()
+
+
+def iter_benchmarks(
+    *,
+    sources: Optional[Iterator[str]] = None,
+    skip_unavailable: bool = True,
+) -> Iterator[Tuple[str, str, Benchmark]]:
+    """Lazily yield ``(source, key, Benchmark)`` for every catalogued entry.
+
+    Each yield triggers at most one lazy download (cached afterwards).
+    Network failures are emitted as warnings and skipped by default --
+    pass ``skip_unavailable=False`` to propagate them as
+    :class:`DatasetUnavailable`.
+
+    Parameters
+    ----------
+    sources : iterable of str, optional
+        Restrict to the named sources (``"suitesparse"`` /
+        ``"dimacs10"`` / ``"synthetic"``). ``None`` iterates all.
+    skip_unavailable : bool, default True
+        If ``True``, missing-network entries are skipped with a warning;
+        if ``False``, the :class:`DatasetUnavailable` propagates.
+    """
+    selected = set(sources) if sources is not None else None
+    for src, coll in Benchmarks.items():
+        if selected is not None and src not in selected:
+            continue
+        for key in coll:
             try:
-                out[f"{prefix}:{key}"] = registry[key]
-            except DatasetUnavailable:
-                continue
-    return out
+                yield src, key, coll[key]
+            except DatasetUnavailable as e:
+                if not skip_unavailable:
+                    raise
+                warnings.warn(f"{src}:{key} unavailable: {e}", stacklevel=2)
 
 
 __all__ = [
+    "Benchmarks", "BenchmarkCollection",
     "SuiteSparse", "DIMACS10", "Synthetic",
-    "DatasetUnavailable", "cache_dir", "all_benchmarks",
+    "DatasetUnavailable", "cache_dir", "iter_benchmarks",
     "poisson_2d", "poisson_3d", "anisotropic_2d",
     "convdiff_2d", "helmholtz_2d",
 ]
