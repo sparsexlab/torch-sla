@@ -996,43 +996,52 @@ def pcg_solve_optimized(
     b_norm = torch.norm(b)
     tol_sq = (max(atol, rtol * b_norm.item())) ** 2  # one .item() at start
 
-    # Pre-allocate a scratch buffer for ``-alpha`` so we don't allocate inside
-    # the loop. addcmul_(t1, t2, value=...) only accepts a Python scalar for
-    # ``value``, so to keep alpha on the GPU (no sync) we feed alpha as t1 and
-    # use ``-alpha`` for the residual update via this scratch.
+    # Pre-allocate a scratch for ``-alpha`` so the per-iter residual update
+    # stays sync-free: addcmul_(value=...) only accepts a Python scalar, but
+    # broadcasting a 0-d tensor through addcmul_(scratch, Ap) keeps alpha on
+    # the GPU. ``torch.neg(alpha, out=neg_alpha)`` then writes ``-alpha``
+    # without allocating.
     neg_alpha = torch.empty((), dtype=dtype, device=device)
-    alpha_view = torch.empty((), dtype=dtype, device=device)  # 0-d view buffer
 
     for i in range(maxiter):
+        # PR #6 (dev) fix: check convergence at the START of every iteration.
+        # CG converges in at most n steps, so small / well-conditioned systems
+        # reach r -> 0 before a periodic check would fire. Once r -> 0,
+        # rz_old and pAp collapse to 0 and alpha = rz_old / pAp = 0/0 = NaN,
+        # which poisons x on subsequent updates. Checking here both reports
+        # convergence and breaks out cleanly. The single scalar sync per
+        # iteration (~10-30 us) is dwarfed by the SpMV cost.
+        # ``.real`` keeps it real-scalar for complex r.
+        residual_sq = torch.vdot(r, r).real
+        if residual_sq.item() < tol_sq:
+            return SolveResult(x, i, residual_sq.sqrt().item(), True)
+
         # Matrix-vector product (allocates Ap; PyTorch sparse mv has no out=).
         Ap = A.matvec(p)
 
+        # vdot = sesquilinear inner product (correct for complex dtype; same
+        # as dot for real). Required for the complex CG/Wirtinger adjoint.
         pAp = torch.vdot(p, Ap)
         alpha = rz_old / pAp  # 0-d tensor, stays on GPU
         torch.neg(alpha, out=neg_alpha)
 
         # In-place updates with NO host sync: addcmul_ computes
-        #   x += 1 * alpha * p   (alpha is 0-d, broadcasts over p)
-        #   r += (-1) * alpha * Ap  (via neg_alpha)
+        #   x += alpha * p     (alpha is 0-d, broadcasts over p)
+        #   r += -alpha * Ap   (via neg_alpha)
         x.addcmul_(alpha, p)
         r.addcmul_(neg_alpha, Ap)
 
-        # Periodic convergence check (.real keeps it scalar-real for complex r)
-        if (i + 1) % check_interval == 0:
-            residual_sq = torch.vdot(r, r).real
-            if residual_sq.item() < tol_sq:
-                return SolveResult(x, i + 1, residual_sq.sqrt().item(), True)
-
-        # Preconditioned residual -- in-place into pre-allocated z buffer
+        # Preconditioned residual -- in-place into the pre-allocated z buffer
+        # so we don't allocate a fresh n-sized tensor each iter.
         z.copy_(preconditioner(r))
 
         rz_new = torch.vdot(r, z)
         beta = rz_new / rz_old  # 0-d tensor, stays on GPU
 
-        # In-place search direction update: p = beta*p + z  (no sync)
+        # In-place search direction update: p = beta*p + z  (no sync, no alloc)
         p.mul_(beta).add_(z)
         rz_old = rz_new
-    
+
     # Final residual
     residual = torch.norm(r).item()
     if residual < tol_sq ** 0.5:

@@ -6,6 +6,26 @@
 - [ ] non linear solve 
 - [ ] ODE operator
 - [ ] matrix partition
+- [ ] complex number support
+  - [ ] complex dtype in SparseTensor (val complex64/complex128)
+  - [ ] solve / matvec / det / eigs with complex
+  - [ ] conjugate-transpose (Hermitian) handling, distinguish `.T` vs `.H`
+  - [ ] gradient (Wirtinger / conjugate) correctness for complex autograd
+
+## Distributed correctness & performance (needs heavy validation)
+
+> Current distributed results are NOT trusted — needs large-scale validation
+> against a reference (e.g. PETSc / single-GPU dense) before relying on them.
+
+- [ ] validate distributed solve correctness at scale
+  - [ ] `atol=1e-2` clearly does NOT converge — investigate why
+- [ ] better preconditioner (current Jacobi is too weak for large/ill-conditioned systems)
+  - [ ] block-Jacobi / ILU / additive Schwarz
+  - [ ] reference against PETSc preconditioners
+  - [ ] **prefer a PyTorch-native, cross-platform implementation** (no hard PETSc dep)
+- [ ] halo exchange correctness — suspected wrong, audit indexing/ownership
+- [ ] communication/computation overlap (currently no overlap; halo exchange blocks compute)
+  - [ ] async P2P (isend/irecv) overlapping interior SpMV with halo wait
 
 ## Documentation Completeness Check
 
