@@ -411,9 +411,12 @@ class SparseSolveFunction(Function):
         method = ctx.method
         atol = ctx.atol
         maxiter = ctx.maxiter
-        grad_b = scipy_solve(val, col, row, (shape[1], shape[0]), grad_u,
+        # Adjoint system uses the conjugate transpose A^H (= conj(A)^T), not
+        # just A^T. For real matrices .conj() is a no-op so this is unchanged;
+        # for complex it makes the Wirtinger gradient correct.
+        grad_b = scipy_solve(val.conj(), col, row, (shape[1], shape[0]), grad_u,
                             method=method, atol=atol, maxiter=maxiter)
-        grad_val = -grad_b[row] * u[col]
+        grad_val = -grad_b[row] * u[col].conj()
         return grad_val, None, None, None, grad_b, None, None, None
 
 
@@ -1379,7 +1382,44 @@ class SparseTensor:
             sparse_dim=self._sparse_dim
         )
         return result
-    
+
+    def conj(self) -> "SparseTensor":
+        """
+        Element-wise complex conjugate (same sparsity pattern).
+
+        For real tensors this is a no-op view-equivalent (``values`` are
+        returned unchanged); for complex tensors every stored value is
+        conjugated. Gradients flow through ``torch.conj``.
+        """
+        return SparseTensor(
+            self.values.conj(),
+            self.row_indices,
+            self.col_indices,
+            tuple(self._shape),
+            sparse_dim=self._sparse_dim,
+        )
+
+    def H(self) -> "SparseTensor":
+        """
+        Conjugate (Hermitian) transpose ``A^H = conj(A)^T``.
+
+        For real matrices this equals :meth:`T`. For complex matrices it is
+        the proper adjoint, e.g. ``A.H()`` of a Hermitian matrix returns ``A``.
+        Use this (not :meth:`T`) for inner products / normal equations on
+        complex systems.
+        """
+        new_shape = list(self._shape)
+        dim_m, dim_n = self._sparse_dim
+        new_shape[dim_m], new_shape[dim_n] = new_shape[dim_n], new_shape[dim_m]
+
+        return SparseTensor(
+            self.values.conj(),       # conjugate the stored values
+            self.col_indices,         # swap row and col (transpose)
+            self.row_indices,
+            tuple(new_shape),
+            sparse_dim=self._sparse_dim,
+        )
+
     def flatten_blocks(self) -> "SparseTensor":
         """
         Flatten block dimensions into the sparse (M, N) dimensions.
@@ -1735,36 +1775,42 @@ class SparseTensor:
             B = self.batch_size
             vals_flat = self.values.reshape(B, self.nnz)
             
-            # Diagonal elements
+            # Gershgorin works on real magnitudes; for complex (Hermitian)
+            # matrices the diagonal is real, so use real parts / |a_ij|.
+            real_dtype = self.values.abs().dtype
+
+            # Diagonal elements (real part)
             diag_rows = row[is_diag]
-            diag_vals = vals_flat[:, is_diag]  # [B, num_diag]
-            
-            diag = torch.zeros(B, M, dtype=self.dtype, device=self.device)
+            diag_vals = vals_flat[:, is_diag].real  # [B, num_diag]
+
+            diag = torch.zeros(B, M, dtype=real_dtype, device=self.device)
             diag.scatter_(1, diag_rows.unsqueeze(0).expand(B, -1), diag_vals)
-            
+
             # Off-diagonal sum
             is_offdiag = ~is_diag
             offdiag_rows = row[is_offdiag]
             offdiag_vals = vals_flat[:, is_offdiag].abs()  # [B, num_offdiag]
-            
-            offdiag_sum = torch.zeros(B, M, dtype=self.dtype, device=self.device)
+
+            offdiag_sum = torch.zeros(B, M, dtype=real_dtype, device=self.device)
             offdiag_sum.scatter_add_(1, offdiag_rows.unsqueeze(0).expand(B, -1), offdiag_vals)
             
             # Check: diag > offdiag_sum AND diag > 0
             is_pd = ((diag > offdiag_sum) & (diag > 0)).all(dim=-1)
             return is_pd.reshape(self.batch_shape)
         else:
+            real_dtype = self.values.abs().dtype
+
             diag_rows = row[is_diag]
-            diag_vals = self.values[is_diag]
-            
-            diag = torch.zeros(M, dtype=self.dtype, device=self.device)
+            diag_vals = self.values[is_diag].real
+
+            diag = torch.zeros(M, dtype=real_dtype, device=self.device)
             diag.scatter_(0, diag_rows, diag_vals)
-            
+
             is_offdiag = ~is_diag
             offdiag_rows = row[is_offdiag]
             offdiag_vals = self.values[is_offdiag].abs()
-            
-            offdiag_sum = torch.zeros(M, dtype=self.dtype, device=self.device)
+
+            offdiag_sum = torch.zeros(M, dtype=real_dtype, device=self.device)
             offdiag_sum.scatter_add_(0, offdiag_rows, offdiag_vals)
             
             is_pd = ((diag > offdiag_sum) & (diag > 0)).all()

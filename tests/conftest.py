@@ -114,3 +114,11 @@ def benchmark_small_real() -> Benchmark:
     """A single 16x16 = 256-DOF synthetic Poisson 2D -- for very fast
     correctness smoke checks (gradcheck, residual sweep, ...)."""
     return Synthetic["poisson_2d_16"]
+
+
+@pytest.fixture
+def benchmark_small_complex() -> Benchmark:
+    """The smallest catalogued complex matrix (Bai/qc324, n=324) -- for
+    complex-dtype fast tests like ``autograd.gradcheck`` whose runtime is
+    ``O(nnz)`` per finite-difference probe."""
+    return _safe_get("suitesparse", "complex_sym")

@@ -88,10 +88,12 @@ class SparseLinearSolveScipySuperLU(Function):
         atol = ctx.atol
         maxiter = ctx.maxiter
 
-        # Solve A^T * gradb = gradu
-        gradb = scipy_solve(val, col, row, (shape[1], shape[0]), gradu,
+        # Solve the adjoint system A^H * gradb = gradu (conjugate transpose,
+        # not just A^T). For real matrices .conj() is a no-op; for complex it
+        # makes the Wirtinger gradient correct.
+        gradb = scipy_solve(torch.conj_physical(val), col, row, (shape[1], shape[0]), gradu,
                            method=method, atol=atol, maxiter=maxiter)
-        gradval = -gradb[row] * u[col]
+        gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb, None, None, None
@@ -348,13 +350,14 @@ class SparseLinearSolvePyTorch(Function):
         preconditioner = ctx.preconditioner
         mixed_precision = ctx.mixed_precision
 
-        # Solve A^T * gradb = gradu
-        gradb = pytorch_solve(val, col, row, (shape[1], shape[0]), gradu,
+        # Solve the adjoint system A^H * gradb = gradu (conjugate transpose);
+        # .conj is a no-op for real, correct Wirtinger gradient for complex.
+        gradb = pytorch_solve(torch.conj_physical(val), col, row, (shape[1], shape[0]), gradu,
                               method=method, atol=atol, rtol=rtol, maxiter=maxiter,
                               preconditioner=preconditioner, mixed_precision=mixed_precision)
         if gradb.dtype != val.dtype:
             gradb = gradb.to(val.dtype)
-        gradval = -gradb[row] * u[col]
+        gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb, None, None, None, None, None, None

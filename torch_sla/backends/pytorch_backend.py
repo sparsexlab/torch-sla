@@ -490,7 +490,7 @@ def estimate_condition_number(A: CachedSparseMatrix, num_iters: int = 20) -> flo
     lambda_max = 0.0
     for _ in range(num_iters):
         w = A.matvec(v)
-        lambda_max = torch.dot(v, w).item()
+        lambda_max = torch.vdot(v, w).item()
         v = w / torch.norm(w)
     
     # Inverse power iteration for smallest eigenvalue (approximate)
@@ -508,7 +508,7 @@ def estimate_condition_number(A: CachedSparseMatrix, num_iters: int = 20) -> flo
         w = D_inv * v  # M^{-1} v approximates A^{-1} v
         w = w / torch.norm(w)
         Aw = A.matvec(w)
-        lambda_est = torch.dot(w, Aw).item()
+        lambda_est = torch.vdot(w, Aw).item()
         if lambda_est > 0:
             lambda_min = min(lambda_min, lambda_est)
         v = w
@@ -760,7 +760,7 @@ def pcg_solve_compiled(
             torch.mv(A_csr, p, out=Ap)
             
             # Scalars as 0-dim tensors
-            pAp = torch.dot(p, Ap)
+            pAp = torch.vdot(p, Ap)
             alpha = rz_old / pAp
             
             # Updates (using broadcasting for scalar * vector)
@@ -770,7 +770,7 @@ def pcg_solve_compiled(
             # Preconditioner
             torch.mul(D_inv, r, out=z)
             
-            rz_new = torch.dot(r, z)
+            rz_new = torch.vdot(r, z)
             beta = rz_new / rz_old
             
             # Direction update
@@ -798,7 +798,7 @@ def pcg_solve_compiled(
     z = D_inv * r
     p = z.clone()
     Ap = torch.zeros(n, dtype=dtype, device=device)
-    rz_old = torch.dot(r, z)
+    rz_old = torch.vdot(r, z)
     
     b_norm = torch.norm(b).item()
     if b_norm == 0:
@@ -815,7 +815,7 @@ def pcg_solve_compiled(
         num_iters += iters_this_batch
         
         # Check convergence
-        residual_sq = torch.dot(r, r).item()
+        residual_sq = torch.vdot(r, r).item()
         if residual_sq < tol_sq:
             return SolveResult(x, num_iters, residual_sq ** 0.5, True)
     
@@ -905,7 +905,7 @@ def pcg_solve_mixed_precision(
     
     z = preconditioner(r)
     p = z.clone()
-    rz_old = torch.dot(r, z)
+    rz_old = torch.vdot(r, z)
     
     b_norm = torch.norm(b.to(torch.float64))
     if b_norm == 0:
@@ -918,7 +918,7 @@ def pcg_solve_mixed_precision(
         # Matrix-vector product in float32, result in float64
         Ap = A_mixed.matvec(p)
         
-        pAp = torch.dot(p, Ap)
+        pAp = torch.vdot(p, Ap)
         if pAp <= 0:
             warnings.warn(f"PCG: Matrix not positive definite (p'Ap = {pAp:.2e})")
             return SolveResult(x, i, residual, False)
@@ -934,7 +934,7 @@ def pcg_solve_mixed_precision(
             return SolveResult(x, i + 1, residual, True)
         
         z = preconditioner(r)
-        rz_new = torch.dot(r, z)
+        rz_new = torch.vdot(r, z)
         
         beta = rz_new / rz_old
         p.mul_(beta.item()).add_(z)
@@ -960,67 +960,86 @@ def pcg_solve_optimized(
 ) -> SolveResult:
     """
     Optimized Preconditioned Conjugate Gradient solver.
-    
+
     Optimizations:
-    - Uses cached CSR matrix (no repeated COO->CSR conversion)
-    - Avoids .item() calls to prevent CPU-GPU sync
-    - Only checks convergence every check_interval iterations
-    - Uses tensor operations for alpha, beta (no sync)
+    - Cached CSR matrix (no repeated COO->CSR conversion)
+    - **Pre-allocated buffers + in-place updates** (``addcmul_``, ``mul_``,
+      ``.copy_``) so the only n-sized allocation per iter is the ``A @ p``
+      result (PyTorch sparse mv exposes no ``out=``). The preconditioned
+      residual ``z`` is reused via ``z.copy_(preconditioner(r))``.
+    - Sync-free ``alpha`` / ``beta`` as 0-d GPU tensors fed to
+      ``addcmul_``/``mul_`` (avoids the ``.item()`` -> Python scalar host
+      sync per iter).
+    - Only checks convergence every ``check_interval`` iterations.
     """
     device = A.device
     dtype = A.dtype
     n = A.n
-    
-    # Default preconditioner
+
     if preconditioner is None:
         preconditioner = jacobi_preconditioner(A)
-    
-    # Initial guess
+
+    # Initial residual
     if x0 is None:
         x = torch.zeros(n, dtype=dtype, device=device)
         r = b.clone()
     else:
         x = x0.clone()
         r = b - A.matvec(x)
-    
-    # Preconditioned residual
-    z = preconditioner(r)
+
+    # Pre-allocate the preconditioned-residual buffer z (reused every iter).
+    z = torch.empty_like(r)
+    z.copy_(preconditioner(r))
     p = z.clone()
-    rz_old = torch.dot(r, z)
-    
+    rz_old = torch.vdot(r, z)
+
     b_norm = torch.norm(b)
-    tol_sq = (max(atol, rtol * b_norm.item())) ** 2  # Only one .item() at start
+    tol_sq = (max(atol, rtol * b_norm.item())) ** 2  # one .item() at start
+
+    # Pre-allocate a scratch for ``-alpha`` so the per-iter residual update
+    # stays sync-free: addcmul_(value=...) only accepts a Python scalar, but
+    # broadcasting a 0-d tensor through addcmul_(scratch, Ap) keeps alpha on
+    # the GPU. ``torch.neg(alpha, out=neg_alpha)`` then writes ``-alpha``
+    # without allocating.
+    neg_alpha = torch.empty((), dtype=dtype, device=device)
 
     for i in range(maxiter):
-        # Check convergence at the START of each iteration. CG converges in at
-        # most n steps, so small / well-conditioned systems reach r -> 0 before
-        # any periodic check would fire. Once r -> 0, rz_old and pAp become 0 and
-        # alpha = rz_old / pAp = 0/0 = NaN, which then poisons x. Checking here
-        # both reports convergence and breaks out before that 0/0 breakdown.
-        # The single scalar sync per iteration is negligible next to the SpMV.
-        residual_sq = torch.dot(r, r)
+        # PR #6 (dev) fix: check convergence at the START of every iteration.
+        # CG converges in at most n steps, so small / well-conditioned systems
+        # reach r -> 0 before a periodic check would fire. Once r -> 0,
+        # rz_old and pAp collapse to 0 and alpha = rz_old / pAp = 0/0 = NaN,
+        # which poisons x on subsequent updates. Checking here both reports
+        # convergence and breaks out cleanly. The single scalar sync per
+        # iteration (~10-30 us) is dwarfed by the SpMV cost.
+        # ``.real`` keeps it real-scalar for complex r.
+        residual_sq = torch.vdot(r, r).real
         if residual_sq.item() < tol_sq:
             return SolveResult(x, i, residual_sq.sqrt().item(), True)
 
-        # Matrix-vector product
+        # Matrix-vector product (allocates Ap; PyTorch sparse mv has no out=).
         Ap = A.matvec(p)
 
-        pAp = torch.dot(p, Ap)
+        # vdot = sesquilinear inner product (correct for complex dtype; same
+        # as dot for real). Required for the complex CG/Wirtinger adjoint.
+        pAp = torch.vdot(p, Ap)
+        alpha = rz_old / pAp  # 0-d tensor, stays on GPU
+        torch.neg(alpha, out=neg_alpha)
 
-        alpha = rz_old / pAp
+        # In-place updates with NO host sync: addcmul_ computes
+        #   x += alpha * p     (alpha is 0-d, broadcasts over p)
+        #   r += -alpha * Ap   (via neg_alpha)
+        x.addcmul_(alpha, p)
+        r.addcmul_(neg_alpha, Ap)
 
-        # Update solution and residual
-        x = x + alpha * p
-        r = r - alpha * Ap
+        # Preconditioned residual -- in-place into the pre-allocated z buffer
+        # so we don't allocate a fresh n-sized tensor each iter.
+        z.copy_(preconditioner(r))
 
-        # Preconditioned residual
-        z = preconditioner(r)
-        rz_new = torch.dot(r, z)
+        rz_new = torch.vdot(r, z)
+        beta = rz_new / rz_old  # 0-d tensor, stays on GPU
 
-        beta = rz_new / rz_old
-
-        # Update search direction
-        p = z + beta * p
+        # In-place search direction update: p = beta*p + z  (no sync, no alloc)
+        p.mul_(beta).add_(z)
         rz_old = rz_new
 
     # Final residual
@@ -1074,8 +1093,8 @@ def pipelined_pcg_solve(
     u = preconditioner(r)
     w = A.matvec(u)
     
-    gamma = torch.dot(r, u)
-    delta = torch.dot(w, u)
+    gamma = torch.vdot(r, u)
+    delta = torch.vdot(w, u)
     
     # Initialize
     m = preconditioner(w)
@@ -1101,7 +1120,7 @@ def pipelined_pcg_solve(
         
         # Check convergence periodically
         if (i + 1) % check_interval == 0:
-            residual_sq = torch.dot(r, r).item()
+            residual_sq = torch.vdot(r, r).item()
             if residual_sq < tol_sq:
                 return SolveResult(x, i + 1, residual_sq ** 0.5, True)
         
@@ -1110,8 +1129,8 @@ def pipelined_pcg_solve(
         w = w - alpha * z
         
         # Recompute for next iteration (only one sync point here)
-        gamma_new = torch.dot(r, u)
-        delta_new = torch.dot(w, u)
+        gamma_new = torch.vdot(r, u)
+        delta_new = torch.vdot(w, u)
         
         # These can be done in parallel while sync is happening
         m = preconditioner(w)
@@ -1218,7 +1237,7 @@ def pbicgstab_solve(
     residual = torch.norm(r).item()
     
     for i in range(maxiter):
-        rho_new = torch.dot(r0_hat, r)
+        rho_new = torch.vdot(r0_hat, r)
         
         if abs(rho_new.item()) < 1e-30:
             warnings.warn("PBiCGStab: rho became too small")
@@ -1230,7 +1249,7 @@ def pbicgstab_solve(
         p_hat = M(p)
         v = A.matvec(p_hat)
         
-        alpha = rho_new / torch.dot(r0_hat, v)
+        alpha = rho_new / torch.vdot(r0_hat, v)
         s = r - alpha * v
         
         s_norm = torch.norm(s).item()
@@ -1241,12 +1260,14 @@ def pbicgstab_solve(
         s_hat = M(s)
         t = A.matvec(s_hat)
         
-        t_dot_t = torch.dot(t, t)
+        # vdot(t, t) is real-valued (magnitude squared); cast to .real so the
+        # < scalar comparison works for both real and complex t.
+        t_dot_t = torch.vdot(t, t).real
         if t_dot_t < 1e-30:
             x = x + alpha * p_hat
             break
         
-        omega = torch.dot(t, s) / t_dot_t
+        omega = torch.vdot(t, s) / t_dot_t
         x = x + alpha * p_hat + omega * s_hat
         r = s - omega * t
         
