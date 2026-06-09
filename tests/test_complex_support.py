@@ -102,14 +102,11 @@ def test_H_is_conjugate_transpose(benchmark_complex):
     """``A.H()`` reproduces ``conj(A.T)`` on each catalogued complex matrix."""
     b = benchmark_complex
     A = SparseTensor(b.val, b.row, b.col, b.shape)
-
-    A_dense = torch.zeros(*b.shape, dtype=torch.complex128).index_put_(
-        (b.row, b.col), b.val.to(torch.complex128), accumulate=True
-    )
-    AH = A.H().to_dense()
-    assert torch.allclose(AH, A_dense.conj().T, atol=1e-10), (
+    A_dense = A.to_dense()
+    AH_dense = A.H().to_dense()
+    assert torch.allclose(AH_dense, A_dense.conj().T, atol=1e-10), (
         f"{b.name}: .H differs from conj(A^T) by "
-        f"{(AH - A_dense.conj().T).abs().max().item()}"
+        f"{(AH_dense - A_dense.conj().T).abs().max().item()}"
     )
 
 
@@ -117,12 +114,7 @@ def test_conj_is_elementwise(benchmark_complex):
     """``A.conj()`` element-wise conjugates and preserves sparsity."""
     b = benchmark_complex
     A = SparseTensor(b.val, b.row, b.col, b.shape)
-
-    A_dense = torch.zeros(*b.shape, dtype=torch.complex128).index_put_(
-        (b.row, b.col), b.val.to(torch.complex128), accumulate=True
-    )
-    Ac = A.conj().to_dense()
-    assert torch.allclose(Ac, A_dense.conj(), atol=1e-10)
+    assert torch.allclose(A.conj().to_dense(), A.to_dense().conj(), atol=1e-10)
 
 
 # =====================================================================
