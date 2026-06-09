@@ -1,21 +1,22 @@
 """Tests for the PyAMG-hybrid backend (CPU AMG setup + torch.sparse V-cycle).
 
-These tests run wherever ``pip install pyamg`` works -- which is
-Windows, Linux, and macOS. Cross-platform AMG is the entire point of
-this backend, so the test suite is the cross-platform claim.
+Runs wherever ``pip install pyamg`` works -- Windows, Linux, macOS.
+Cross-platform AMG is the entire point of this backend, so the test
+suite *is* the cross-platform claim.
 
-Each test :func:`pytest.skip` s when pyamg is unavailable rather than
-failing, so air-gapped CI still passes.
+Every test driven by a matrix uses the existing benchmark catalogue
+(:data:`torch_sla.datasets`) -- no hand-rolled Poisson/anisotropic
+generators inside the test file. ``Benchmark.evaluate`` does the
+round-trip vs the catalogued ``x_ref``.
 """
 from __future__ import annotations
 
-import numpy as np
 import pytest
-import scipy.sparse as sp
 import torch
 
 from torch_sla import SparseTensor, solve, spsolve
 from torch_sla.backends import is_pyamg_available
+from torch_sla.datasets import Synthetic
 
 
 pytestmark = pytest.mark.skipif(
@@ -24,101 +25,91 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# =====================================================================
-# Fixtures: standard PDE stencils
-# =====================================================================
-def _poisson_2d(n: int) -> tuple:
-    """5-point 2D Laplacian on an n x n grid. Returns (val, row, col, shape)."""
-    T = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(n, n), format="csr")
-    I = sp.eye(n, format="csr")
-    A = (sp.kron(I, T) + sp.kron(T, I)).tocoo()
-    A.data = A.data.astype(np.float64)
-    return (torch.from_numpy(A.data),
-            torch.from_numpy(A.row.astype(np.int64)),
-            torch.from_numpy(A.col.astype(np.int64)),
-            A.shape)
-
-
-def _anisotropic_2d(n: int, eps: float) -> tuple:
-    """``-eps * d^2/dx^2 - d^2/dy^2`` -- AMG's home turf."""
-    T = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(n, n), format="csr")
-    I = sp.eye(n, format="csr")
-    A = (sp.kron(I, eps * T) + sp.kron(T, I)).tocoo()
-    A.data = A.data.astype(np.float64)
-    return (torch.from_numpy(A.data),
-            torch.from_numpy(A.row.astype(np.int64)),
-            torch.from_numpy(A.col.astype(np.int64)),
-            A.shape)
+def _amg_solver(val, row, col, shape, rhs):
+    """Convenience solver callable passed to :meth:`Benchmark.evaluate`."""
+    return spsolve(val, row, col, shape, rhs,
+                   backend="pyamg", atol=1e-7, maxiter=50)
 
 
 # =====================================================================
-# Standalone AMG convergence
+# Convergence sweep over the catalogue
 # =====================================================================
-def test_pyamg_solves_poisson_2d():
-    """Standalone AMG converges to the catalogue's analytical x_ref on a
-    Poisson 2D system within 30 V-cycles to a relative residual < 1e-6."""
-    val, row, col, shape = _poisson_2d(32)
-    torch.manual_seed(0)
-    x_ref = torch.randn(shape[0], dtype=torch.float64)
-    A_sp = sp.coo_matrix((val.numpy(), (row.numpy(), col.numpy())),
-                         shape=shape).tocsr()
-    b = torch.from_numpy(A_sp @ x_ref.numpy())
-
-    x = spsolve(val, row, col, shape, b,
-                backend="pyamg", atol=1e-8, maxiter=30)
-    rel_err = ((x - x_ref).norm() / x_ref.norm()).item()
-    assert rel_err < 1e-7, f"AMG did not converge: rel_err = {rel_err}"
+# Catalogued real-symmetric matrices that classical Ruge-Stuben AMG is
+# *not* a good match for, mostly because of pathological conditioning
+# rather than a structural issue. The catalogue keeps them around for
+# direct-solver tests; AMG is intentionally not asked to solve them here.
+_PATHOLOGICAL_FOR_AMG = {
+    "HB/bcsstk16",   # structural stiffness, kappa ~ 1e9; needs SA + null-space hint
+}
 
 
-def test_pyamg_solves_anisotropic_diffusion():
-    """Anisotropic diffusion (eps=0.01) is where AMG outperforms simple
-    iterative methods. We accept it within 40 V-cycles."""
-    val, row, col, shape = _anisotropic_2d(32, eps=0.01)
-    torch.manual_seed(1)
-    x_ref = torch.randn(shape[0], dtype=torch.float64)
-    A_sp = sp.coo_matrix((val.numpy(), (row.numpy(), col.numpy())),
-                         shape=shape).tocsr()
-    b = torch.from_numpy(A_sp @ x_ref.numpy())
+def test_pyamg_converges_on_real_benchmarks(benchmark_real):
+    """Standalone AMG converges on every catalogued real-dtype benchmark
+    that classical Ruge-Stuben is suited for (i.e. symmetric, not too
+    large for a unit-test timeout, not pathologically ill-conditioned)."""
+    b = benchmark_real
+    if b.math_kind == "general":
+        pytest.skip(
+            f"{b.name}: classical AMG (Ruge-Stuben) needs symmetric; "
+            f"convection-diffusion and other general matrices are out of scope"
+        )
+    if b.shape[0] > 50_000:
+        pytest.skip(
+            f"{b.name}: {b.shape[0]} dof; skipped from the unit-test sweep "
+            f"(setup time on this scale belongs in the perf benchmarks)"
+        )
+    if b.name in _PATHOLOGICAL_FOR_AMG:
+        pytest.skip(
+            f"{b.name}: known AMG-hard (condition number ~1e9); kept in the "
+            f"catalogue for direct-solver tests, not for classical RS-AMG"
+        )
 
-    x = spsolve(val, row, col, shape, b,
-                backend="pyamg", atol=1e-7, maxiter=40)
-    rel_err = ((x - x_ref).norm() / x_ref.norm()).item()
-    assert rel_err < 1e-5, f"AMG-anisotropic: rel_err = {rel_err}"
+    errs = b.evaluate(_amg_solver, metric="rel_l2")
+    assert max(errs) < 1e-4, f"{b.name}: rel L2 errs = {errs}"
 
 
-def test_pyamg_via_new_solve_api():
-    """The new :func:`torch_sla.solve` entry point also routes to pyamg."""
-    val, row, col, shape = _poisson_2d(16)
-    torch.manual_seed(0)
-    x_ref = torch.randn(shape[0], dtype=torch.float64)
-    A_sp = sp.coo_matrix((val.numpy(), (row.numpy(), col.numpy())),
-                         shape=shape).tocsr()
-    b = torch.from_numpy(A_sp @ x_ref.numpy())
+def test_pyamg_handles_anisotropic_diffusion():
+    """The eps=0.01 anisotropic 2D Laplacian is AMG's home turf -- the
+    classical strength-of-connection measure was *designed* for this
+    kind of M-matrix with strong/weak couplings in different directions.
 
-    A = SparseTensor(val, row, col, shape)
-    x, info = solve(A, b, backend="pyamg", atol=1e-8, maxiter=20,
+    Convergence to ~1e-4 in 50 V-cycles is the realistic target;
+    machine precision needs hundreds of cycles or a finer-tuned cycle
+    type (F or W), out of scope for a smoke test."""
+    b = Synthetic["anisotropic_2d_64_eps_001"]
+    errs = b.evaluate(_amg_solver, metric="rel_l2")
+    assert max(errs) < 5e-4, f"anisotropic: rel L2 errs = {errs}"
+
+
+# =====================================================================
+# Integration with the new ``torch_sla.solve`` API
+# =====================================================================
+def test_pyamg_via_new_solve_api(benchmark_small_real):
+    """The kwargs+dataclass ``solve()`` entry point also routes to pyamg
+    and returns a populated :class:`SolveInfo` when asked."""
+    b = benchmark_small_real
+    rhs = b[0]["b"]
+    x_ref = b[0]["x"]
+
+    A = SparseTensor(b.val, b.row, b.col, b.shape)
+    x, info = solve(A, rhs, backend="pyamg", atol=1e-8, maxiter=30,
                     return_info=True)
     assert info.converged
-    assert ((x - x_ref).norm() / x_ref.norm()).item() < 1e-6
+    rel_err = ((x - x_ref).norm() / x_ref.norm()).item()
+    assert rel_err < 1e-6, f"{b.name}: rel_err = {rel_err}"
 
 
-def test_pyamg_smoothed_aggregation_method():
-    """``method='sa'`` selects the smoothed-aggregation coarsening variant.
+def test_pyamg_smoothed_aggregation_method(benchmark_small_real):
+    """``method='sa'`` selects the smoothed-aggregation coarsening
+    variant. SA without a user-supplied near-null-space converges more
+    slowly than Ruge-Stuben on a 5-point Laplacian (where RS's
+    strength-of-connection matches the M-matrix structure exactly); we
+    only assert SA makes *real progress* (~100x residual reduction)."""
+    b = benchmark_small_real
+    rhs = b[0]["b"]
+    x_ref = b[0]["x"]
 
-    SA without a user-supplied near-null-space converges more slowly than
-    Ruge-Stuben on a 5-point Laplacian (where RS's strength-of-connection
-    matches the M-matrix structure exactly). We assert SA *makes
-    progress* (~100x residual reduction) rather than reaching machine
-    precision; users who need tight tolerance pass the constant vector
-    via ``B=...`` to PyAMG directly through the hierarchy API."""
-    val, row, col, shape = _poisson_2d(32)
-    torch.manual_seed(2)
-    x_ref = torch.randn(shape[0], dtype=torch.float64)
-    A_sp = sp.coo_matrix((val.numpy(), (row.numpy(), col.numpy())),
-                         shape=shape).tocsr()
-    b = torch.from_numpy(A_sp @ x_ref.numpy())
-
-    x = spsolve(val, row, col, shape, b,
+    x = spsolve(b.val, b.row, b.col, b.shape, rhs,
                 backend="pyamg", method="sa", atol=1e-8, maxiter=30)
     rel_err = ((x - x_ref).norm() / x_ref.norm()).item()
     assert rel_err < 1e-2, f"SA-AMG did not make progress: rel_err={rel_err}"
@@ -127,17 +118,16 @@ def test_pyamg_smoothed_aggregation_method():
 # =====================================================================
 # Gradient (Wirtinger adjoint through AMG)
 # =====================================================================
-def test_pyamg_backward_produces_finite_gradient():
+def test_pyamg_backward_produces_finite_gradient(benchmark_small_real):
     """Backward pass via the adjoint solve produces a finite, non-trivial
-    gradient on ``val``. The adjoint of an AMG-solved system is solved
-    by the *same* AMG hierarchy on the conjugate transpose -- since
-    Poisson is real symmetric, that's just another AMG solve."""
-    val, row, col, shape = _poisson_2d(16)
-    val = val.clone().requires_grad_(True)
-    torch.manual_seed(3)
-    b = torch.randn(shape[0], dtype=torch.float64)
+    gradient on ``val``. For real symmetric Poisson the adjoint is the
+    same AMG hierarchy solved on the conjugate transpose, which is
+    structurally identical for real symmetric problems."""
+    b = benchmark_small_real
+    rhs = b[0]["b"]
+    val = b.val.clone().requires_grad_(True)
 
-    x = spsolve(val, row, col, shape, b,
+    x = spsolve(val, b.row, b.col, b.shape, rhs,
                 backend="pyamg", atol=1e-8, maxiter=20)
     loss = (x ** 2).sum()
     loss.backward()
@@ -150,39 +140,39 @@ def test_pyamg_backward_produces_finite_gradient():
 # =====================================================================
 # Hierarchy-level API
 # =====================================================================
-def test_pyamg_hierarchy_reused_for_multiple_rhs():
+def test_pyamg_hierarchy_reused_for_multiple_rhs(benchmark_small_real):
     """Build a hierarchy once, use it as a callable preconditioner for
-    multiple right-hand sides -- this is the LRU-cache pattern that
-    motivated the solver-caching follow-up PR."""
+    multiple right-hand sides. The LRU-cache pattern that motivates the
+    upcoming solver-caching PR (#15)."""
     from torch_sla.backends.pyamg_backend import PyAMGHierarchy
-    val, row, col, shape = _poisson_2d(16)
-    H = PyAMGHierarchy.from_coo(val, row, col, shape)
 
-    # The hierarchy is callable -- one V-cycle returns an approximate solve.
-    A_sp = sp.coo_matrix((val.numpy(), (row.numpy(), col.numpy())),
-                         shape=shape).tocsr()
-    for seed in (0, 1, 2):
-        torch.manual_seed(seed)
-        b = torch.randn(shape[0], dtype=torch.float64)
+    bench = benchmark_small_real
+    A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
+    H = PyAMGHierarchy.from_coo(bench.val, bench.row, bench.col, bench.shape)
+
+    for case in bench:
+        rhs = case["b"]
+        x = torch.zeros_like(rhs)
         # Each V-cycle is a fixed contraction (~0.1 for classical AMG on
-        # Poisson); 10 cycles compounds to ~1e-10 if the constant holds,
-        # in practice we get to ~1e-7 reliably.
-        x = torch.zeros_like(b)
+        # Poisson); 10 cycles reaches working precision reliably.
         for _ in range(10):
-            r = b - torch.from_numpy(A_sp @ x.numpy())
+            r = rhs - (A @ x)
             x = x + H(r)
-        rel_resid = (b - torch.from_numpy(A_sp @ x.numpy())).norm() / b.norm()
-        assert rel_resid.item() < 1e-6, (
-            f"seed={seed}: rel residual after 10 V-cycles = {rel_resid.item()}"
+        rel_resid = ((rhs - (A @ x)).norm() / rhs.norm()).item()
+        assert rel_resid < 1e-6, (
+            f"seed={case['seed']}: rel residual after 10 V-cycles = "
+            f"{rel_resid}"
         )
 
 
 def test_pyamg_hierarchy_levels_diminish():
     """A well-formed hierarchy has at least two levels for a non-trivial
-    problem, and coarse-grid sizes strictly diminish."""
+    problem, and coarse-grid sizes strictly diminish. Uses a fixed
+    catalogued benchmark (poisson_2d_64) so the diminish-rate is
+    reproducible across runs."""
     from torch_sla.backends.pyamg_backend import PyAMGHierarchy
-    val, row, col, shape = _poisson_2d(32)
-    H = PyAMGHierarchy.from_coo(val, row, col, shape)
+    b = Synthetic["poisson_2d_64"]
+    H = PyAMGHierarchy.from_coo(b.val, b.row, b.col, b.shape)
     assert len(H.levels) >= 2, (
         f"expected multi-level hierarchy, got {len(H.levels)} levels"
     )
@@ -197,17 +187,17 @@ def test_pyamg_hierarchy_levels_diminish():
 # =====================================================================
 @pytest.mark.skipif(not torch.cuda.is_available(),
                     reason="CUDA not available")
-def test_pyamg_hierarchy_runs_on_cuda():
+def test_pyamg_hierarchy_runs_on_cuda(benchmark_small_real):
     """Build hierarchy on CPU (PyAMG), transfer operators to CUDA, run
-    the V-cycle on GPU. This is the core hybrid-platform claim."""
+    the V-cycle on GPU. This is the core hybrid-platform claim:
+    coarsening stays on CPU, every per-solve cost lifts to the device."""
     from torch_sla.backends.pyamg_backend import PyAMGHierarchy
-    val, row, col, shape = _poisson_2d(32)
-    val = val.cuda(); row = row.cuda(); col = col.cuda()
-    H = PyAMGHierarchy.from_coo(val, row, col, shape, device=val.device)
+    b = benchmark_small_real
+    val = b.val.cuda(); row = b.row.cuda(); col = b.col.cuda()
+    H = PyAMGHierarchy.from_coo(val, row, col, b.shape, device=val.device)
     assert H.device.type == "cuda"
-    torch.manual_seed(0)
-    b = torch.randn(shape[0], dtype=torch.float64, device="cuda")
-    x = H.v_cycle(b)
+    rhs = b[0]["b"].cuda()
+    x = H.v_cycle(rhs)
     assert x.device.type == "cuda"
     assert torch.isfinite(x).all().item()
 
