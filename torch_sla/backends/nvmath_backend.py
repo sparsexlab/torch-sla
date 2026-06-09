@@ -35,10 +35,10 @@ _DTYPE_MAP = {
 _VALID_MATRIX_TYPES = ("general", "symmetric", "spd", "hermitian", "hpd")
 
 
-# nvmath is imported lazily so this module's pure-torch detection helpers
-# (detect_matrix_type, _check_symmetry, _check_positive_definite_gershgorin)
-# can run anywhere, even without a CUDA toolkit. The cuDSS solve call itself
-# does require nvmath -- that import happens inside ``nvmath_solve``.
+# nvmath is imported lazily so ``detect_matrix_type`` (a thin delegate to
+# ``SparseTensor.detect_matrix_type``) can run anywhere, even without a
+# CUDA toolkit. The cuDSS solve call itself does require nvmath -- that
+# import happens inside ``nvmath_solve``.
 _cudss = None  # set on first solve
 
 
@@ -72,84 +72,24 @@ def _load_cudss():
 # Auto matrix-type detection
 # ============================================================================
 
-def _check_symmetry(val, row, col, n, conjugate=False, atol=1e-10):
-    """Test whether A == A^T  (conjugate=False)  or  A == A^H  (conjugate=True).
+def detect_matrix_type(val, row, col, shape):
+    """Return the most specialised cuDSS matrix-type string the matrix
+    satisfies. Specialisation order is
 
-    Builds A as COO + coalesces, then subtracts the (transposed [+ conjugated])
-    twin and checks the max-abs-residual. Vectorised, runs on whatever device
-    the inputs live on.
+        general -> symmetric -> spd               (real)
+        general -> symmetric -> hermitian -> hpd  (complex)
+
+    Picking the most specialised label lets cuDSS use the cheapest
+    factorisation (Cholesky / LDL^H instead of LU). False positives are
+    guarded by the cuDSS-failure fallback in :func:`nvmath_solve`.
+
+    Backend-internal wrapper around
+    :meth:`torch_sla.SparseTensor.detect_matrix_type`; kept as a free
+    function so :func:`nvmath_solve` can resolve ``matrix_type='auto'``
+    without going through the SparseTensor API.
     """
-    idx_a = torch.stack([row, col], dim=0)
-    idx_b = torch.stack([col, row], dim=0)
-    val_b = val.conj() if conjugate else val
-    A = torch.sparse_coo_tensor(idx_a, val, (n, n)).coalesce()
-    B = torch.sparse_coo_tensor(idx_b, val_b, (n, n)).coalesce()
-    diff = (A - B).coalesce()
-    if diff._nnz() == 0:
-        return True
-    return diff.values().abs().max().item() < atol
-
-
-def _check_positive_definite_gershgorin(val, row, col, n, atol=1e-12):
-    """Conservative Gershgorin test for (Hermitian) positive-definiteness.
-
-    Returns True only when every Gershgorin disc lies strictly in the positive
-    real half-plane, i.e.
-
-        Re(A_ii) > sum_{j != i} |A_ij|   for all i.
-
-    True ⇒ matrix is HPD/SPD. False ⇒ unknown (Gershgorin is sufficient, not
-    necessary). The cuDSS solve will fall back to general LU if a wrongly
-    declared HPD/SPD matrix turns out not to factorise.
-    """
-    diag_mask = row == col
-    diag_rows = row[diag_mask]
-    diag_vals = val[diag_mask].real  # real diagonal for Hermitian; .real is a
-    #                                  no-op on real-dtype tensors.
-
-    real_dtype = val.abs().dtype
-    diag = torch.zeros(n, dtype=real_dtype, device=val.device)
-    diag.scatter_(0, diag_rows, diag_vals)
-
-    off_mask = ~diag_mask
-    off_rows = row[off_mask]
-    off_vals = val[off_mask].abs()
-    off_sum = torch.zeros(n, dtype=real_dtype, device=val.device)
-    off_sum.scatter_add_(0, off_rows, off_vals)
-
-    return bool(((diag > off_sum) & (diag > atol)).all().item())
-
-
-def detect_matrix_type(val, row, col, shape, atol=1e-10):
-    """Return the most specialised cuDSS matrix-type string that the matrix
-    actually satisfies. Order, from least to most specialised:
-
-        general -> symmetric -> spd       (real)
-        general -> symmetric -> hermitian -> hpd   (complex)
-
-    Picking the most specialised lets cuDSS use the cheapest factorisation
-    (Cholesky / LDL^H instead of LU). False positives are guarded by the
-    cuDSS-failure-fallback in nvmath_solve().
-    """
-    n = shape[0]
-    if val.numel() == 0:
-        return "general"
-
-    if val.is_complex():
-        if _check_symmetry(val, row, col, n, conjugate=True, atol=atol):
-            # Hermitian → check HPD
-            if _check_positive_definite_gershgorin(val, row, col, n):
-                return "hpd"
-            return "hermitian"
-        if _check_symmetry(val, row, col, n, conjugate=False, atol=atol):
-            return "symmetric"  # complex symmetric (cuDSS LDL^T)
-        return "general"
-    else:
-        if _check_symmetry(val, row, col, n, conjugate=False, atol=atol):
-            if _check_positive_definite_gershgorin(val, row, col, n):
-                return "spd"
-            return "symmetric"
-        return "general"
+    from ..sparse_tensor import SparseTensor
+    return SparseTensor(val, row, col, shape).detect_matrix_type()
 
 
 # ============================================================================

@@ -108,6 +108,19 @@ class Benchmark:
         self._cases: List[dict] = list(cases)
 
     # ------------------------------------------------------------------ #
+    # Trivial introspection
+    # ------------------------------------------------------------------ #
+    @property
+    def dtype(self) -> torch.dtype:
+        """Dtype of the matrix values (mirrors ``self.val.dtype``)."""
+        return self.val.dtype
+
+    @property
+    def is_complex(self) -> bool:
+        """``True`` if the matrix is stored in a complex dtype."""
+        return self.val.dtype.is_complex
+
+    # ------------------------------------------------------------------ #
     # Sequence protocol
     # ------------------------------------------------------------------ #
     def __len__(self) -> int:
@@ -173,19 +186,17 @@ class Benchmark:
     # ------------------------------------------------------------------ #
     def _make_random_cases(self, *, n_cases: int, seed: int) -> List[dict]:
         """Generate ``n_cases`` reference cases by drawing random ``x_ref``
-        and computing ``b = A @ x_ref``.
-
-        Uses ``torch.sparse_coo_tensor`` + ``torch.mv`` so the dtype path
-        matches what the solvers actually see (complex matvec, real
-        matvec, etc.). All cases live on CPU; move them yourself for GPU
-        benchmarks.
+        and computing ``b = A @ x_ref`` through :class:`SparseTensor`,
+        so dtype handling and matvec stay consistent with what the
+        solvers under test actually see.
         """
+        # Local import to dodge the circular benchmark <-> SparseTensor edge
+        # at module-load time (datasets.py is the natural top-level dep).
+        from .sparse_tensor import SparseTensor
+
         n = self.shape[0]
         dtype = self.val.dtype
-        # Coalesce once for stable matvec.
-        indices = torch.stack([self.row, self.col], dim=0)
-        A = torch.sparse_coo_tensor(indices, self.val, self.shape).coalesce()
-        is_complex = dtype.is_complex
+        A = SparseTensor(self.val, self.row, self.col, self.shape)
         real_dtype = (torch.float32 if dtype == torch.complex64
                       else torch.float64 if dtype == torch.complex128
                       else dtype)
@@ -193,13 +204,12 @@ class Benchmark:
         cases: List[dict] = []
         for i in range(n_cases):
             g = torch.Generator().manual_seed(seed + i)
-            if is_complex:
+            if dtype.is_complex:
                 x = (torch.randn(n, generator=g, dtype=real_dtype)
                      + 1j * torch.randn(n, generator=g, dtype=real_dtype)).to(dtype)
             else:
                 x = torch.randn(n, generator=g, dtype=dtype)
-            b = torch.mv(A, x)
-            cases.append({"x": x, "b": b, "seed": seed + i})
+            cases.append({"x": x, "b": A @ x, "seed": seed + i})
         return cases
 
 
@@ -280,6 +290,14 @@ class BenchmarkCollection(Mapping, abc.ABC):
     @abc.abstractmethod
     def notes(self, key: str) -> str:
         """One-line description of the benchmark with this key."""
+
+    @abc.abstractmethod
+    def dtype_for(self, key: str) -> torch.dtype:
+        """Dtype the materialised :class:`Benchmark` will carry for
+        ``key`` -- read from the catalogue *without* triggering a
+        download. Lets callers split entries by dtype (e.g. real vs
+        complex) during test-collection without paying for the matrices.
+        """
 
     def __repr__(self) -> str:
         return f"{self.source_name}({len(self)} entries)"

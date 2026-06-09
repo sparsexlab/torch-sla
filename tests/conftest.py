@@ -72,24 +72,15 @@ def benchmark_synthetic(request) -> Benchmark:
 # ---------------------------------------------------------------------- #
 # By dtype (mix all sources)
 # ---------------------------------------------------------------------- #
-# Hardcoded carve-out at the catalogue-key level so we don't have to
-# instantiate every benchmark (which would trigger network downloads
-# during pytest collection) just to read its dtype. ``"complex"`` in the
-# SuiteSparse key and ``"helmholtz"`` in the Synthetic key are the only
-# complex-dtype entries; everything else is real.
-def _is_complex_key(source: str, key: str) -> bool:
-    if source == "suitesparse":
-        return "complex" in key
-    if source == "synthetic":
-        return "helmholtz" in key
-    return False  # DIMACS10 entries are real Laplacians
-
-
-_ALL_KEYS = [
-    (src, key) for src, coll in Benchmarks.items() for key in coll
-]
-_REAL_KEYS = [(s, k) for s, k in _ALL_KEYS if not _is_complex_key(s, k)]
-_COMPLEX_KEYS = [(s, k) for s, k in _ALL_KEYS if _is_complex_key(s, k)]
+# Each ``BenchmarkCollection`` exposes ``dtype_for(key)``, so dtype-based
+# fixtures don't have to instantiate the matrices (which would trigger
+# network downloads during pytest collection) or hardcode any naming
+# heuristic.
+_ALL_KEYS = [(src, key) for src, coll in Benchmarks.items() for key in coll]
+_REAL_KEYS = [(s, k) for s, k in _ALL_KEYS
+              if not Benchmarks[s].dtype_for(k).is_complex]
+_COMPLEX_KEYS = [(s, k) for s, k in _ALL_KEYS
+                 if Benchmarks[s].dtype_for(k).is_complex]
 
 
 @pytest.fixture(params=_REAL_KEYS, ids=[f"{s}:{k}" for s, k in _REAL_KEYS])

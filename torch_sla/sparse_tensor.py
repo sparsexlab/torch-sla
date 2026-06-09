@@ -847,6 +847,7 @@ class SparseTensor:
         
         # Cache for computed properties
         self._is_symmetric_cache = None
+        self._is_hermitian_cache = None
         self._is_positive_definite_cache = None
         
         self._validate()
@@ -1356,10 +1357,19 @@ class SparseTensor:
                 f"is_batched={self.is_batched}, "
                 f"block_shape={self.block_shape}."
             )
-        from .backends.nvmath_backend import detect_matrix_type as _impl
-        return _impl(
-            self.values, self.row_indices, self.col_indices, self.sparse_shape
-        )
+        if self.values.numel() == 0:
+            return "general"
+
+        if self.values.is_complex():
+            if bool(self.is_hermitian().item()):
+                return "hpd" if bool(self.is_positive_definite().item()) else "hermitian"
+            if bool(self.is_symmetric().item()):
+                return "symmetric"  # complex symmetric, cuDSS LDL^T
+            return "general"
+        # Real path
+        if bool(self.is_symmetric().item()):
+            return "spd" if bool(self.is_positive_definite().item()) else "symmetric"
+        return "general"
 
     def T(self) -> "SparseTensor":
         """
@@ -1611,18 +1621,71 @@ class SparseTensor:
     # Property Detection (returns tensor for batched)
     # =========================================================================
     
+    def _check_pair_match(
+        self,
+        conjugate: bool,
+        atol: float,
+        rtol: float,
+    ) -> torch.Tensor:
+        """Check ``A == A^T`` (``conjugate=False``) or ``A == A^H``
+        (``conjugate=True``) via hash-paired index matching + value
+        comparison. Shared kernel for :meth:`is_symmetric` and
+        :meth:`is_hermitian`.
+        """
+        if not self.is_square:
+            result = torch.tensor(False, device=self.device)
+            if self.is_batched:
+                result = result.expand(self.batch_shape).clone()
+            return result
+
+        row = self.row_indices
+        col = self.col_indices
+        _, N = self.sparse_shape
+
+        forward_hash = row * N + col
+        transpose_hash = col * N + row
+        forward_order = forward_hash.argsort()
+        transpose_order = transpose_hash.argsort()
+
+        if not torch.equal(forward_hash[forward_order],
+                           transpose_hash[transpose_order]):
+            result = torch.tensor(False, device=self.device)
+            if self.is_batched:
+                result = result.expand(self.batch_shape).clone()
+            return result
+
+        if self.is_batched:
+            B = self.batch_size
+            vals_flat = self.values.reshape(B, self.nnz)
+            vals_forward = vals_flat[:, forward_order]
+            vals_transpose = vals_flat[:, transpose_order]
+            if conjugate:
+                vals_transpose = vals_transpose.conj()
+            diff = (vals_forward - vals_transpose).abs()
+            threshold = atol + rtol * vals_forward.abs()
+            return (diff <= threshold).all(dim=-1).reshape(self.batch_shape)
+
+        vals_forward = self.values[forward_order]
+        vals_transpose = self.values[transpose_order]
+        if conjugate:
+            vals_transpose = vals_transpose.conj()
+        diff = (vals_forward - vals_transpose).abs()
+        threshold = atol + rtol * vals_forward.abs()
+        return torch.tensor((diff <= threshold).all().item(),
+                            device=self.device)
+
     def is_symmetric(
-        self, 
-        atol: float = 1e-8, 
+        self,
+        atol: float = 1e-8,
         rtol: float = 1e-5,
         force_recompute: bool = False
     ) -> torch.Tensor:
         """
-        Check if the matrix is symmetric (A == A^T).
-        
+        Check if the matrix is symmetric (``A == A^T``).
+
         For batched tensors, checks each matrix independently and returns
         a boolean tensor with shape matching the batch dimensions.
-        
+
         Parameters
         ----------
         atol : float, optional
@@ -1631,75 +1694,50 @@ class SparseTensor:
             Relative tolerance for comparison. Default: 1e-5.
         force_recompute : bool, optional
             If True, recompute even if cached. Default: False.
-        
+
         Returns
         -------
         torch.Tensor
-            Boolean tensor with shape:
-            - [] (scalar) for non-batched tensors
-            - [*batch_shape] for batched tensors
-        
-        Examples
-        --------
-        >>> A = SparseTensor(val, row, col, (3, 3))
-        >>> A.is_symmetric()  # tensor(True) or tensor(False)
-        
-        >>> A_batch = SparseTensor(val_batch, row, col, (4, 3, 3))
-        >>> A_batch.is_symmetric()  # tensor([True, True, True, True])
+            Boolean tensor with shape ``[]`` (non-batched) or
+            ``[*batch_shape]`` (batched).
         """
         if self._is_symmetric_cache is not None and not force_recompute:
             return self._is_symmetric_cache
-        
-        if not self.is_square:
-            result = torch.tensor(False, device=self.device)
-            if self.is_batched:
-                result = result.expand(self.batch_shape)
-            self._is_symmetric_cache = result
-            return result
-        
-        row = self.row_indices
-        col = self.col_indices
-        M, N = self.sparse_shape
-        
-        # Create hash for (row, col) pairs
-        forward_hash = row * N + col
-        transpose_hash = col * N + row
-        
-        # Sort both to align
-        forward_order = forward_hash.argsort()
-        transpose_order = transpose_hash.argsort()
-        
-        sorted_forward_hash = forward_hash[forward_order]
-        sorted_transpose_hash = transpose_hash[transpose_order]
-        
-        # Check sparsity pattern
-        if not torch.equal(sorted_forward_hash, sorted_transpose_hash):
-            result = torch.tensor(False, device=self.device)
-            if self.is_batched:
-                result = result.expand(self.batch_shape).clone()
-            self._is_symmetric_cache = result
-            return result
-        
-        # Compare values
-        if self.is_batched:
-            B = self.batch_size
-            vals_flat = self.values.reshape(B, self.nnz)
-            vals_forward = vals_flat[:, forward_order]
-            vals_transpose = vals_flat[:, transpose_order]
-            
-            diff = (vals_forward - vals_transpose).abs()
-            threshold = atol + rtol * vals_forward.abs()
-            is_sym = (diff <= threshold).all(dim=-1)
-            result = is_sym.reshape(self.batch_shape)
-        else:
-            vals_forward = self.values[forward_order]
-            vals_transpose = self.values[transpose_order]
-            
-            diff = (vals_forward - vals_transpose).abs()
-            threshold = atol + rtol * vals_forward.abs()
-            result = torch.tensor((diff <= threshold).all().item(), device=self.device)
-        
+        result = self._check_pair_match(conjugate=False, atol=atol, rtol=rtol)
         self._is_symmetric_cache = result
+        return result
+
+    def is_hermitian(
+        self,
+        atol: float = 1e-8,
+        rtol: float = 1e-5,
+        force_recompute: bool = False
+    ) -> torch.Tensor:
+        """
+        Check if the matrix is Hermitian (``A == A^H``).
+
+        For real-valued matrices this is equivalent to
+        :meth:`is_symmetric`. For complex matrices it additionally
+        requires off-diagonal entries to be conjugate transposes and
+        diagonal entries to be real.
+
+        Parameters
+        ----------
+        atol, rtol : float
+            Absolute / relative tolerance, defaults ``1e-8`` / ``1e-5``.
+        force_recompute : bool
+            If ``True``, bypass the cached result.
+
+        Returns
+        -------
+        torch.Tensor
+            Boolean tensor with shape ``[]`` (non-batched) or
+            ``[*batch_shape]`` (batched).
+        """
+        if self._is_hermitian_cache is not None and not force_recompute:
+            return self._is_hermitian_cache
+        result = self._check_pair_match(conjugate=True, atol=atol, rtol=rtol)
+        self._is_hermitian_cache = result
         return result
     
     def is_positive_definite(
