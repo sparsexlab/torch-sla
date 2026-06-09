@@ -111,6 +111,7 @@ torch-sla is ideal for:
    introduction
    installation
    torch_sla
+   backends
    examples
    benchmarks
 
