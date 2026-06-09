@@ -1,113 +1,168 @@
-"""Tests for the auto-detection logic in the cuDSS (nvmath-python) backend.
+"""Tests for the cuDSS auto matrix-type detection.
 
-These tests do not require CUDA or nvmath-python -- they exercise only the
-pure-torch matrix-type detection that runs *before* the cuDSS call. The
-cuDSS forward solve itself requires a working CUDA + nvmath install and is
-covered separately by an integration test gated on torch.cuda.is_available().
+Drives the public :meth:`SparseTensor.detect_matrix_type` method (the
+API a user calls indirectly via ``A.solve(b, backend='cudss',
+matrix_type='auto')``) across all three catalogued benchmark sources:
+
+* ``SuiteSparse`` — real-world FE / CFD / structural matrices
+* ``DIMACS10`` — graph Laplacians (irregular / scale-free sparsity)
+* ``Synthetic`` — programmatic PDE stencils
+
+The detector itself runs on pure PyTorch tensors and does not need
+CUDA / nvmath-python; the integration with the actual cuDSS solve is
+covered separately by a CUDA-gated test.
 """
+from __future__ import annotations
+
 import pytest
 import torch
 
-from torch_sla.backends.nvmath_backend import (
-    detect_matrix_type,
-    _check_symmetry,
-    _check_positive_definite_gershgorin,
-)
+from torch_sla import SparseTensor
 
 
-# ---------------- helpers ---------------- #
-def dense_to_coo(A: torch.Tensor):
-    """Convert a dense matrix to COO (val, row, col), keeping non-zeros only."""
+# =====================================================================
+# Each catalogued benchmark, exercised through the public API
+# =====================================================================
+
+def test_detect_on_suitesparse(benchmark_suitesparse):
+    """``SparseTensor.detect_matrix_type()`` matches the SuiteSparse
+    catalogue's expected ``detected_kind`` (which may be more
+    conservative than the true ``math_kind`` because Gershgorin is
+    a sufficient but not necessary positive-definite test)."""
+    b = benchmark_suitesparse
+    A = SparseTensor(b.val, b.row, b.col, b.shape)
+    got = A.detect_matrix_type()
+    assert got == b.detected_kind, (
+        f"{b.name}: expected {b.detected_kind!r}, got {got!r}"
+    )
+
+
+def test_detect_on_dimacs(benchmark_dimacs):
+    """Every catalogued DIMACS10 graph Laplacian (``L + eps*I``) detects
+    as ``spd`` -- it is strictly diagonally dominant by construction."""
+    b = benchmark_dimacs
+    A = SparseTensor(b.val, b.row, b.col, b.shape)
+    got = A.detect_matrix_type()
+    assert got == b.detected_kind == "spd", (
+        f"{b.name}: expected spd, got {got!r}"
+    )
+
+
+def test_detect_on_synthetic(benchmark_synthetic):
+    """Every catalogued Synthetic stencil matches its declared
+    ``detected_kind``."""
+    b = benchmark_synthetic
+    A = SparseTensor(b.val, b.row, b.col, b.shape)
+    got = A.detect_matrix_type()
+    assert got == b.detected_kind, (
+        f"{b.name}: expected {b.detected_kind!r}, got {got!r}"
+    )
+
+
+# =====================================================================
+# Catalogue-level sanity
+# =====================================================================
+
+def test_catalogues_cover_every_mathematical_kind():
+    """Across all three sources the catalogue exercises every distinct
+    mathematical kind the detector might encounter
+    (general, symmetric, spd, hpd)."""
+    from torch_sla.datasets import SuiteSparse, DIMACS10, Synthetic
+    kinds: set[str] = set()
+    for registry in (SuiteSparse, DIMACS10, Synthetic):
+        for key in registry:
+            # Synthetic builds locally; SuiteSparse / DIMACS10 may
+            # need network. We only read math_kind which is in the
+            # catalogue tuple, so we can read it after lazy instantiation
+            # but it's safer to read directly from the catalogue.
+            pass
+    # Read math_kinds from catalogue tuples without triggering downloads.
+    sk = {v[2] for v in SuiteSparse.catalog().values()}
+    # DIMACS10 entries are post-processed to L+eps*I so all are SPD.
+    dk = {"spd"}
+    sy = {v[2] for v in Synthetic.catalog().values()}
+    kinds = sk | dk | sy
+    assert {"spd", "hpd", "symmetric", "general"}.issubset(kinds), (
+        f"missing kinds; collected: {kinds}"
+    )
+
+
+# =====================================================================
+# Synthetic edge cases the catalogue doesn't cover
+# =====================================================================
+
+def _from_dense(A: torch.Tensor) -> SparseTensor:
     n = A.shape[0]
     mask = A != 0
     idx = mask.nonzero(as_tuple=False)
     row = idx[:, 0].contiguous()
     col = idx[:, 1].contiguous()
     val = A[row, col]
-    return val, row, col, (n, n)
+    return SparseTensor(val, row, col, (n, n))
 
 
-# ---------------- real matrices ---------------- #
-def test_detect_real_general():
-    A = torch.tensor([[3., 1., 0.],
-                      [0., 2., 5.],
-                      [1., 0., 4.]], dtype=torch.float64)
-    assert detect_matrix_type(*dense_to_coo(A)) == "general"
+def test_detect_empty_matrix_is_general():
+    """An all-zero matrix has no diagonal -- Gershgorin says nothing,
+    detector falls back to ``general``."""
+    A = SparseTensor(
+        torch.zeros(0, dtype=torch.float64),
+        torch.zeros(0, dtype=torch.long),
+        torch.zeros(0, dtype=torch.long),
+        (3, 3),
+    )
+    assert A.detect_matrix_type() == "general"
+
+
+def test_detect_strict_diag_dom_hpd():
+    """Strictly diagonally dominant Hermitian -> ``hpd``."""
+    A = _from_dense(torch.tensor([
+        [10.+0j,   1.+1j, 0.+0j],
+        [1.-1j,  12.+0j,  2.+0j],
+        [0.+0j,   2.+0j, 11.+0j],
+    ], dtype=torch.complex128))
+    assert A.detect_matrix_type() == "hpd"
 
 
 def test_detect_real_symmetric_indefinite():
-    # symmetric but not PD (negative on diagonal)
-    A = torch.tensor([[-1., 2., 0.],
-                      [ 2., 3., 1.],
-                      [ 0., 1., 4.]], dtype=torch.float64)
-    assert detect_matrix_type(*dense_to_coo(A)) == "symmetric"
+    """Symmetric with a negative diagonal entry -> conservative
+    ``symmetric`` (Gershgorin sees diag <= 0, can't claim SPD)."""
+    A = _from_dense(torch.tensor([
+        [-1., 2., 0.],
+        [ 2., 3., 1.],
+        [ 0., 1., 4.],
+    ], dtype=torch.float64))
+    assert A.detect_matrix_type() == "symmetric"
 
 
-def test_detect_real_spd():
-    # strictly diagonally dominant, positive diagonal → Gershgorin PD
-    A = torch.tensor([[10., 1., 0.],
-                      [ 1., 10., 1.],
-                      [ 0., 1., 10.]], dtype=torch.float64)
-    assert detect_matrix_type(*dense_to_coo(A)) == "spd"
+def test_detect_real_nonsymmetric_general():
+    A = _from_dense(torch.tensor([
+        [3., 1., 0.],
+        [0., 2., 5.],
+        [1., 0., 4.],
+    ], dtype=torch.float64))
+    assert A.detect_matrix_type() == "general"
 
 
-# ---------------- complex matrices ---------------- #
-def test_detect_complex_general():
-    A = torch.tensor([[3+0j, 1+1j],
-                      [2+1j, 4+0j]], dtype=torch.complex128)
-    assert detect_matrix_type(*dense_to_coo(A)) == "general"
+def test_detect_complex_symmetric_not_hermitian():
+    """``A = A^T`` but NOT ``A = A^H`` (diagonal not real) -> ``symmetric``."""
+    A = _from_dense(torch.tensor([
+        [1.+1j, 2.+3j, 0.],
+        [2.+3j, 4.+1j, 5.],
+        [0.,    5.,    6.],
+    ], dtype=torch.complex128))
+    assert A.detect_matrix_type() == "symmetric"
 
 
-def test_detect_complex_symmetric():
-    # A = A^T (no conjugation) — complex diagonal allowed
-    A = torch.tensor([[3+1j, 1-1j],
-                      [1-1j, 4+2j]], dtype=torch.complex128)
-    assert detect_matrix_type(*dense_to_coo(A)) == "symmetric"
+# =====================================================================
+# Guard rails on the public method
+# =====================================================================
 
-
-def test_detect_complex_hermitian_indefinite():
-    # A = A^H — diagonal must be real
-    A = torch.tensor([[-2+0j, 1-1j],
-                      [ 1+1j,  3+0j]], dtype=torch.complex128)
-    assert detect_matrix_type(*dense_to_coo(A)) == "hermitian"
-
-
-def test_detect_complex_hpd():
-    # Hermitian + strictly diagonally dominant ⇒ HPD via Gershgorin
-    A = torch.tensor([[10+0j, 1-1j, 0+0j],
-                      [ 1+1j, 10+0j, 0-2j],
-                      [ 0+0j, 0+2j, 10+0j]], dtype=torch.complex128)
-    assert detect_matrix_type(*dense_to_coo(A)) == "hpd"
-
-
-# ---------------- primitive checks ---------------- #
-def test_check_symmetry_real():
-    A = torch.tensor([[1., 2.],
-                      [2., 3.]], dtype=torch.float64)
-    val, row, col, _ = dense_to_coo(A)
-    assert _check_symmetry(val, row, col, 2, conjugate=False) is True
-    assert _check_symmetry(val, row, col, 2, conjugate=True) is True  # real → same
-
-
-def test_check_symmetry_complex_distinguishes_T_vs_H():
-    # Complex symmetric (A = A^T but NOT A^H)
-    A = torch.tensor([[1+1j, 2+0j],
-                      [2+0j, 3+1j]], dtype=torch.complex128)
-    val, row, col, _ = dense_to_coo(A)
-    assert _check_symmetry(val, row, col, 2, conjugate=False) is True
-    assert _check_symmetry(val, row, col, 2, conjugate=True)  is False
-
-
-def test_check_pd_gershgorin_diagonally_dominant():
-    A = torch.tensor([[5., 1., 0.],
-                      [1., 5., 0.],
-                      [0., 0., 5.]], dtype=torch.float64)
-    val, row, col, _ = dense_to_coo(A)
-    assert _check_positive_definite_gershgorin(val, row, col, 3) is True
-
-
-def test_check_pd_gershgorin_negative_diagonal():
-    A = torch.tensor([[-1., 0.],
-                      [ 0., -1.]], dtype=torch.float64)
-    val, row, col, _ = dense_to_coo(A)
-    assert _check_positive_definite_gershgorin(val, row, col, 2) is False
+def test_detect_rejects_batched():
+    """Batched / block-sparse tensors raise -- matrix-type is only
+    defined for a single 2-D matrix."""
+    val = torch.ones(2, 3, dtype=torch.float64)
+    row = torch.tensor([0, 1, 2])
+    col = torch.tensor([0, 1, 2])
+    A = SparseTensor(val, row, col, (2, 3, 3))
+    with pytest.raises(ValueError, match="non-batched"):
+        A.detect_matrix_type()

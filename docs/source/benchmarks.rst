@@ -5,6 +5,197 @@ This section presents comprehensive benchmarks comparing torch-sla solvers acros
 
 ----
 
+Benchmark Catalogue
+-------------------
+
+torch-sla ships a small, opinionated catalogue of sparse test matrices
+behind a uniform :class:`~torch_sla.benchmark.Benchmark` interface.
+Three families are exposed; the entry point is the hierarchical
+:data:`~torch_sla.datasets.Benchmarks` mapping (``source -> catalogue ->
+benchmark``)::
+
+    from torch_sla.datasets import Benchmarks
+
+    bench = Benchmarks["suitesparse"]["complex_hpd"]    # lazy download
+    bench = Benchmarks["dimacs10"]["delaunay_small"]    # Laplacian regularisation
+    bench = Benchmarks["synthetic"]["poisson_2d_64"]    # built on the fly, no network
+
+Module-level singletons (:data:`~torch_sla.datasets.SuiteSparse`,
+:data:`~torch_sla.datasets.DIMACS10`, :data:`~torch_sla.datasets.Synthetic`)
+are equivalent shortcuts to each child collection. Every collection is
+a :class:`~torch_sla.datasets.BenchmarkCollection`
+(``Mapping[str, Benchmark]``) -- iteration only reads the static
+catalogue, individual ``__getitem__`` calls trigger any download.
+
+To sweep across every entry lazily, use the generator
+:func:`~torch_sla.datasets.iter_benchmarks`::
+
+    from torch_sla.datasets import iter_benchmarks
+
+    for source, key, bench in iter_benchmarks(sources={"synthetic", "suitesparse"}):
+        print(f"{source}:{key}", bench.shape, bench.math_kind)
+
+Each :class:`~torch_sla.benchmark.Benchmark` packages a matrix together
+with three random ``(x_ref, b)`` reference cases (``b = A @ x_ref``).
+``Benchmark.evaluate(solver, metric='rel_l2')`` runs your solver on
+each case and returns the error.
+
+Downloaded matrices are cached in the directory pointed to by the
+``TORCH_SLA_DATASET`` environment variable, defaulting to
+``~/.cache/torch_sla/datasets``.
+
+SuiteSparse Matrix Collection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Curated real-world matrices from the
+`SuiteSparse Matrix Collection <https://sparse.tamu.edu>`_ (Tim Davis et al.),
+covering every classification the cuDSS matrix-type detector must handle:
+
+.. list-table::
+   :widths: 22 22 14 14 28
+   :header-rows: 1
+
+   * - Key
+     - Source
+     - n
+     - Math kind
+     - Notes
+   * - ``real_spd``
+     - HB/bcsstk16
+     - 4884
+     - SPD (real)
+     - Harwell-Boeing structural stiffness; not strictly diag dominant
+   * - ``complex_hpd``
+     - Bai/mhd1280b
+     - 1280
+     - HPD
+     - MHD Alfven spectra; Hermitian positive definite
+   * - ``complex_sym``
+     - Bai/qc324
+     - 324
+     - Complex symmetric
+     - Quantum chemistry; ``A = A^T`` with complex diagonal
+   * - ``complex_general_mhd``
+     - Bai/mhd1280a
+     - 1280
+     - Complex general
+     - MHD A-matrix (pairs with ``mhd1280b``)
+   * - ``complex_general``
+     - HB/young1c
+     - 841
+     - Complex general
+     - Acoustic non-symmetric (David Young)
+
+DIMACS10 Graph Laplacians
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Adjacency matrices from the
+`10th DIMACS Implementation Challenge <https://www.cc.gatech.edu/dimacs10/>`_
+(graph partitioning / clustering), downloaded through the SuiteSparse
+mirror and converted to the regularised Laplacian ``L = D - A + eps*I``
+to obtain an SPD operator on a graph-sparsity pattern that the FE
+matrices in SuiteSparse do not exhibit.
+
+.. list-table::
+   :widths: 22 22 14 14 28
+   :header-rows: 1
+
+   * - Key
+     - Source
+     - n
+     - Math kind
+     - Notes
+   * - ``delaunay_small``
+     - DIMACS10/delaunay_n10
+     - 1024
+     - SPD
+     - Planar Delaunay mesh of 1024 random points; ~6-regular degree
+   * - ``delaunay_medium``
+     - DIMACS10/delaunay_n12
+     - 4096
+     - SPD
+     - Planar Delaunay mesh of 4096 random points
+   * - ``scale_free``
+     - DIMACS10/preferentialAttachment
+     - 100000
+     - SPD
+     - Barabasi-Albert preferential-attachment graph; power-law degree
+   * - ``small_world``
+     - DIMACS10/smallworld
+     - 100000
+     - SPD
+     - Watts-Strogatz small-world graph; high clustering + short paths
+
+Synthetic PDE Stencils
+~~~~~~~~~~~~~~~~~~~~~~
+
+Programmatic stencil generators built on the fly with ``scipy.sparse``
+Kronecker products. Useful for parameter sweeps (grid size, anisotropy
+coefficient, Peclet number, wavenumber) that real-world catalogues do
+not offer. No download required.
+
+.. list-table::
+   :widths: 22 22 14 14 28
+   :header-rows: 1
+
+   * - Key
+     - Stencil
+     - DOF
+     - Math kind
+     - Notes
+   * - ``poisson_2d_16``
+     - 5-point Laplacian (16x16)
+     - 256
+     - SPD
+     - Tiny smoke-test size; classic SPD
+   * - ``poisson_2d_64``
+     - 5-point Laplacian (64x64)
+     - 4096
+     - SPD
+     - Classic SPD; baseline iterative-solver target
+   * - ``poisson_3d_16``
+     - 7-point Laplacian (16x16x16)
+     - 4096
+     - SPD
+     - 3D analogue; more off-diagonals per row
+   * - ``anisotropic_2d_64_eps_001``
+     - ``-eps*d^2/dx^2 - d^2/dy^2``
+     - 4096
+     - SPD ill-cond
+     - ``eps=0.01``; cond ~ 100
+   * - ``convdiff_2d_64_peclet_10``
+     - Conv-diff with upwind
+     - 4096
+     - Real general
+     - ``Pe=10``; non-symmetric (needs LU)
+   * - ``helmholtz_2d_64_k_5``
+     - ``-Laplace - k^2 + i*sigma``
+     - 4096
+     - Complex symmetric
+     - Helmholtz w/ absorption; ``A = A^T`` not Hermitian
+
+Custom Benchmarks
+~~~~~~~~~~~~~~~~~
+
+Build your own :class:`~torch_sla.benchmark.Benchmark` by passing a COO
+triple and (optionally) a list of pre-computed cases::
+
+    from torch_sla.benchmark import Benchmark
+
+    val, row, col, shape = ...                  # any sparse matrix
+    bench = Benchmark(
+        name="my_matrix",
+        val=val, row=row, col=col, shape=shape,
+        n_cases=5, seed=42,                     # auto-generate 5 random cases
+    )
+
+    err = bench.evaluate(
+        lambda v, r, c, s, b: SparseTensor(v, r, c, s).solve(b),
+        metric="rel_l2",
+    )                                            # list[float]
+
+----
+
 Test Environment
 ----------------
 
