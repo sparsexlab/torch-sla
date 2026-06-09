@@ -51,6 +51,13 @@ from .linear_solve import (
     spsolve_csr,
 )
 
+from .solve import (
+    solve,
+    SolveInfo,
+    PreconditionerConfig,
+    MatrixLike,
+)
+
 from .batch_solve import (
     spsolve_batch_same_layout,
     spsolve_batch_different_layout,
