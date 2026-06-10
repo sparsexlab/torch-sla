@@ -104,32 +104,26 @@ def _amg_preconditioned(outer_solver: str, *,
     """Build a printf-style config for ``outer_solver`` (e.g. PBICGSTAB,
     PCG, FGMRES) preconditioned by classical AMG with a single V-cycle.
 
-    Mirrors the contents of AmgX's stock ``PBICGSTAB.json`` /
-    ``PCG.json`` files (which can't be loaded by name because ``create()``
-    expects a literal config blob on Windows, not a registry lookup)."""
+    Mirrors the minimal valid subset of AmgX's stock ``PBICGSTAB.json``
+    /``PCG.json`` files. We intentionally omit settings the parser
+    rejects in printf-style mode (``scope``, ``interpolator``,
+    ``obtain_timings`` -- the first is implicit in ``solver(name)=`` and
+    the others are JSON-only keys)."""
     return (
         "config_version=2,"
-        f"solver(main)=__OUTER__,"
-        "main:scope=main,"
+        f"solver(main)={outer_solver},"
         f"main:max_iters={maxiter},"
         f"main:tolerance={tol},"
         "main:convergence=ABSOLUTE,"
         "main:norm=L2,"
         "main:monitor_residual=1,"
         "main:print_solve_stats=0,"
-        "main:obtain_timings=0,"
         "main:preconditioner(amg)=AMG,"
-        "amg:scope=amg,"
-        "amg:solver=AMG,"
         "amg:max_iters=1,"
         "amg:cycle=V,"
-        "amg:max_levels=50,"
         "amg:presweeps=1,"
-        "amg:postsweeps=1,"
-        "amg:interpolator=D2,"
-        "amg:monitor_residual=0,"
-        "amg:print_solve_stats=0"
-    ).replace("__OUTER__", outer_solver)
+        "amg:postsweeps=1"
+    )
 
 
 def _amg_standalone(*, tol: float, maxiter: int) -> str:
@@ -138,19 +132,15 @@ def _amg_standalone(*, tol: float, maxiter: int) -> str:
     return (
         "config_version=2,"
         "solver(main)=AMG,"
-        "main:scope=main,"
         f"main:max_iters={maxiter},"
         f"main:tolerance={tol},"
         "main:convergence=ABSOLUTE,"
         "main:norm=L2,"
         "main:cycle=V,"
-        "main:max_levels=50,"
         "main:presweeps=1,"
         "main:postsweeps=1,"
-        "main:interpolator=D2,"
         "main:monitor_residual=1,"
-        "main:print_solve_stats=0,"
-        "main:obtain_timings=0"
+        "main:print_solve_stats=0"
     )
 
 
