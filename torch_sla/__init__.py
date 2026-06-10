@@ -58,11 +58,7 @@ from .solve import (
     MatrixLike,
 )
 
-from .solver_cache import (
-    SOLVER_CACHE,
-    SolverCache,
-    SparsityKey,
-)
+from .solver_cache import SOLVER_CACHE  # singleton; the class itself is internal
 
 from .batch_solve import (
     spsolve_batch_same_layout,

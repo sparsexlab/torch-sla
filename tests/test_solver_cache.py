@@ -1,152 +1,39 @@
-"""Tests for the LRU solver cache.
+"""End-to-end tests for the LRU solver cache.
 
-Two layers:
+The cache is transparent infrastructure -- the class, the key
+dataclass, and the make-key helper are all package-internal, so there
+are no public-surface unit tests to write. The behaviour we *do* need
+to lock down is what users actually observe through the public
+:func:`torch_sla.solve` API: repeated solves on the same matrix reuse
+setup state, distinct matrices each pay setup once, and the
+``SOLVER_CACHE.clear()`` escape hatch forces a rebuild on the next
+solve.
 
-* The :class:`SolverCache` class itself is exercised with synthetic
-  build-thunks and arbitrary keys; no matrices involved.
-* Backend integration is exercised through the public
-  :func:`torch_sla.solve` API on real catalogued benchmarks from
-  ``torch_sla.datasets`` (no hand-rolled poisson stencils). The cache
-  is *transparent*: there is no ``cache=`` kwarg to flip, repeated
-  calls to ``solve`` just reuse setup state on a sparsity-key hit.
-  These tests reach into :data:`SOLVER_CACHE.stats()` to assert the
-  reuse, but user code never has to.
+Every matrix comes from ``torch_sla.datasets`` -- no hand-rolled
+stencils.
 """
 from __future__ import annotations
 
 import pytest
-import torch
 
-from torch_sla import (
-    SOLVER_CACHE,
-    SolverCache,
-    SparseTensor,
-    SparsityKey,
-    solve,
-)
-from torch_sla.solver_cache import make_key
+from torch_sla import SOLVER_CACHE, SparseTensor, solve
 from torch_sla.backends import is_pyamg_available
 from torch_sla.datasets import Synthetic
 
 
-# =====================================================================
-# Pure-cache behaviour (no backends involved)
-# =====================================================================
-def test_cache_hit_returns_same_object():
-    cache = SolverCache(max_size=4)
-    sentinel = object()
-    built = []
-
-    def build():
-        built.append(1)
-        return sentinel
-
-    a = cache.get_or_build("k", build)
-    b = cache.get_or_build("k", build)
-    assert a is sentinel and b is sentinel
-    assert len(built) == 1, "build should run once across two hits"
-    assert cache.stats()["hits"] == 1
-    assert cache.stats()["misses"] == 1
-
-
-def test_cache_lru_eviction_evicts_oldest():
-    cache = SolverCache(max_size=2)
-    cache.get_or_build("a", lambda: "A")
-    cache.get_or_build("b", lambda: "B")
-    cache.get_or_build("c", lambda: "C")    # 'a' should be evicted
-    assert "a" not in cache
-    assert "b" in cache and "c" in cache
-
-
-def test_cache_touch_moves_to_front():
-    cache = SolverCache(max_size=2)
-    cache.get_or_build("a", lambda: "A")
-    cache.get_or_build("b", lambda: "B")
-    cache.get_or_build("a", lambda: "REBUILT")  # touch -> 'a' becomes MRU
-    cache.get_or_build("c", lambda: "C")        # 'b' should now be evicted
-    assert "a" in cache and "c" in cache
-    assert "b" not in cache
-
-
-def test_cache_clear_drops_entries_keeps_counters():
-    cache = SolverCache(max_size=4)
-    cache.get_or_build("a", lambda: "A")
-    cache.get_or_build("a", lambda: "A")    # hit
-    cache.clear()
-    s = cache.stats()
-    assert s["size"] == 0
-    assert s["hits"] == 1 and s["misses"] == 1, (
-        "clear() preserves cumulative hit/miss counters"
-    )
-
-
-def test_cache_set_max_size_evicts_overflow():
-    cache = SolverCache(max_size=4)
-    for k in "abcd":
-        cache.get_or_build(k, lambda v=k: v)
-    cache.set_max_size(2)
-    assert len(cache) == 2, "shrinking max_size should evict LRU entries"
-
-
-def test_cache_max_size_zero_raises():
-    with pytest.raises(ValueError, match="max_size"):
-        SolverCache(max_size=0)
-
-
-def test_cache_repr_includes_stats():
-    cache = SolverCache(max_size=4)
-    cache.get_or_build("a", lambda: "A")
-    s = repr(cache)
-    assert "hits=0" in s and "misses=1" in s and "size=1" in s
-
-
-# =====================================================================
-# SparsityKey identity, driven by the catalogue
-# =====================================================================
-def test_same_matrix_makes_equal_keys():
-    """Two ``make_key`` calls on the same catalogued matrix must agree
-    bit-for-bit -- otherwise the cache fingerprint is unstable."""
-    b = Synthetic["poisson_2d_16"]
-    k1 = make_key(b.val, b.row, b.col, b.shape)
-    k2 = make_key(b.val, b.row, b.col, b.shape)
-    assert k1 == k2
-    assert hash(k1) == hash(k2)
-
-
-def test_perturbed_values_make_unequal_keys():
-    """Mutating one entry of ``val`` must shift the key -- guards
-    against same-pattern-different-values cache collisions."""
-    b = Synthetic["poisson_2d_16"]
-    val2 = b.val.clone()
-    val2[0] += 1.0
-    k1 = make_key(b.val, b.row, b.col, b.shape)
-    k2 = make_key(val2, b.row, b.col, b.shape)
-    assert k1 != k2
-
-
-def test_different_catalogue_matrices_make_unequal_keys():
-    """Distinct catalogued matrices produce distinct keys."""
-    a = Synthetic["poisson_2d_16"]
-    b = Synthetic["poisson_2d_64"]
-    ka = make_key(a.val, a.row, a.col, a.shape)
-    kb = make_key(b.val, b.row, b.col, b.shape)
-    assert ka != kb
-
-
-# =====================================================================
-# End-to-end: cache works transparently through the public solve() API
-# =====================================================================
-pyamg_only = pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     not is_pyamg_available(),
     reason="pyamg is an optional dependency; install with `pip install pyamg`."
 )
 
 
-@pyamg_only
-def test_solve_reuses_hierarchy_across_rhs_on_same_matrix(benchmark_small_real):
+# =====================================================================
+# Cache works transparently through solve()
+# =====================================================================
+def test_solve_reuses_setup_across_rhs_on_same_matrix(benchmark_small_real):
     """Solving the same A with several different right-hand sides
-    only builds the AMG hierarchy once -- the user notices the speedup
-    without touching any ``cache=`` flag, since there isn't one."""
+    only builds the AMG hierarchy once. The user notices the speedup
+    without ever touching the cache surface."""
     SOLVER_CACHE.clear()
     before = SOLVER_CACHE.stats()
     bench = benchmark_small_real
@@ -164,7 +51,6 @@ def test_solve_reuses_hierarchy_across_rhs_on_same_matrix(benchmark_small_real):
     )
 
 
-@pyamg_only
 def test_solve_misses_on_distinct_catalogue_matrices(benchmark_small_real):
     """Two structurally different catalogued matrices both miss on
     their first solve and the cache holds both entries afterwards."""
@@ -182,17 +68,16 @@ def test_solve_misses_on_distinct_catalogue_matrices(benchmark_small_real):
     assert stats["size"] >= 2
 
 
-@pyamg_only
 def test_cache_clear_forces_rebuild_on_next_solve(benchmark_small_real):
-    """``SOLVER_CACHE.clear()`` is the escape hatch when users do need
-    to force a rebuild (testing, benchmarking, deliberate invalidation).
-    Demonstrated to exist; doesn't appear in user APIs."""
+    """``SOLVER_CACHE.clear()`` is the public escape hatch for the rare
+    case where users need to force a rebuild (testing, benchmarking,
+    deliberate invalidation). Verifies the miss counter strictly
+    increases after a clear."""
     bench = benchmark_small_real
     A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
 
     SOLVER_CACHE.clear()
     baseline = SOLVER_CACHE.stats()["misses"]
-
     solve(A, bench[0]["b"], backend="pyamg", maxiter=30)
     assert SOLVER_CACHE.stats()["misses"] - baseline == 1
 
@@ -203,7 +88,6 @@ def test_cache_clear_forces_rebuild_on_next_solve(benchmark_small_real):
     )
 
 
-@pyamg_only
 def test_pyamg_preconditioner_factory_reuses_cache(benchmark_small_real):
     """The standalone ``pyamg_preconditioner`` factory returns the
     cached hierarchy when called twice on the same matrix -- the

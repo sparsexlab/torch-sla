@@ -192,10 +192,21 @@ class SolverCache:
 # Module-level singleton
 # ====================================================================== #
 SOLVER_CACHE = SolverCache(max_size=8)
-"""Default cache used by :func:`torch_sla.solve` when ``cache=True``.
+"""The cache instance reused by every backend.
 
-Replace with a custom :class:`SolverCache` instance, or adjust the
-existing one's max size via :meth:`SolverCache.set_max_size`."""
+The cache is transparent infrastructure: users never construct one
+themselves and the surrounding ``SolverCache`` class / ``SparsityKey``
+dataclass / ``make_key`` helper are package-internal. The singleton
+exposes a small surface for diagnostic and tuning:
+
+* ``SOLVER_CACHE.clear()`` -- drop all entries
+* ``SOLVER_CACHE.set_max_size(N)`` -- resize (evicts overflow)
+* ``SOLVER_CACHE.stats()`` -- ``{hits, misses, size, max_size}``
+"""
 
 
-__all__ = ["SolverCache", "SparsityKey", "make_key", "SOLVER_CACHE"]
+# Only the singleton is part of the user-facing surface. The
+# ``SolverCache`` class, the ``SparsityKey`` fingerprint, and
+# ``make_key`` are intra-package implementation details -- backends
+# import them via explicit relative imports.
+__all__ = ["SOLVER_CACHE"]
