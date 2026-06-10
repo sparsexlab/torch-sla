@@ -168,6 +168,15 @@ parameters: any combination where the cell is ✔ is supported::
               preconditioner=PreconditionerConfig(kind="ssor", omega=1.2),
               atol=1e-10, maxiter=5_000)
 
+    # CPU iterative CG with a real multi-level AMG preconditioner
+    # (uses PyAMG when installed, falls back to the lightweight
+    # 2-level stub otherwise). Reduces the iteration count by 10-100x
+    # on ill-conditioned PDE problems.
+    x = solve(A_csr, b,
+              backend="pytorch", method="cg",
+              preconditioner="amg",  # or PreconditionerConfig(kind="amg", ...)
+              atol=1e-10, maxiter=200)
+
     # Diagnostic return -- iteration count + residual
     x, info = solve(A_csr, b, return_info=True)
     print(info.iter_count, info.residual, info.converged)

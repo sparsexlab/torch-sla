@@ -472,6 +472,44 @@ def amg_preconditioner(A: CachedSparseMatrix, num_smooth: int = 1, omega: float 
     return apply
 
 
+def pyamg_hierarchy_preconditioner(
+    A: CachedSparseMatrix,
+    *,
+    method: str = "ruge_stuben",
+    strength: float = 0.25,
+    num_pre_smooth: int = 1,
+    num_post_smooth: int = 1,
+    **kwargs,
+) -> Callable[[Tensor], Tensor]:
+    """Full PyAMG-backed multigrid preconditioner.
+
+    Builds a real Ruge-Stuben / smoothed-aggregation hierarchy via PyAMG
+    on CPU and then runs the V-cycle through ``torch.sparse`` SpMV on
+    whatever device :class:`CachedSparseMatrix` lives on. Much stronger
+    than the 2-level ``amg_preconditioner`` stub, especially on
+    anisotropic / ill-conditioned problems where multi-level coarsening
+    is essential.
+
+    Returns the :class:`PyAMGHierarchy` itself (it's already callable as
+    ``M^{-1} r``), so callers can also hold on to it for inspection /
+    caching across solves.
+
+    Raises ``ImportError`` if pyamg is not installed.
+    """
+    # Lazy import: the module-level pyamg_backend imports torch + scipy
+    # which we already pulled, but explicit lazy-load keeps the
+    # "pyamg not installed" path producing a clean error rather than a
+    # cryptic ImportError at file load time.
+    from .pyamg_backend import PyAMGHierarchy
+    return PyAMGHierarchy.from_coo(
+        A.val, A.row, A.col, A.shape,
+        device=A.device, dtype=A.dtype,
+        method=method, strength=strength,
+        num_pre_smooth=num_pre_smooth,
+        num_post_smooth=num_post_smooth,
+    )
+
+
 def estimate_condition_number(A: CachedSparseMatrix, num_iters: int = 20) -> float:
     """
     Estimate matrix condition number using power iteration.
@@ -604,12 +642,27 @@ def get_preconditioner(A: CachedSparseMatrix, name: str = 'jacobi',
     elif name == 'ic0':
         precond = ic0_preconditioner(A)
     elif name == 'amg':
-        precond = amg_preconditioner(A)
+        # Prefer real PyAMG hierarchy when available; otherwise the
+        # original 2-level stub. Both expose the same callable shape.
+        try:
+            from .pyamg_backend import is_pyamg_available
+            if is_pyamg_available():
+                precond = pyamg_hierarchy_preconditioner(A)
+            else:
+                precond = amg_preconditioner(A)
+        except ImportError:
+            precond = amg_preconditioner(A)
+    elif name == 'pyamg':
+        # Explicit PyAMG path; surface a clear error if not installed.
+        precond = pyamg_hierarchy_preconditioner(A)
     elif name == 'none':
         return lambda r: r
     else:
-        raise ValueError(f"Unknown preconditioner: {name}. "
-                        f"Available: auto, jacobi, ssor, block_jacobi, polynomial, ic0, amg, none")
+        raise ValueError(
+            f"Unknown preconditioner: {name}. "
+            f"Available: auto, jacobi, ssor, block_jacobi, polynomial, "
+            f"ic0, amg, pyamg, none"
+        )
     
     if mixed_precision and A.dtype == torch.float64:
         # Wrap preconditioner to use float32 internally
