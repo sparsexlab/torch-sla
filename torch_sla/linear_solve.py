@@ -52,6 +52,7 @@ from .backends import (
     is_cupy_available,
     is_cudss_available,
     is_pyamg_available,
+    is_amgx_available,
     select_backend,
     select_method,
     BACKEND_METHODS,
@@ -94,6 +95,41 @@ class SparseLinearSolveScipySuperLU(Function):
         # makes the Wirtinger gradient correct.
         gradb = scipy_solve(torch.conj_physical(val), col, row, (shape[1], shape[0]), gradu,
                            method=method, atol=atol, maxiter=maxiter)
+        gradval = -gradb[row] * torch.conj_physical(u[col])
+        if gradval.dim() == 2:
+            gradval = gradval.sum(-1)
+        return gradval, None, None, None, gradb, None, None, None
+
+
+class SparseLinearSolveAmgX(Function):
+    """NVIDIA AmgX (via pyamgx) GPU solver with gradient support.
+
+    Forward: build AmgX resources/config/matrix/solver (consulting
+    ``SOLVER_CACHE``), run ``solver.solve`` on the right-hand side.
+    Backward: build the conjugate-transpose system, solve via the same
+    AmgX path, assemble the adjoint gradient.
+    """
+
+    @staticmethod
+    def forward(ctx, val, row, col, shape, b, tol, maxiter, method):
+        from .backends.amgx_backend import amgx_solve
+        u = amgx_solve(val, row, col, shape, b,
+                       tol=tol, maxiter=maxiter, method=method)
+        ctx.save_for_backward(val, row, col, u)
+        ctx.shape = shape
+        ctx.tol = tol
+        ctx.maxiter = maxiter
+        ctx.method = method
+        return u
+
+    @staticmethod
+    def backward(ctx, gradu):
+        from .backends.amgx_backend import amgx_solve
+        val, row, col, u = ctx.saved_tensors
+        shape = ctx.shape
+        gradb = amgx_solve(torch.conj_physical(val), col, row,
+                           (shape[1], shape[0]), gradu,
+                           tol=ctx.tol, maxiter=ctx.maxiter, method=ctx.method)
         gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -628,6 +664,22 @@ def spsolve(
         return SparseLinearSolvePyTorch.apply(val, row, col, shape, b, method, atol, rtol, maxiter, preconditioner, mixed_precision)
 
     # ========================================================================
+    # AmgX backend (Linux + Windows + NVIDIA CUDA only)
+    # ========================================================================
+    elif backend == "amgx":
+        if not val.is_cuda:
+            raise ValueError("AmgX backend requires CUDA tensors")
+        if not is_amgx_available():
+            raise RuntimeError(
+                "AmgX backend is not available. Install with: "
+                "pip install --extra-index-url https://pypi.walkerchi.com "
+                "torch-sla-amgx"
+            )
+        amgx_method = "pbicgstab" if method == "auto" else method
+        return SparseLinearSolveAmgX.apply(val, row, col, shape, b,
+                                           atol, maxiter, amgx_method)
+
+    # ========================================================================
     # PyAMG-hybrid backend (CPU setup + torch.sparse V-cycle; cross-platform)
     # ========================================================================
     elif backend == "pyamg":
@@ -649,7 +701,7 @@ def spsolve(
     else:
         raise ValueError(
             f"Unknown backend: {backend}. "
-            f"Available: scipy, eigen, pytorch, cupy, cudss, pyamg"
+            f"Available: scipy, eigen, pytorch, cupy, cudss, pyamg, amgx"
         )
 
 
