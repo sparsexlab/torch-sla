@@ -76,6 +76,15 @@ The current backend lineup and what each supports:
      - --
      - --
      - ✔
+   * - ``amgx``
+     - --
+     - ✔
+     - --
+     - AMG, PCG, PBiCGStab, FGMRES (NVIDIA AmgX)
+     - --
+     - --
+     - --
+     - ✔
 
 ----
 

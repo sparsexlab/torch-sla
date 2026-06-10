@@ -28,6 +28,18 @@ The :class:`AmgXSolver` itself is transparently cached via
 :data:`~torch_sla.solver_cache.SOLVER_CACHE` keyed on sparsity +
 config, so repeated solves on the same matrix reuse the GPU setup
 exactly like PyAMG does.
+
+Known limitations (validated on RTX 5060 / CUDA 12.8 / pyamgx 0.1):
+
+* **Cache invalidation mid-process is unsafe**: calling
+  ``SOLVER_CACHE.clear()`` and then building a *new* AmgX solver
+  with a *different* config inside the same Python process can trip
+  AmgX's internal resource accounting and abort with
+  ``STATUS_STACK_BUFFER_OVERRUN``. Workaround: build hierarchies
+  with a single config per process. The transparent same-config
+  reuse path (the common case) is solid.
+* **macOS** is not supported by Nvidia for CUDA -- the backend errors
+  cleanly on construction.
 """
 from __future__ import annotations
 
