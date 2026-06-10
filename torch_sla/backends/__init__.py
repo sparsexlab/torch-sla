@@ -51,7 +51,8 @@ from typing import Optional, List, Dict, Literal
 import torch
 
 # Type aliases
-BackendType = Literal['scipy', 'eigen', 'pytorch', 'cupy', 'cudss', 'pyamg', 'auto']
+BackendType = Literal['scipy', 'eigen', 'pytorch', 'cupy', 'cudss', 'pyamg',
+                      'amgx', 'auto']
 MethodType = Literal[
     'auto',
     # Direct methods
@@ -70,6 +71,7 @@ BACKEND_METHODS: Dict[str, List[str]] = {
     'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
     'cudss': ['lu', 'cholesky', 'ldlt'],
     'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],
+    'amgx': ['amg', 'cg', 'pcg', 'bicgstab', 'pbicgstab', 'gmres', 'fgmres'],
 }
 
 # Default methods for each backend (based on benchmarks)
@@ -80,6 +82,7 @@ DEFAULT_METHODS: Dict[str, str] = {
     'cupy': 'lu',             # GPU direct solver via SuperLU
     'cudss': 'cholesky',     # Best for CUDA: fastest + high precision
     'pyamg': 'ruge_stuben',   # Classical AMG; works for most PDE / SPD problems
+    'amgx':  'pbicgstab',     # AmgX's most robust default; AMG-preconditioned
 }
 
 # Threshold for switching from direct to iterative on CUDA (DOF)
@@ -169,6 +172,29 @@ def is_pyamg_available() -> bool:
         except ImportError:
             _pyamg_available = False
     return _pyamg_available
+
+
+_amgx_available = None
+def is_amgx_available() -> bool:
+    """Check if the AmgX backend is available (Linux + Windows + NVIDIA CUDA).
+
+    Requires both ``pyamgx`` (the Cython wrapper) *and* the AmgX shared
+    library (``amgxsh.dll`` / ``libamgxsh.so``). Both come bundled in
+    the optional ``torch-sla-amgx`` package; install via::
+
+        pip install --extra-index-url https://pypi.walkerchi.com torch-sla-amgx
+    """
+    global _amgx_available
+    if _amgx_available is None:
+        if not _check_cuda():
+            _amgx_available = False
+        else:
+            try:
+                import pyamgx  # noqa: F401
+                _amgx_available = True
+            except ImportError:
+                _amgx_available = False
+    return _amgx_available
 
 
 def get_available_backends() -> List[str]:
