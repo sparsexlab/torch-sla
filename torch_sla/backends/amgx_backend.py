@@ -90,51 +90,99 @@ def _ensure_initialized():
 
 
 # ====================================================================== #
-# Method dispatch -- prefers AmgX's built-in named configs for robustness,
-# falls back to a hand-rolled config string for the methods that don't
-# have a matching built-in.
+# Method dispatch -- hand-rolled printf-style config strings. AmgX's
+# parser accepts ``config_version=2`` followed by ``solver(scope)=TYPE``
+# declarations plus ``scope:key=value`` settings. Nested preconditioners
+# are written ``parent:preconditioner(scope)=TYPE`` -- the parens around
+# the scope name are required, otherwise the parser errors with
+# "Incorrect amgx configuration provided".
 # ====================================================================== #
-#
-# AmgX named configs (validated to load on tb16) -- this is the
-# robust path because the parser accepts these without further
-# template substitution.
-_NAMED_CONFIGS = {
-    "amg":       "AMG_CLASSICAL_AGGRESSIVE_HMIS",
-    "pbicgstab": "PBICGSTAB_AGGREGATION_W_JACOBI",
-    "bicgstab":  "PBICGSTAB_AGGREGATION_W_JACOBI",
-    "pcg":       "PCG_F",
-    "cg":        "PCG_F",
-    "gmres":     "FGMRES_AGGREGATION",
-    "fgmres":    "FGMRES_AGGREGATION",
-}
+
+
+def _amg_preconditioned(outer_solver: str, *,
+                        tol: float, maxiter: int) -> str:
+    """Build a printf-style config for ``outer_solver`` (e.g. PBICGSTAB,
+    PCG, FGMRES) preconditioned by classical AMG with a single V-cycle.
+
+    Mirrors the contents of AmgX's stock ``PBICGSTAB.json`` /
+    ``PCG.json`` files (which can't be loaded by name because ``create()``
+    expects a literal config blob on Windows, not a registry lookup)."""
+    return (
+        "config_version=2,"
+        f"solver(main)=__OUTER__,"
+        "main:scope=main,"
+        f"main:max_iters={maxiter},"
+        f"main:tolerance={tol},"
+        "main:convergence=ABSOLUTE,"
+        "main:norm=L2,"
+        "main:monitor_residual=1,"
+        "main:print_solve_stats=0,"
+        "main:obtain_timings=0,"
+        "main:preconditioner(amg)=AMG,"
+        "amg:scope=amg,"
+        "amg:solver=AMG,"
+        "amg:max_iters=1,"
+        "amg:cycle=V,"
+        "amg:max_levels=50,"
+        "amg:presweeps=1,"
+        "amg:postsweeps=1,"
+        "amg:interpolator=D2,"
+        "amg:monitor_residual=0,"
+        "amg:print_solve_stats=0"
+    ).replace("__OUTER__", outer_solver)
+
+
+def _amg_standalone(*, tol: float, maxiter: int) -> str:
+    """AMG used as the standalone iterative solver (one V-cycle per
+    outer iteration)."""
+    return (
+        "config_version=2,"
+        "solver(main)=AMG,"
+        "main:scope=main,"
+        f"main:max_iters={maxiter},"
+        f"main:tolerance={tol},"
+        "main:convergence=ABSOLUTE,"
+        "main:norm=L2,"
+        "main:cycle=V,"
+        "main:max_levels=50,"
+        "main:presweeps=1,"
+        "main:postsweeps=1,"
+        "main:interpolator=D2,"
+        "main:monitor_residual=1,"
+        "main:print_solve_stats=0,"
+        "main:obtain_timings=0"
+    )
 
 
 def _resolve_config(method: str, *, tol: float, maxiter: int) -> str:
-    """Map a torch-sla method label to an AmgX config string.
+    """Map a torch-sla method label to a printf-style AmgX config blob.
 
-    Returns one of:
-    * a built-in named config (e.g. ``"AMG_CLASSICAL_AGGRESSIVE_HMIS"``)
-      -- the robust default for each method;
-    * a literal printf-style AmgX config string (when the caller passes
-      one in via ``method``, detected by the ``config_version=`` marker).
+    Accepted methods:
 
-    Tolerance and ``maxiter`` knobs are honoured by named configs whose
-    underlying solver supports them; for built-in configs without
-    runtime override hooks they fall back to the named defaults
-    (typically 1e-6 / 100 iters).
+    * ``"auto"`` / ``"pbicgstab"`` / ``"bicgstab"`` -- PBICGSTAB + AMG
+    * ``"pcg"`` / ``"cg"``                          -- PCG + AMG
+    * ``"fgmres"`` / ``"gmres"``                    -- FGMRES + AMG
+    * ``"amg"``                                     -- standalone AMG
+
+    A literal AmgX config string (containing ``config_version=``) is
+    also accepted and passed through unchanged.
     """
     method = method.lower()
     if "config_version" in method:
-        # Caller passed a literal AmgX config string -- pass through.
         return method
-    if method == "auto":
-        method = "pbicgstab"
-    if method not in _NAMED_CONFIGS:
-        raise ValueError(
-            f"Unknown AmgX method {method!r}; expected one of "
-            f"{sorted(_NAMED_CONFIGS)} or a literal AmgX config string."
-        )
-    return _NAMED_CONFIGS[method]
+    if method in ("auto", "pbicgstab", "bicgstab"):
+        return _amg_preconditioned("PBICGSTAB", tol=tol, maxiter=maxiter)
+    if method in ("pcg", "cg"):
+        return _amg_preconditioned("PCG", tol=tol, maxiter=maxiter)
+    if method in ("fgmres", "gmres"):
+        return _amg_preconditioned("FGMRES", tol=tol, maxiter=maxiter)
+    if method == "amg":
+        return _amg_standalone(tol=tol, maxiter=maxiter)
+    raise ValueError(
+        f"Unknown AmgX method {method!r}; expected one of auto / amg / "
+        f"cg / pcg / bicgstab / pbicgstab / gmres / fgmres, or a literal "
+        f"AmgX config string."
+    )
 
 
 # ====================================================================== #
