@@ -67,6 +67,15 @@ The current backend lineup and what each supports:
      - --
      - --
      - ✔
+   * - ``pyamg``
+     - ✔
+     - ✔ (V-cycle only)
+     - --
+     - Ruge-Stuben AMG, Smoothed Aggregation
+     - --
+     - --
+     - --
+     - ✔
 
 ----
 
@@ -111,6 +120,15 @@ which OS each one builds on today.
      - --
      - Requires ``nvmath-python[cu12]`` + NVIDIA CUDA. macOS is not
        supported by Nvidia.
+   * - ``pyamg``
+     - ✔
+     - ✔
+     - ✔
+     - Setup runs on CPU via the optional ``pyamg`` dependency
+       (``pip install pyamg``); the V-cycle dispatches through
+       ``torch.sparse`` so the cycle itself runs on whatever device
+       the matrix lives on. **Cross-platform AMG**: macOS gets CPU AMG,
+       CUDA boxes get GPU V-cycles.
 
 ----
 
@@ -171,10 +189,11 @@ preconditioning and high-end GPU AMG:
      - Capability
      - Notes
    * - ``pyamg``
-     - planned
-     - CPU AMG (smoother + V-cycle hierarchy)
-     - Pure-Python; cross-platform. Setup on CPU, V-cycle dispatched
-       through ``torch.sparse`` so the cycle itself runs on any device.
+     - **available** (this release)
+     - CPU AMG setup + cross-device V-cycle
+     - Already shipping. See above. Standalone solver +
+       :class:`~torch_sla.backends.pyamg_backend.PyAMGHierarchy` for
+       preconditioner re-use.
    * - ``amgx``
      - planned
      - CUDA AMG + Krylov (Nvidia AmgX)

@@ -51,13 +51,15 @@ from typing import Optional, List, Dict, Literal
 import torch
 
 # Type aliases
-BackendType = Literal['scipy', 'eigen', 'pytorch', 'cupy', 'cudss', 'auto']
+BackendType = Literal['scipy', 'eigen', 'pytorch', 'cupy', 'cudss', 'pyamg', 'auto']
 MethodType = Literal[
     'auto',
     # Direct methods
     'lu', 'umfpack', 'cholesky', 'ldlt',
     # Iterative methods
-    'cg', 'cgs', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr', 'lsqr', 'lsmr'
+    'cg', 'cgs', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr', 'lsqr', 'lsmr',
+    # AMG variants (pyamg / amgx / petsc)
+    'amg', 'ruge_stuben', 'smoothed_aggregation', 'sa',
 ]
 
 # Backend -> supported methods mapping
@@ -67,6 +69,7 @@ BACKEND_METHODS: Dict[str, List[str]] = {
     'pytorch': ['cg', 'bicgstab'],  # PyTorch-native iterative with Jacobi preconditioning
     'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
     'cudss': ['lu', 'cholesky', 'ldlt'],
+    'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],
 }
 
 # Default methods for each backend (based on benchmarks)
@@ -76,6 +79,7 @@ DEFAULT_METHODS: Dict[str, str] = {
     'pytorch': 'cg',         # Use CG for SPD (most common), with Jacobi preconditioning
     'cupy': 'lu',             # GPU direct solver via SuperLU
     'cudss': 'cholesky',     # Best for CUDA: fastest + high precision
+    'pyamg': 'ruge_stuben',   # Classical AMG; works for most PDE / SPD problems
 }
 
 # Threshold for switching from direct to iterative on CUDA (DOF)
@@ -152,6 +156,19 @@ def is_cudss_available() -> bool:
             except ImportError:
                 _cudss_available = False
     return _cudss_available
+
+
+_pyamg_available = None
+def is_pyamg_available() -> bool:
+    """Check if the PyAMG backend is available (CPU AMG; cross-platform)."""
+    global _pyamg_available
+    if _pyamg_available is None:
+        try:
+            import pyamg  # noqa: F401
+            _pyamg_available = True
+        except ImportError:
+            _pyamg_available = False
+    return _pyamg_available
 
 
 def get_available_backends() -> List[str]:
