@@ -25,6 +25,8 @@ Capability matrix per backend is in :doc:`backends`.
 from __future__ import annotations
 
 import dataclasses
+import functools
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional, Tuple, Union
 
@@ -36,8 +38,18 @@ __all__ = [
     "solve",
     "SolveInfo",
     "PreconditionerConfig",
+    "SolverConfig",
     "MatrixLike",
 ]
+
+
+# ====================================================================== #
+# Sentinel used to distinguish "user didn't pass" from "user passed
+# the documented default value" -- needed so that a wrapping
+# ``SolverConfig`` scope can inject defaults only when the call site is
+# silent on a kwarg.
+# ====================================================================== #
+_UNSET = object()
 
 
 # ====================================================================== #
@@ -114,6 +126,113 @@ class SolveInfo:
     converged: bool = True
     method: str = ""
     backend: str = ""
+
+
+# ====================================================================== #
+# Thread-local stack of scoped solve() defaults (powering SolverConfig)
+# ====================================================================== #
+class _DefaultsStack(threading.local):
+    """Per-thread stack of merged kwargs dicts from active SolverConfig
+    scopes. Innermost wins via dict-merge semantics; explicit kwargs
+    passed to :func:`solve` always beat the stack."""
+
+    def __init__(self):
+        self.stack: list = []
+
+
+_STACK = _DefaultsStack()
+
+
+def _active_defaults() -> dict:
+    """Return the merged kwargs from every active :class:`SolverConfig`
+    scope on the current thread. Innermost scope wins."""
+    merged: dict = {}
+    for layer in _STACK.stack:
+        merged.update(layer)
+    return merged
+
+
+@dataclass(frozen=True)
+class SolverConfig:
+    """Bundle of default :func:`solve` kwargs, usable as a context
+    manager or decorator to apply those defaults to every ``solve``
+    call inside its scope.
+
+    Any field left as ``None`` means "don't touch the default" -- an
+    inactive entry in the merged kwargs dict. Explicit kwargs passed
+    to ``solve(...)`` always override the scope.
+
+    Examples
+    --------
+    Context-manager form, in a single optimisation loop where every
+    solve uses the same backend / preconditioner / tolerances::
+
+        from torch_sla import solve, SolverConfig
+
+        with SolverConfig(backend="pyamg", atol=1e-8, maxiter=50):
+            for theta in parameters:
+                x = solve(A(theta), b)        # picks up defaults
+                ...
+
+    Decorator form, attaching defaults to a function::
+
+        @SolverConfig(backend="pytorch", method="cg", preconditioner="amg")
+        def pde_step(A, b):
+            return solve(A, b)                # cg + amg by default
+
+    Explicit kwargs always win::
+
+        with SolverConfig(method="cg"):
+            x = solve(A, b)                   # cg
+            y = solve(A, b, method="lu")      # lu (override)
+
+    Scopes nest -- inner scope's non-None fields override the outer::
+
+        with SolverConfig(backend="pytorch", atol=1e-8):
+            with SolverConfig(atol=1e-12):
+                solve(A, b)                   # backend=pytorch, atol=1e-12
+    """
+
+    method: Optional[str] = None
+    backend: Optional[str] = None
+    preconditioner: Union[str, "PreconditionerConfig", None, type(_UNSET)] = _UNSET
+    atol: Optional[float] = None
+    rtol: Optional[float] = None
+    maxiter: Optional[int] = None
+    x0: Optional[Tensor] = None
+    matrix_type: Optional[str] = None
+    mixed_precision: Optional[bool] = None
+    return_info: Optional[bool] = None
+    verbose: Optional[bool] = None
+
+    def _kwargs(self) -> dict:
+        """Return only the fields the user actually set."""
+        out: dict = {}
+        for f in dataclasses.fields(self):
+            v = getattr(self, f.name)
+            # preconditioner uses _UNSET (None is a legitimate user choice meaning
+            # "no preconditioning"); the others use None as the inactive marker.
+            if f.name == "preconditioner":
+                if v is not _UNSET:
+                    out["preconditioner"] = v
+            elif v is not None:
+                out[f.name] = v
+        return out
+
+    def __enter__(self) -> "SolverConfig":
+        _STACK.stack.append(self._kwargs())
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        _STACK.stack.pop()
+
+    def __call__(self, fn: Callable) -> Callable:
+        """Decorator form: ``@SolverConfig(...) def f(): ...``."""
+        @functools.wraps(fn)
+        def wrapped(*args, **kw):
+            with self:
+                return fn(*args, **kw)
+        return wrapped
 
 
 # Type alias for everything :func:`solve` accepts as the matrix argument.
@@ -219,17 +338,17 @@ def solve(
     b: Tensor,
     *,
     shape: Optional[Tuple[int, int]] = None,
-    method: MethodName = "auto",
-    backend: BackendName = "auto",
-    preconditioner: Union[str, PreconditionerConfig, None] = None,
-    atol: float = 1e-10,
-    rtol: float = 1e-6,
-    maxiter: int = 10_000,
-    x0: Optional[Tensor] = None,
-    matrix_type: str = "general",
-    mixed_precision: bool = False,
-    return_info: bool = False,
-    verbose: bool = False,
+    method: Any = _UNSET,
+    backend: Any = _UNSET,
+    preconditioner: Any = _UNSET,
+    atol: Any = _UNSET,
+    rtol: Any = _UNSET,
+    maxiter: Any = _UNSET,
+    x0: Any = _UNSET,
+    matrix_type: Any = _UNSET,
+    mixed_precision: Any = _UNSET,
+    return_info: Any = _UNSET,
+    verbose: Any = _UNSET,
 ) -> Union[Tensor, Tuple[Tensor, SolveInfo]]:
     """Solve ``A x = b`` with autograd support; the user-facing entry point.
 
@@ -283,6 +402,32 @@ def solve(
     >>> x, info = solve(A, b, return_info=True)               # diagnostics
     >>> info.iter_count, info.residual, info.converged
     """
+    # Resolve unset kwargs from the active SolverConfig scope, then fall
+    # back to hard-coded defaults. Explicit user kwargs always win.
+    _defaults = _active_defaults()
+    def _pick(name, hardcoded):
+        v = locals_dict[name]
+        if v is not _UNSET:
+            return v
+        return _defaults.get(name, hardcoded)
+    locals_dict = {
+        "method": method, "backend": backend, "preconditioner": preconditioner,
+        "atol": atol, "rtol": rtol, "maxiter": maxiter, "x0": x0,
+        "matrix_type": matrix_type, "mixed_precision": mixed_precision,
+        "return_info": return_info, "verbose": verbose,
+    }
+    method         = _pick("method", "auto")
+    backend        = _pick("backend", "auto")
+    preconditioner = _pick("preconditioner", None)
+    atol           = _pick("atol", 1e-10)
+    rtol           = _pick("rtol", 1e-6)
+    maxiter        = _pick("maxiter", 10_000)
+    x0             = _pick("x0", None)
+    matrix_type    = _pick("matrix_type", "general")
+    mixed_precision = _pick("mixed_precision", False)
+    return_info    = _pick("return_info", False)
+    verbose        = _pick("verbose", False)
+
     val, row, col, sh = _coerce_to_coo(
         A, shape=shape, device=b.device, dtype=b.dtype
     )
