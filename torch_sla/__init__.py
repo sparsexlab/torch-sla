@@ -55,6 +55,7 @@ from .solve import (
     solve,
     SolveInfo,
     PreconditionerConfig,
+    SolverConfig,
     MatrixLike,
 )
 
