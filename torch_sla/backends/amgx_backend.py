@@ -31,7 +31,6 @@ exactly like PyAMG does.
 """
 from __future__ import annotations
 
-import atexit
 import warnings
 from typing import Any, Callable, Optional, Tuple
 
@@ -78,14 +77,22 @@ def is_amgx_available() -> bool:
 
 def _ensure_initialized():
     """``pyamgx.initialize()`` must be called once per process before any
-    AmgX resource is built; ``finalize()`` runs at interpreter shutdown
-    via :mod:`atexit`."""
+    AmgX resource is built.
+
+    We deliberately do **not** register ``pyamgx.finalize()`` with
+    :mod:`atexit`: the AmgX runtime requires all Config / Resources /
+    Matrix / Solver objects to be destroyed before ``finalize()`` runs,
+    but Python's interpreter-shutdown ordering destroys atexit-registered
+    callbacks before module-level globals (including :data:`SOLVER_CACHE`
+    which still holds :class:`AmgXSolver` instances). Letting the OS
+    reclaim GPU memory on process exit avoids a crash; the printed
+    \"memory leaks\" notice from AmgX during shutdown is cosmetic.
+    """
     global _AMGX_INITIALIZED
     if _AMGX_INITIALIZED:
         return
     pyamgx = _load_pyamgx()
     pyamgx.initialize()
-    atexit.register(pyamgx.finalize)
     _AMGX_INITIALIZED = True
 
 
