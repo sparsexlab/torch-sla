@@ -90,59 +90,51 @@ def _ensure_initialized():
 
 
 # ====================================================================== #
-# Default config strings -- AmgX uses a printf-style key=value language
+# Method dispatch -- prefers AmgX's built-in named configs for robustness,
+# falls back to a hand-rolled config string for the methods that don't
+# have a matching built-in.
 # ====================================================================== #
-# A robust default that works on any SPD / general matrix. Users can
-# override via the ``config_str`` kwarg on solve / preconditioner.
-DEFAULT_CONFIG = (
-    "config_version=2,"
-    "solver(main)=PBICGSTAB,"
-    "main:max_iters={maxiter},"
-    "main:tolerance={tol},"
-    "main:norm=L2,"
-    "main:convergence=ABSOLUTE,"
-    "main:monitor_residual=1,"
-    "main:print_solve_stats=0,"
-    "main:preconditioner=amg,"
-    "amg:solver=AMG,"
-    "amg:cycle=V,"
-    "amg:max_iters=1,"
-    "amg:scope=amg"
-)
-
-
-_CONFIG_PRESETS = {
+#
+# AmgX named configs (validated to load on tb16) -- this is the
+# robust path because the parser accepts these without further
+# template substitution.
+_NAMED_CONFIGS = {
     "amg":       "AMG_CLASSICAL_AGGRESSIVE_HMIS",
-    "pbicgstab": DEFAULT_CONFIG,
-    "pcg":       DEFAULT_CONFIG.replace("solver(main)=PBICGSTAB",
-                                        "solver(main)=PCG"),
-    "fgmres":    DEFAULT_CONFIG.replace("solver(main)=PBICGSTAB",
-                                        "solver(main)=FGMRES"),
+    "pbicgstab": "PBICGSTAB_AGGREGATION_W_JACOBI",
+    "bicgstab":  "PBICGSTAB_AGGREGATION_W_JACOBI",
+    "pcg":       "PCG_F",
+    "cg":        "PCG_F",
+    "gmres":     "FGMRES_AGGREGATION",
+    "fgmres":    "FGMRES_AGGREGATION",
 }
 
 
 def _resolve_config(method: str, *, tol: float, maxiter: int) -> str:
-    """Map a torch-sla method label to an AmgX config string."""
+    """Map a torch-sla method label to an AmgX config string.
+
+    Returns one of:
+    * a built-in named config (e.g. ``"AMG_CLASSICAL_AGGRESSIVE_HMIS"``)
+      -- the robust default for each method;
+    * a literal printf-style AmgX config string (when the caller passes
+      one in via ``method``, detected by the ``config_version=`` marker).
+
+    Tolerance and ``maxiter`` knobs are honoured by named configs whose
+    underlying solver supports them; for built-in configs without
+    runtime override hooks they fall back to the named defaults
+    (typically 1e-6 / 100 iters).
+    """
     method = method.lower()
-    if method in ("auto", "pbicgstab", "bicgstab"):
-        template = _CONFIG_PRESETS["pbicgstab"]
-    elif method in ("cg", "pcg"):
-        template = _CONFIG_PRESETS["pcg"]
-    elif method in ("gmres", "fgmres"):
-        template = _CONFIG_PRESETS["fgmres"]
-    elif method == "amg":
-        # Named built-in config -- no template substitution.
-        return _CONFIG_PRESETS["amg"]
-    elif "config_version" in method:
+    if "config_version" in method:
         # Caller passed a literal AmgX config string -- pass through.
         return method
-    else:
+    if method == "auto":
+        method = "pbicgstab"
+    if method not in _NAMED_CONFIGS:
         raise ValueError(
             f"Unknown AmgX method {method!r}; expected one of "
-            f"amg / cg / pcg / bicgstab / pbicgstab / fgmres / gmres / auto, "
-            f"or a literal AmgX config string."
+            f"{sorted(_NAMED_CONFIGS)} or a literal AmgX config string."
         )
-    return template.format(tol=tol, maxiter=maxiter)
+    return _NAMED_CONFIGS[method]
 
 
 # ====================================================================== #
