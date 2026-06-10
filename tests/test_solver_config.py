@@ -138,6 +138,37 @@ def test_decorator_does_not_leak_after_return():
     assert _active_defaults() == {}
 
 
+def test_priority_decorator_outer_context_inner_kwarg_topmost():
+    """Locks down the documented precedence: explicit kwarg > innermost
+    scope > outer scope, where decorator and ``with`` block follow the
+    same LIFO rule."""
+    bench = Synthetic["poisson_2d_16"]
+    A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
+    rhs = bench[0]["b"]
+
+    @SolverConfig(backend="pytorch", method="cg", atol=1e-2)
+    def pipeline():
+        # 1. Inside decorator, no inner context -- decorator wins.
+        x, info = solve(A, rhs, maxiter=500, return_info=True)
+        assert info.backend == "pytorch" and info.method == "cg", info
+
+        # 2. Inner context overrides outer field; outer fields still apply.
+        with SolverConfig(atol=1e-10):
+            x, info = solve(A, rhs, maxiter=2000, return_info=True)
+            # outer decorator method=cg + backend=pytorch survive;
+            # atol was overridden so this should converge tighter:
+            assert info.residual < 1e-7, f"inner atol should bite; got {info.residual}"
+
+        # 3. Explicit kwarg beats both outer decorator AND inner context.
+        with SolverConfig(method="cg"):
+            x, info = solve(A, rhs, method="lu", backend="scipy", return_info=True)
+            assert info.method == "lu" and info.backend == "scipy", info
+
+    pipeline()
+    # 4. After return, no scope active.
+    assert _active_defaults() == {}
+
+
 def test_nested_scopes_inner_wins_in_solve():
     """Two nested scopes; inner's tolerance wins."""
     bench = Synthetic["poisson_2d_16"]

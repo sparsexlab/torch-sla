@@ -180,17 +180,27 @@ class SolverConfig:
         def pde_step(A, b):
             return solve(A, b)                # cg + amg by default
 
-    Explicit kwargs always win::
+    Precedence (highest to lowest) when a value comes from multiple
+    sources:
 
-        with SolverConfig(method="cg"):
-            x = solve(A, b)                   # cg
-            y = solve(A, b, method="lu")      # lu (override)
+    1. **Explicit kwarg passed to** :func:`solve` -- always wins.
+    2. **Innermost active scope** -- most recently entered context or
+       decorator scope on the current thread.
+    3. **Outer scopes** in stack order (LIFO).
+    4. **Hard-coded default** documented on :func:`solve`.
 
-    Scopes nest -- inner scope's non-None fields override the outer::
+    The decorator form is implemented as ``with self:`` around the
+    function body, so a decorator and a ``with`` block follow the same
+    LIFO rule -- whichever was entered last wins. Concretely::
 
-        with SolverConfig(backend="pytorch", atol=1e-8):
-            with SolverConfig(atol=1e-12):
-                solve(A, b)                   # backend=pytorch, atol=1e-12
+        @SolverConfig(method="cg", atol=1e-8)     # outer (entered on call)
+        def my_pipeline():
+            with SolverConfig(atol=1e-12):        # inner (entered inside body)
+                solve(A, b)                        # method=cg, atol=1e-12
+                solve(A, b, atol=1e-6)             # method=cg, atol=1e-6 (kwarg wins)
+            solve(A, b)                            # method=cg, atol=1e-8 (back to decorator)
+
+        my_pipeline()                              # after return: no active scope
     """
 
     method: Optional[str] = None
