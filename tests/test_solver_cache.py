@@ -1,8 +1,16 @@
 """Tests for the LRU solver cache.
 
-The cache is backend-agnostic and currently consumed by the PyAMG
-hybrid backend (PR #14 / #15). These tests cover both the cache class
-itself in isolation *and* its integration through ``solve()``.
+Two layers:
+
+* The :class:`SolverCache` class itself is exercised with synthetic
+  build-thunks and arbitrary keys; no matrices involved.
+* Backend integration is exercised through the public
+  :func:`torch_sla.solve` API on real catalogued benchmarks from
+  ``torch_sla.datasets`` (no hand-rolled poisson stencils). The cache
+  is *transparent*: there is no ``cache=`` kwarg to flip, repeated
+  calls to ``solve`` just reuse setup state on a sparsity-key hit.
+  These tests reach into :data:`SOLVER_CACHE.stats()` to assert the
+  reuse, but user code never has to.
 """
 from __future__ import annotations
 
@@ -18,6 +26,7 @@ from torch_sla import (
 )
 from torch_sla.solver_cache import make_key
 from torch_sla.backends import is_pyamg_available
+from torch_sla.datasets import Synthetic
 
 
 # =====================================================================
@@ -53,9 +62,8 @@ def test_cache_touch_moves_to_front():
     cache = SolverCache(max_size=2)
     cache.get_or_build("a", lambda: "A")
     cache.get_or_build("b", lambda: "B")
-    # Touch 'a' so it becomes most-recently-used.
-    cache.get_or_build("a", lambda: "REBUILT")
-    cache.get_or_build("c", lambda: "C")    # 'b' should now be evicted, not 'a'
+    cache.get_or_build("a", lambda: "REBUILT")  # touch -> 'a' becomes MRU
+    cache.get_or_build("c", lambda: "C")        # 'b' should now be evicted
     assert "a" in cache and "c" in cache
     assert "b" not in cache
 
@@ -93,39 +101,40 @@ def test_cache_repr_includes_stats():
 
 
 # =====================================================================
-# SparsityKey identity
+# SparsityKey identity, driven by the catalogue
 # =====================================================================
 def test_same_matrix_makes_equal_keys():
-    n = 16
-    val = torch.tensor([2.0, 3.0, 4.0])
-    row = torch.tensor([0, 1, 2])
-    col = torch.tensor([0, 1, 2])
-    k1 = make_key(val, row, col, (n, n))
-    k2 = make_key(val, row, col, (n, n))
+    """Two ``make_key`` calls on the same catalogued matrix must agree
+    bit-for-bit -- otherwise the cache fingerprint is unstable."""
+    b = Synthetic["poisson_2d_16"]
+    k1 = make_key(b.val, b.row, b.col, b.shape)
+    k2 = make_key(b.val, b.row, b.col, b.shape)
     assert k1 == k2
     assert hash(k1) == hash(k2)
 
 
 def test_perturbed_values_make_unequal_keys():
-    n = 16
-    row = torch.tensor([0, 1, 2])
-    col = torch.tensor([0, 1, 2])
-    k1 = make_key(torch.tensor([2.0, 3.0, 4.0]), row, col, (n, n))
-    k2 = make_key(torch.tensor([2.0, 3.0, 5.0]), row, col, (n, n))
-    assert k1 != k2, "different values should produce different keys"
-
-
-def test_different_shapes_make_unequal_keys():
-    val = torch.tensor([1.0])
-    row = torch.tensor([0])
-    col = torch.tensor([0])
-    k1 = make_key(val, row, col, (3, 3))
-    k2 = make_key(val, row, col, (4, 4))
+    """Mutating one entry of ``val`` must shift the key -- guards
+    against same-pattern-different-values cache collisions."""
+    b = Synthetic["poisson_2d_16"]
+    val2 = b.val.clone()
+    val2[0] += 1.0
+    k1 = make_key(b.val, b.row, b.col, b.shape)
+    k2 = make_key(val2, b.row, b.col, b.shape)
     assert k1 != k2
 
 
+def test_different_catalogue_matrices_make_unequal_keys():
+    """Distinct catalogued matrices produce distinct keys."""
+    a = Synthetic["poisson_2d_16"]
+    b = Synthetic["poisson_2d_64"]
+    ka = make_key(a.val, a.row, a.col, a.shape)
+    kb = make_key(b.val, b.row, b.col, b.shape)
+    assert ka != kb
+
+
 # =====================================================================
-# End-to-end: PyAMG hierarchy reuse via solve()
+# End-to-end: cache works transparently through the public solve() API
 # =====================================================================
 pyamg_only = pytest.mark.skipif(
     not is_pyamg_available(),
@@ -134,9 +143,10 @@ pyamg_only = pytest.mark.skipif(
 
 
 @pyamg_only
-def test_solve_pyamg_reuses_hierarchy_across_rhs(benchmark_small_real):
-    """Solving the same A with three different RHS only builds the
-    hierarchy once."""
+def test_solve_reuses_hierarchy_across_rhs_on_same_matrix(benchmark_small_real):
+    """Solving the same A with several different right-hand sides
+    only builds the AMG hierarchy once -- the user notices the speedup
+    without touching any ``cache=`` flag, since there isn't one."""
     SOLVER_CACHE.clear()
     before = SOLVER_CACHE.stats()
     bench = benchmark_small_real
@@ -155,26 +165,9 @@ def test_solve_pyamg_reuses_hierarchy_across_rhs(benchmark_small_real):
 
 
 @pyamg_only
-def test_solve_pyamg_cache_false_forces_rebuild(benchmark_small_real):
-    """Passing ``cache=False`` through the explicit pyamg_solve entry
-    point skips both the lookup and the insert."""
-    from torch_sla.backends.pyamg_backend import pyamg_solve
-    SOLVER_CACHE.clear()
-    before = SOLVER_CACHE.stats()
-    bench = benchmark_small_real
-    for case in bench:
-        pyamg_solve(bench.val, bench.row, bench.col, bench.shape,
-                    case["b"], cache=False, tol=1e-8, maxiter=30)
-    after = SOLVER_CACHE.stats()
-    assert after == before, (
-        f"cache=False should not touch SOLVER_CACHE; before={before}, after={after}"
-    )
-
-
-@pyamg_only
-def test_solve_pyamg_different_matrix_misses(benchmark_small_real):
-    """Two structurally different matrices both miss on first solve."""
-    from torch_sla.datasets import Synthetic
+def test_solve_misses_on_distinct_catalogue_matrices(benchmark_small_real):
+    """Two structurally different catalogued matrices both miss on
+    their first solve and the cache holds both entries afterwards."""
     SOLVER_CACHE.clear()
     a = benchmark_small_real
     Aa = SparseTensor(a.val, a.row, a.col, a.shape)
@@ -190,9 +183,31 @@ def test_solve_pyamg_different_matrix_misses(benchmark_small_real):
 
 
 @pyamg_only
-def test_pyamg_preconditioner_factory_uses_cache(benchmark_small_real):
+def test_cache_clear_forces_rebuild_on_next_solve(benchmark_small_real):
+    """``SOLVER_CACHE.clear()`` is the escape hatch when users do need
+    to force a rebuild (testing, benchmarking, deliberate invalidation).
+    Demonstrated to exist; doesn't appear in user APIs."""
+    bench = benchmark_small_real
+    A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
+
+    SOLVER_CACHE.clear()
+    baseline = SOLVER_CACHE.stats()["misses"]
+
+    solve(A, bench[0]["b"], backend="pyamg", maxiter=30)
+    assert SOLVER_CACHE.stats()["misses"] - baseline == 1
+
+    SOLVER_CACHE.clear()
+    solve(A, bench[0]["b"], backend="pyamg", maxiter=30)
+    assert SOLVER_CACHE.stats()["misses"] - baseline == 2, (
+        "after clear the second solve must miss again"
+    )
+
+
+@pyamg_only
+def test_pyamg_preconditioner_factory_reuses_cache(benchmark_small_real):
     """The standalone ``pyamg_preconditioner`` factory returns the
-    cached hierarchy when called twice on the same matrix."""
+    cached hierarchy when called twice on the same matrix -- the
+    factory and the solver share one cache."""
     from torch_sla.backends.pyamg_backend import pyamg_preconditioner
     SOLVER_CACHE.clear()
     b = benchmark_small_real
