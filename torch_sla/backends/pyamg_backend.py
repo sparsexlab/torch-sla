@@ -269,6 +269,30 @@ class PyAMGHierarchy:
 # ====================================================================== #
 # Standalone AMG solver
 # ====================================================================== #
+def _build_or_lookup_hierarchy(
+    val: Tensor, row: Tensor, col: Tensor, shape: Tuple[int, int],
+    *, method: str, kwargs: dict,
+) -> "PyAMGHierarchy":
+    """Build a new hierarchy, consulting :data:`SOLVER_CACHE` first.
+
+    The cache is an implementation detail -- there is no opt-out flag on
+    the user-facing API. Callers who genuinely need to force a rebuild
+    (testing, benchmarking, deliberate invalidation) reach for one of:
+
+    * :meth:`SOLVER_CACHE.clear` -- nuke everything
+    * pass an explicit ``hierarchy=...`` kwarg to bypass setup entirely
+    * shrink the cache via ``SOLVER_CACHE.set_max_size(0)`` -- evicts
+      everything and continues with insertions that immediately spill
+    """
+    from ..solver_cache import SOLVER_CACHE, make_key
+    key = ("pyamg-hierarchy", make_key(val, row, col, shape),
+           method, tuple(sorted(kwargs.items())))
+    return SOLVER_CACHE.get_or_build(
+        key, lambda: PyAMGHierarchy.from_coo(val, row, col, shape,
+                                             method=method, **kwargs)
+    )
+
+
 def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
                 shape: Tuple[int, int], b: Tensor,
                 *,
@@ -282,7 +306,11 @@ def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
     """Solve ``A x = b`` using AMG as a standalone iterative solver.
 
     One V-cycle per outer iteration; converges in <10 iterations for
-    most well-conditioned PDE problems.
+    most well-conditioned PDE problems. The multigrid hierarchy is
+    transparently reused across calls via
+    :data:`~torch_sla.solver_cache.SOLVER_CACHE`; users don't toggle the
+    cache, they just call this function repeatedly with the same matrix
+    and pay setup cost only on the first call.
 
     Parameters
     ----------
@@ -297,14 +325,15 @@ def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
     method : ``"ruge_stuben"`` | ``"smoothed_aggregation"``
         PyAMG coarsening method.
     hierarchy : :class:`PyAMGHierarchy`, optional
-        Reuse a pre-built hierarchy (skips PyAMG setup); the calling
-        code is responsible for ensuring the sparsity pattern matches.
+        Reuse a caller-managed hierarchy explicitly, skipping the cache
+        lookup entirely. The caller is responsible for ensuring the
+        sparsity pattern matches.
     return_info : bool
         If ``True``, return ``(x, info_dict)`` instead of just ``x``.
     """
     if hierarchy is None:
-        hierarchy = PyAMGHierarchy.from_coo(
-            val, row, col, shape, method=method, **kwargs
+        hierarchy = _build_or_lookup_hierarchy(
+            val, row, col, shape, method=method, kwargs=kwargs,
         )
 
     # Build a torch sparse handle for the finest-level A used in residual
@@ -348,11 +377,18 @@ def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
 
 def pyamg_preconditioner(val: Tensor, row: Tensor, col: Tensor,
                          shape: Tuple[int, int],
+                         *,
+                         method: str = "ruge_stuben",
                          **kwargs) -> PyAMGHierarchy:
     """Build an AMG hierarchy and return it as a callable suitable for
     use as ``M^{-1}`` inside any iterative solver (CG, BiCGStab, ...).
 
     Forwarding keyword arguments to :meth:`PyAMGHierarchy.from_coo`.
     Returns the hierarchy object itself, which is callable.
+    Repeated calls with the same matrix transparently reuse the cached
+    hierarchy from :data:`~torch_sla.solver_cache.SOLVER_CACHE`.
     """
+    return _build_or_lookup_hierarchy(
+        val, row, col, shape, method=method, kwargs=kwargs,
+    )
     return PyAMGHierarchy.from_coo(val, row, col, shape, **kwargs)
