@@ -269,6 +269,25 @@ class PyAMGHierarchy:
 # ====================================================================== #
 # Standalone AMG solver
 # ====================================================================== #
+def _build_or_lookup_hierarchy(
+    val: Tensor, row: Tensor, col: Tensor, shape: Tuple[int, int],
+    *, method: str, cache: bool, kwargs: dict,
+) -> "PyAMGHierarchy":
+    """Build a new hierarchy, optionally consulting :data:`SOLVER_CACHE`
+    first. ``cache=True`` matches on ``(backend, sparsity-key, method,
+    frozen-kwargs)``; ``cache=False`` always rebuilds."""
+    if not cache:
+        return PyAMGHierarchy.from_coo(val, row, col, shape,
+                                       method=method, **kwargs)
+    from ..solver_cache import SOLVER_CACHE, make_key
+    key = ("pyamg-hierarchy", make_key(val, row, col, shape),
+           method, tuple(sorted(kwargs.items())))
+    return SOLVER_CACHE.get_or_build(
+        key, lambda: PyAMGHierarchy.from_coo(val, row, col, shape,
+                                             method=method, **kwargs)
+    )
+
+
 def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
                 shape: Tuple[int, int], b: Tensor,
                 *,
@@ -277,6 +296,7 @@ def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
                 method: Literal["ruge_stuben",
                                 "smoothed_aggregation"] = "ruge_stuben",
                 hierarchy: Optional[PyAMGHierarchy] = None,
+                cache: bool = True,
                 return_info: bool = False,
                 **kwargs):
     """Solve ``A x = b`` using AMG as a standalone iterative solver.
@@ -297,14 +317,20 @@ def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
     method : ``"ruge_stuben"`` | ``"smoothed_aggregation"``
         PyAMG coarsening method.
     hierarchy : :class:`PyAMGHierarchy`, optional
-        Reuse a pre-built hierarchy (skips PyAMG setup); the calling
-        code is responsible for ensuring the sparsity pattern matches.
+        Reuse a pre-built hierarchy (skips both cache and PyAMG setup);
+        the calling code is responsible for ensuring the sparsity
+        pattern matches.
+    cache : bool, default True
+        When ``True`` (default), look up the hierarchy in the
+        module-level :data:`~torch_sla.solver_cache.SOLVER_CACHE` LRU
+        keyed by sparsity + values + method. Pass ``False`` to skip
+        the cache.
     return_info : bool
         If ``True``, return ``(x, info_dict)`` instead of just ``x``.
     """
     if hierarchy is None:
-        hierarchy = PyAMGHierarchy.from_coo(
-            val, row, col, shape, method=method, **kwargs
+        hierarchy = _build_or_lookup_hierarchy(
+            val, row, col, shape, method=method, cache=cache, kwargs=kwargs,
         )
 
     # Build a torch sparse handle for the finest-level A used in residual
@@ -348,11 +374,19 @@ def pyamg_solve(val: Tensor, row: Tensor, col: Tensor,
 
 def pyamg_preconditioner(val: Tensor, row: Tensor, col: Tensor,
                          shape: Tuple[int, int],
+                         *,
+                         cache: bool = True,
+                         method: str = "ruge_stuben",
                          **kwargs) -> PyAMGHierarchy:
     """Build an AMG hierarchy and return it as a callable suitable for
     use as ``M^{-1}`` inside any iterative solver (CG, BiCGStab, ...).
 
     Forwarding keyword arguments to :meth:`PyAMGHierarchy.from_coo`.
-    Returns the hierarchy object itself, which is callable.
+    Returns the hierarchy object itself, which is callable. Hits the
+    LRU :data:`~torch_sla.solver_cache.SOLVER_CACHE` by default; pass
+    ``cache=False`` to force a rebuild.
     """
+    return _build_or_lookup_hierarchy(
+        val, row, col, shape, method=method, cache=cache, kwargs=kwargs,
+    )
     return PyAMGHierarchy.from_coo(val, row, col, shape, **kwargs)
