@@ -87,11 +87,13 @@ def is_amgx_available() -> bool:
 # to torch_amgx.Config. The literal-config-string escape hatch is kept
 # for parity with the previous backend API.
 # ====================================================================== #
-def _build_config(method: str, *, tol: float, maxiter: int):
+def _build_config(method: str, *, tol: float, maxiter: int,
+                  preconditioner: str = "amg"):
     tam = _load_torch_amgx()
     if "config_version" in method.lower():
         return tam.Config(amgx_config_str=method)
-    return tam.Config(method=method.lower(), tol=tol, maxiter=maxiter)
+    return tam.Config(method=method.lower(), tol=tol, maxiter=maxiter,
+                      preconditioner=preconditioner)
 
 
 # ====================================================================== #
@@ -177,6 +179,7 @@ def amgx_solve(val: Tensor, row: Tensor, col: Tensor,
                tol: float = 1e-8,
                maxiter: int = 100,
                method: str = "auto",
+               preconditioner: str = "amg",
                solver: Optional[AmgXSolver] = None,
                return_info: bool = False,
                **kwargs):
@@ -200,6 +203,14 @@ def amgx_solve(val: Tensor, row: Tensor, col: Tensor,
         ``"fgmres"`` / ``"amg"`` (standalone V-cycle iteration).
         A literal AmgX config string is also accepted (must contain
         ``config_version=2``).
+    preconditioner : str
+        Inner preconditioner. Default ``"amg"`` (single V-cycle classical
+        AMG, the historical default). Alternatives mirror AmgX's
+        built-ins: ``"jacobi_l1"`` / ``"block_jacobi"`` /
+        ``"multicolor_gs"`` / ``"multicolor_dilu"`` /
+        ``"multicolor_ilu"`` / ``"chebyshev"`` / ``"polynomial"`` /
+        ``"kaczmarz"`` / ``"none"`` (unpreconditioned Krylov).
+        Ignored when ``method="amg"`` (AMG is itself the solver).
     solver : AmgXSolver, optional
         Reuse a caller-managed AmgX solver explicitly, skipping the
         cache. Caller ensures sparsity + config match.
@@ -212,7 +223,8 @@ def amgx_solve(val: Tensor, row: Tensor, col: Tensor,
             f"val.is_cuda={val.is_cuda}, b.is_cuda={b.is_cuda}"
         )
 
-    cfg = _build_config(method, tol=tol, maxiter=maxiter)
+    cfg = _build_config(method, tol=tol, maxiter=maxiter,
+                        preconditioner=preconditioner)
     config_str = cfg.build_config_str()
 
     if solver is None:
@@ -240,14 +252,19 @@ def amgx_preconditioner(val: Tensor, row: Tensor, col: Tensor,
                         tol: float = 1e-3,
                         maxiter: int = 1,
                         method: str = "amg",
+                        preconditioner: str = "amg",
                         **kwargs) -> AmgXSolver:
     """Build an AmgX solver and return it as a callable usable as
     ``M^{-1}`` inside any outer iterative solver.
 
     Defaults to a single-V-cycle classical AMG configuration -- the
-    standard "AMG as preconditioner for CG/BiCGStab" pattern.
+    standard "AMG as preconditioner for CG/BiCGStab" pattern. Pass
+    ``preconditioner=`` to compose AmgX's other preconditioners
+    (jacobi_l1, block_jacobi, multicolor_dilu, chebyshev, ...) inside
+    the requested outer ``method``.
     """
-    cfg = _build_config(method, tol=tol, maxiter=maxiter)
+    cfg = _build_config(method, tol=tol, maxiter=maxiter,
+                        preconditioner=preconditioner)
     config_str = cfg.build_config_str()
     return _build_or_lookup_solver(val, row, col, shape,
                                    config_str=config_str)
