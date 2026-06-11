@@ -27,7 +27,7 @@ Example
 
 import os
 import torch
-from typing import Tuple, List, Dict, Optional, Union, Literal
+from typing import Any, Tuple, List, Dict, Optional, Union, Literal
 from dataclasses import dataclass
 import warnings
 
@@ -2087,10 +2087,61 @@ def create_distributed_matrices(
     return matrices
 
 
+# ====================================================================== #
+# DTensor-mirror placement vocabulary for sparse tensors.
+#
+# Adapted from ``torch.distributed.tensor.placement_types``:
+#
+# * :class:`Replicated`        --  every rank holds the full matrix
+#                                  (analogous to ``Replicate()``).
+# * :class:`RowPartitioned`    --  rows are split across ranks via an
+#                                  irregular METIS / RCB / simple map
+#                                  (the sparse analog of ``Shard(0)``;
+#                                  *not* the uniform DTensor shard).
+#
+# A :class:`DSparseSpec` bundles a placement with the device mesh and
+# global shape so the rest of the API can mirror DTensor's
+# ``DTensor._spec``.
+# ====================================================================== #
+@dataclass(frozen=True)
+class Replicated:
+    """DSparseTensor placement: every rank holds the entire matrix."""
+    pass
+
+
+@dataclass(frozen=True)
+class RowPartitioned:
+    """DSparseTensor placement: rows are distributed across ranks via
+    a (potentially irregular) partition map. Mirrors DTensor's
+    ``Shard(0)`` but does not require uniform chunks.
+
+    The partition map (``owned_nodes`` per rank) lives on each rank's
+    :class:`DSparseMatrix`; this placement class is a marker only, so
+    it stays cheap to hash / compare.
+    """
+    pass
+
+
+SparsePlacement = Union[Replicated, RowPartitioned]
+
+
+@dataclass(frozen=True)
+class DSparseSpec:
+    """The sparse analog of :class:`torch.distributed.tensor.DTensorSpec`.
+
+    Bundles the placement, the device mesh, and the global shape so we
+    can dispatch operations purely off the spec and treat
+    :class:`DSparseTensor` like any other distributed tensor.
+    """
+    placement: SparsePlacement
+    mesh: Any                            # torch.distributed.DeviceMesh
+    global_shape: Tuple[int, int]
+
+
 class DSparseTensor:
     """
     Distributed Sparse Tensor with automatic partitioning and halo exchange.
-    
+
     A Pythonic wrapper that provides a unified interface for distributed
     sparse matrix operations. Supports indexing to access individual partitions.
     
@@ -2180,6 +2231,13 @@ class DSparseTensor:
         # Create all partitions
         self._partitions: List[DSparseMatrix] = []
         self._create_partitions()
+
+        # DTensor-mirror state. Populated by :meth:`from_local` and
+        # related classmethods that wrap an already-distributed local
+        # matrix; ``None`` for the legacy single-process simulator
+        # constructor so existing call sites keep behaving identically.
+        self._local_matrix: Optional[DSparseMatrix] = None
+        self._spec: Optional[DSparseSpec] = None
     
     def _compute_partitions(
         self, 
@@ -2223,6 +2281,243 @@ class DSparseTensor:
         for mat in self._partitions:
             mat._all_partitions = [m.partition for m in self._partitions]
     
+    # ====================================================================== #
+    # DTensor-mirror API: from_local / to_local / full_tensor / redistribute.
+    #
+    # These methods give DSparseTensor the same shape of API as
+    # ``torch.distributed.tensor.DTensor``: every call resolves through
+    # a private :class:`DSparseSpec` that bundles the placement, the
+    # device mesh, and the global shape. Vectors crossing the API stay
+    # as ``DTensor[Shard(0)]`` so the rest of the PyTorch distributed
+    # ecosystem (FSDP, TP, DCP) composes for free.
+    #
+    # The legacy single-process simulator entry points
+    # (``DSparseTensor(values, row, col, shape, num_partitions=...)``,
+    # ``from_sparse_tensor``) leave ``_local_matrix`` / ``_spec`` as
+    # ``None`` -- callers that don't want the DTensor mirror keep
+    # working byte-for-byte.
+    # ====================================================================== #
+    @classmethod
+    def from_local(
+        cls,
+        local_matrix: "DSparseMatrix",
+        mesh: Any,
+        *,
+        placement: SparsePlacement = None,
+        global_shape: Optional[Tuple[int, int]] = None,
+    ) -> "DSparseTensor":
+        """Wrap an already-distributed :class:`DSparseMatrix` chunk as a
+        DTensor-mirror :class:`DSparseTensor`.
+
+        Mirrors :meth:`torch.distributed.tensor.DTensor.from_local`. Each
+        rank passes the local subdomain it received from
+        :meth:`DSparseTensor.from_global_distributed` /
+        :meth:`from_device_mesh`; the placement / mesh metadata is
+        carried in :class:`DSparseSpec` for downstream dispatch.
+
+        Parameters
+        ----------
+        local_matrix : DSparseMatrix
+            This rank's owned + halo subdomain.
+        mesh : DeviceMesh
+            The PyTorch device mesh the matrix is distributed over.
+        placement : SparsePlacement, optional
+            Defaults to :class:`RowPartitioned` (rows split across the
+            mesh, which is what ``from_global_distributed`` produces).
+            Pass :class:`Replicated` for the full-matrix-on-every-rank
+            layout.
+        global_shape : Tuple[int, int], optional
+            Override the deduced global shape. Defaults to
+            ``local_matrix.global_shape``.
+        """
+        if placement is None:
+            placement = RowPartitioned()
+        if global_shape is None:
+            global_shape = tuple(local_matrix.global_shape)
+
+        # We deliberately bypass __init__ -- the legacy constructor
+        # builds an in-process Python list of every partition, which is
+        # the opposite of what we want here. Build a minimal instance
+        # and stamp the DTensor-mirror state on directly.
+        self = cls.__new__(cls)
+        self._values = None
+        self._row_indices = None
+        self._col_indices = None
+        self._shape = global_shape
+        self._num_partitions = mesh.size() if mesh is not None else 1
+        self._coords = None
+        self._partition_method = None
+        self._verbose = False
+        self._device = local_matrix.device
+        self._partition_ids = None
+        self._partitions = []
+        self._local_matrix = local_matrix
+        self._spec = DSparseSpec(placement=placement, mesh=mesh,
+                                 global_shape=global_shape)
+        return self
+
+    @property
+    def spec(self) -> Optional[DSparseSpec]:
+        """The :class:`DSparseSpec` for this tensor (placement + mesh +
+        global shape), or ``None`` if this instance was built via the
+        legacy single-process simulator constructor."""
+        return self._spec
+
+    def to_local(self) -> "DSparseMatrix":
+        """Return this rank's local :class:`DSparseMatrix` chunk.
+
+        Mirrors :meth:`DTensor.to_local`. For the legacy single-process
+        simulator instance the call falls back to the gathered global
+        matrix (logically equivalent: the "local" tensor IS the global
+        tensor when there's only one rank)."""
+        if self._local_matrix is not None:
+            return self._local_matrix
+        if not self._partitions:
+            raise RuntimeError(
+                "DSparseTensor has neither a DTensor-mirror local "
+                "matrix nor a simulated partition list -- nothing to "
+                "hand back as 'local'."
+            )
+        # Single-process simulator path: rank 0 owns everything.
+        return self._partitions[0]
+
+    def full_tensor(self) -> "SparseTensor":
+        """Materialise the full global matrix on every rank.
+
+        Mirrors :meth:`DTensor.full_tensor` (the symmetric ``Allgather``
+        return -- every rank ends up with the same result). Returns a
+        plain :class:`SparseTensor` so callers can pipe it into the
+        non-distributed code path.
+
+        Cheap when the placement is already :class:`Replicated` (just a
+        format conversion); for :class:`RowPartitioned` we Allgather
+        the global COO triples across the mesh.
+        """
+        from .sparse_tensor import SparseTensor
+
+        if self._spec is None:
+            # Single-process simulator: the original COO triple still
+            # lives on the instance; convert directly.
+            return self.to_sparse_tensor()
+
+        if isinstance(self._spec.placement, Replicated):
+            # Every rank already has the full matrix; rebuild a global
+            # SparseTensor from the local one's COO state.
+            local = self._local_matrix
+            return SparseTensor(local.local_values, local.local_row,
+                                local.local_col, self._spec.global_shape)
+
+        if not (DIST_AVAILABLE and dist.is_initialized()):
+            raise RuntimeError(
+                "DSparseTensor.full_tensor() with RowPartitioned "
+                "placement requires torch.distributed to be initialised."
+            )
+        return self._all_gather_global_matrix()
+
+    def redistribute(
+        self,
+        placement: SparsePlacement,
+        *,
+        mesh: Any = None,
+    ) -> "DSparseTensor":
+        """Convert this :class:`DSparseTensor` to a new placement.
+
+        Mirrors :meth:`DTensor.redistribute`. Only two transitions are
+        currently meaningful for sparse matrices: ``RowPartitioned ->
+        Replicated`` (Allgather every rank's COO triples and rebuild)
+        and ``Replicated -> RowPartitioned`` (drop the rows this rank
+        doesn't own).
+        """
+        if self._spec is None:
+            raise RuntimeError(
+                "redistribute() requires a DTensor-mirror DSparseTensor;"
+                " build one via DSparseTensor.from_local(...) first."
+            )
+        target_mesh = mesh or self._spec.mesh
+
+        if type(self._spec.placement) is type(placement):
+            # Same placement: no-op besides optionally re-stamping mesh.
+            if target_mesh is self._spec.mesh:
+                return self
+            return DSparseTensor.from_local(
+                self._local_matrix, target_mesh,
+                placement=placement,
+                global_shape=self._spec.global_shape,
+            )
+
+        if isinstance(self._spec.placement, RowPartitioned) \
+                and isinstance(placement, Replicated):
+            full = self._all_gather_global_matrix()
+            # ``DSparseMatrix.from_global`` is a static helper that
+            # builds a single-partition local chunk -- pass ``num_part=1``
+            # so the whole matrix is owned by this rank.
+            full_local = DSparseMatrix.from_global(
+                SparseTensor(full.val, full.row, full.col,
+                             self._spec.global_shape),
+                num_partitions=1,
+                partition_id=0,
+                device=self._local_matrix.device,
+                verbose=False,
+            )
+            return DSparseTensor.from_local(
+                full_local, target_mesh,
+                placement=Replicated(),
+                global_shape=self._spec.global_shape,
+            )
+
+        raise NotImplementedError(
+            f"redistribute {type(self._spec.placement).__name__} -> "
+            f"{type(placement).__name__} not yet supported"
+        )
+
+    def _all_gather_global_matrix(self) -> "SparseTensor":
+        """Allgather the per-rank COO triples and rebuild a global
+        :class:`SparseTensor`. Used by :meth:`full_tensor` and
+        :meth:`redistribute`."""
+        from .sparse_tensor import SparseTensor
+
+        local = self._local_matrix
+        device = local.device
+        world_size = self._spec.mesh.size()
+
+        # Local row/col indices live in the LOCAL coordinate system; we
+        # need them in GLOBAL coordinates before stitching. Use the
+        # partition's ``local_nodes`` map (local idx -> global idx).
+        l2g = local.partition.local_nodes.to(device)
+        # Only owned-row entries -- duplicates across ranks would
+        # otherwise show up after the all_gather.
+        owned_mask = local.local_row < local.num_owned
+        rows_g = l2g[local.local_row[owned_mask]].contiguous()
+        cols_g = l2g[local.local_col[owned_mask]].contiguous()
+        vals   = local.local_values[owned_mask].contiguous()
+
+        # Allgather variable-length COO triples. Same shape pattern as
+        # gather_global: exchange sizes, allocate per-rank buffers,
+        # all_gather each field.
+        owned_nnz = torch.tensor([int(vals.numel())],
+                                 dtype=torch.int64, device=device)
+        sizes = [torch.zeros(1, dtype=torch.int64, device=device)
+                 for _ in range(world_size)]
+        dist.all_gather(sizes, owned_nnz)
+        ns = [int(s.item()) for s in sizes]
+
+        rows_list = [torch.zeros(n, dtype=torch.int64, device=device)
+                     for n in ns]
+        cols_list = [torch.zeros(n, dtype=torch.int64, device=device)
+                     for n in ns]
+        vals_list = [torch.zeros(n, dtype=vals.dtype, device=device)
+                     for n in ns]
+        dist.all_gather(rows_list, rows_g)
+        dist.all_gather(cols_list, cols_g)
+        dist.all_gather(vals_list, vals)
+
+        return SparseTensor(
+            torch.cat(vals_list),
+            torch.cat(rows_list),
+            torch.cat(cols_list),
+            self._spec.global_shape,
+        )
+
     @classmethod
     def from_sparse_tensor(
         cls,
@@ -3971,12 +4266,55 @@ class DSparseTensor:
         - Replicated DTensor: extracts local tensor and computes as global
         - Sharded DTensor: redistributes to Replicate, computes, then reshards
         """
-        # Check for DTensor input
+        # DTensor-mirror fast path: when this DSparseTensor carries a
+        # real distributed spec (built via ``from_local`` on a multi-
+        # rank job), the matvec stays entirely in the ``Shard(0)``
+        # space -- halo exchange in, local matvec, wrap result as
+        # DTensor with the same mesh + Shard(0) placement. No gather.
+        if self._spec is not None and isinstance(self._spec.placement,
+                                                  RowPartitioned):
+            return self._matmul_spec(x)
+
+        # Check for DTensor input (legacy "replicate-and-densify" path
+        # for the single-process simulator).
         if _is_dtensor(x):
             return self._matmul_dtensor(x)
-        
+
         return self._distributed_matvec(x)
-    
+
+    def _matmul_spec(self, x: Any) -> Any:
+        """DTensor-mirror matvec: ``y_Shard0 = D_RowPart @ x_Shard0``.
+
+        Input may be a ``DTensor`` (its local shard is extracted) or a
+        raw torch.Tensor that's already this rank's local slice (handy
+        for single-rank unit tests / sanity checks where the user
+        hasn't bothered wrapping in DTensor).
+
+        The result is wrapped as ``DTensor.from_local(y_local, mesh,
+        [Shard(0)])`` when the input was a DTensor; otherwise we hand
+        back the raw local tensor unchanged so caller-side typing is
+        predictable.
+        """
+        local_matrix = self._local_matrix
+        assert local_matrix is not None, "spec-mode requires _local_matrix"
+
+        if _is_dtensor(x):
+            x_local = x.to_local()
+        else:
+            x_local = x
+
+        # ``matvec`` runs halo exchange + local SpMV on the owned +
+        # halo subdomain; result is sized ``num_local`` (owned + halo).
+        # The owned slice [0:num_owned] is the Shard(0) of the result.
+        y_full = local_matrix.matvec(x_local, exchange_halo=True)
+        y_owned = y_full[:local_matrix.num_owned]
+
+        if _is_dtensor(x):
+            from torch.distributed.tensor import DTensor as _DTensor, Shard
+            return _DTensor.from_local(
+                y_owned, self._spec.mesh, [Shard(0)])
+        return y_owned
+
     def _matmul_dtensor(self, x: "DTensor") -> "DTensor":
         """
         Matrix-vector multiplication with DTensor input.
