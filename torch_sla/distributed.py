@@ -4558,19 +4558,13 @@ class DSparseTensor:
                 maxiter=maxiter, restart=restart,
                 flexible=(method_l == "fgmres"), verbose=verbose)
         elif method_l == "minres":
-            # MINRES scaffold present but not yet validated against
-            # scipy; ships in a focused follow-up so we don't block the
-            # rest of the Krylov family. Use ``"gmres"`` for symmetric
-            # indefinite systems in the meantime.
-            raise NotImplementedError(
-                "MINRES Shard(0) variant is scaffolded but not yet "
-                "verified; use method='gmres' (or 'bicgstab') for "
-                "symmetric indefinite systems in this release."
-            )
+            x_owned = self._distributed_minres_shard(
+                b_owned, M_apply=M_apply, atol=atol, rtol=rtol,
+                maxiter=maxiter, verbose=verbose)
         else:
             raise ValueError(
                 f"Unknown distributed solve method {method!r}; expected "
-                "one of cg, bicgstab, gmres, fgmres."
+                "one of cg, bicgstab, gmres, fgmres, minres."
             )
 
         if wrap_output:
@@ -5010,79 +5004,96 @@ class DSparseTensor:
         self,
         b_owned: torch.Tensor,
         *,
+        M_apply: Any,
         atol: float,
         rtol: float,
         maxiter: int,
         verbose: bool,
     ) -> torch.Tensor:
+        """Distributed MINRES in Shard(0) space (Paige & Saunders 1975).
+
+        Faithful port of SciPy's ``scipy.sparse.linalg.minres`` Lanczos
+        + 2-step Givens recurrence -- same variable names so the math
+        is reviewable against the SciPy source. Every inner product
+        ``dot(.,.)`` runs through ``_shard_dot`` (local dot +
+        all_reduce SUM); matvecs route through ``_shard_matvec`` which
+        does halo exchange + local SpMV. M_apply is a Shard(0)
+        preconditioner; identity recovers plain MINRES.
+        """
         no = self._local_matrix.num_owned
         if b_owned.shape[0] != no:
             raise ValueError(
                 f"b_owned size {b_owned.shape[0]} != num_owned {no}")
 
-        dtype = b_owned.dtype
-        device = b_owned.device
-
+        eps_floor = 1e-30
         x = torch.zeros_like(b_owned)
-        v_prev = torch.zeros_like(b_owned)
-        v = b_owned.clone()
-        beta1 = float(self._shard_norm(v).item())
-        if beta1 == 0.0:
+
+        # Initial residual r = b - A x = b (since x = 0)
+        r1 = b_owned.clone()
+        y = M_apply(r1)
+        beta1_sq = float(self._shard_dot(r1, y).item())
+        if beta1_sq <= 0.0:
             return x
-        v = v / beta1
+        beta1 = beta1_sq ** 0.5
         tol = max(atol, rtol * beta1)
 
-        # Givens-rotation scalars + Lanczos coefficients.
-        eta = beta1
-        c_prev = torch.tensor(1.0, dtype=dtype, device=device)
-        c      = torch.tensor(1.0, dtype=dtype, device=device)
-        s_prev = torch.tensor(0.0, dtype=dtype, device=device)
-        s      = torch.tensor(0.0, dtype=dtype, device=device)
-        beta = torch.tensor(beta1, dtype=dtype, device=device)
-        w_prev = torch.zeros_like(b_owned)
-        w      = torch.zeros_like(b_owned)
+        # Lanczos / Givens scalars (track previous two)
+        oldb = 0.0
+        beta = beta1
+        dbar = 0.0
+        epsln = 0.0
+        phibar = beta1
+        cs = -1.0
+        sn = 0.0
+        w  = torch.zeros_like(b_owned)
+        w2 = torch.zeros_like(b_owned)
+        r2 = r1.clone()
 
         for k in range(maxiter):
-            # Lanczos step
-            p = self._shard_matvec(v) - beta * v_prev
-            alpha = self._shard_dot(v, p)
-            p = p - alpha * v
-            beta_new = self._shard_norm(p)
-            v_next = p / (beta_new + 1e-30)
+            s_scale = 1.0 / max(beta, eps_floor)
+            v = s_scale * y
+            y = self._shard_matvec(v)
+            if k > 0:
+                y = y - (beta / oldb) * r1
 
-            # Apply previous two Givens rotations to the new Lanczos row.
-            delta = c * alpha - c_prev * s * beta
-            gamma_bar = s * alpha + c_prev * c * beta
-            epsilon = s_prev * beta
-            gamma = (gamma_bar * gamma_bar + beta_new * beta_new).sqrt()
-            if float(gamma.abs().item()) < 1e-30:
-                if verbose:
-                    print(f"[shard-MINRES] iter {k}: gamma ~= 0, stop")
-                break
-            c_next = gamma_bar / gamma
-            s_next = beta_new / gamma
+            alfa = float(self._shard_dot(v, y).item())
+            y = y - (alfa / beta) * r2
+            r1 = r2
+            r2 = y
+            y = M_apply(r2)
+            oldb = beta
+            beta_sq = float(self._shard_dot(r2, y).item())
+            beta = (beta_sq if beta_sq > 0.0 else 0.0) ** 0.5
 
-            w_new = (v - delta * w - epsilon * w_prev) / gamma
-            x = x + c_next * eta * w_new
-            eta = -s_next * eta
+            # Apply previous rotation Q_{k-1}.
+            oldeps = epsln
+            delta  = cs * dbar + sn * alfa
+            gbar   = sn * dbar - cs * alfa
+            epsln  = sn * beta
+            dbar   = -cs * beta
 
-            res = abs(float(eta))
+            # New rotation Q_k.
+            gamma = max((gbar * gbar + beta * beta) ** 0.5, eps_floor)
+            cs    = gbar / gamma
+            sn    = beta / gamma
+            phi   = cs * phibar
+            phibar = sn * phibar
+
+            # Update solution and search direction.
+            denom = 1.0 / gamma
+            w1 = w2
+            w2 = w
+            w  = (v - oldeps * w1 - delta * w2) * denom
+            x  = x + phi * w
+
+            rnorm = abs(phibar)
             if verbose and (k % 100 == 0 or k < 5):
-                print(f"[shard-MINRES] iter {k}: ||r||~={res:.3e}")
-            if res < tol:
+                print(f"[shard-MINRES] iter {k}: ||r||~={rnorm:.3e}")
+            if rnorm < tol:
                 if verbose:
                     print(f"[shard-MINRES] converged at iter {k}, "
-                          f"||r||~={res:.3e}")
+                          f"||r||~={rnorm:.3e}")
                 break
-
-            # Roll state.
-            v_prev = v
-            v = v_next
-            w_prev = w
-            w = w_new
-            beta = beta_new
-            c_prev, c = c, c_next
-            s_prev, s = s, s_next
 
         return x
 

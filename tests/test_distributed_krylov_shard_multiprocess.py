@@ -121,8 +121,7 @@ def _krylov_worker(rank: int, world_size: int,
     ("bicgstab", "convdiff_2d_64_peclet_10", 29521),
     ("gmres",    "convdiff_2d_64_peclet_10", 29522),
     ("fgmres",   "convdiff_2d_64_peclet_10", 29523),
-    # MINRES Shard variant is scaffolded but unverified in this PR;
-    # a focused follow-up will validate it against scipy.minres.
+    ("minres",   "poisson_2d_16",            29524),
 ])
 @pytest.mark.skipif(
     not hasattr(dist, "is_available") or not dist.is_available(),
