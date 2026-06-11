@@ -4285,15 +4285,20 @@ class DSparseTensor:
     def _matmul_spec(self, x: Any) -> Any:
         """DTensor-mirror matvec: ``y_Shard0 = D_RowPart @ x_Shard0``.
 
-        Input may be a ``DTensor`` (its local shard is extracted) or a
-        raw torch.Tensor that's already this rank's local slice (handy
-        for single-rank unit tests / sanity checks where the user
-        hasn't bothered wrapping in DTensor).
+        Input contract (DTensor's ``Shard(0)`` style):
 
-        The result is wrapped as ``DTensor.from_local(y_local, mesh,
-        [Shard(0)])`` when the input was a DTensor; otherwise we hand
-        back the raw local tensor unchanged so caller-side typing is
-        predictable.
+        * ``x`` is a ``DTensor`` -- its ``num_owned``-sized local shard
+          is extracted via ``to_local()``.
+        * Or a raw ``torch.Tensor`` sized either ``num_owned`` (clean
+          Shard(0) input; halo is internally zero-padded then refilled
+          by ``halo_exchange``) or ``num_local`` (legacy callers that
+          pre-fill halo themselves; supported for backward compat).
+
+        Output:
+
+        * If the input was a ``DTensor``, returns ``DTensor.from_local(
+          y_owned, mesh, [Shard(0)])`` -- pure Shard(0) → Shard(0).
+        * Otherwise the raw ``y_owned`` tensor.
         """
         local_matrix = self._local_matrix
         assert local_matrix is not None, "spec-mode requires _local_matrix"
@@ -4303,10 +4308,10 @@ class DSparseTensor:
         else:
             x_local = x
 
-        # ``matvec`` runs halo exchange + local SpMV on the owned +
-        # halo subdomain; result is sized ``num_local`` (owned + halo).
-        # The owned slice [0:num_owned] is the Shard(0) of the result.
-        y_full = local_matrix.matvec(x_local, exchange_halo=True)
+        # Pad x_owned → x_local (num_local) before matvec; halo entries
+        # will be overwritten in-place by halo_exchange.
+        x_padded = self._pad_owned_to_local(x_local)
+        y_full = local_matrix.matvec(x_padded, exchange_halo=True)
         y_owned = y_full[:local_matrix.num_owned]
 
         if _is_dtensor(x):
@@ -4314,6 +4319,154 @@ class DSparseTensor:
             return _DTensor.from_local(
                 y_owned, self._spec.mesh, [Shard(0)])
         return y_owned
+
+    def _pad_owned_to_local(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert a Shard(0)-sized ``[num_owned]`` tensor into a full
+        ``[num_local]`` tensor with halo entries zero-padded (they get
+        overwritten by the next ``halo_exchange``). Pass-through when
+        ``x`` is already num_local-sized."""
+        local_matrix = self._local_matrix
+        nl = local_matrix.num_local
+        no = local_matrix.num_owned
+        if x.shape[0] == nl:
+            return x
+        if x.shape[0] == no:
+            padded = torch.zeros(nl, dtype=x.dtype, device=x.device)
+            padded[:no] = x
+            return padded
+        raise ValueError(
+            f"x has shape[0]={x.shape[0]}, expected num_owned={no} or "
+            f"num_local={nl}."
+        )
+
+    # ====================================================================== #
+    # Shard(0)-space distributed CG.
+    #
+    # The classic ``_distributed_cg`` (single-process simulator path)
+    # operates on global N-sized vectors. That's only correct in the
+    # legacy single-process simulator -- on multiple ranks every CG
+    # iteration would Allgather the whole vector. The Shard(0)
+    # implementation below keeps every vector local (size ``num_owned``)
+    # and uses ``dist.all_reduce`` for the inner products that CG
+    # needs. Matvec routes through ``_pad_owned_to_local`` so halo
+    # entries are filled by ``halo_exchange`` per iteration.
+    # ====================================================================== #
+    def solve_distributed_shard(
+        self,
+        b: Any,
+        *,
+        atol: float = 1e-10,
+        rtol: float = 0.0,
+        maxiter: int = 1000,
+        verbose: bool = False,
+    ) -> Any:
+        """Distributed CG in Shard(0) space.
+
+        Requires this :class:`DSparseTensor` to carry a real spec
+        (built via :meth:`from_local`). The right-hand side ``b`` may
+        be a ``DTensor[Shard(0)]`` (most common) or a raw
+        ``torch.Tensor`` sized ``num_owned`` for the calling rank;
+        the return value mirrors the input's wrapper.
+
+        Inner products use ``dist.all_reduce`` (sum) so global vectors
+        never need to materialise. The matrix's halo exchange handles
+        the matvec coupling between ranks.
+        """
+        if self._spec is None or not isinstance(
+                self._spec.placement, RowPartitioned):
+            raise RuntimeError(
+                "solve_distributed_shard() requires a DSparseTensor "
+                "with RowPartitioned placement -- build one via "
+                "DSparseTensor.from_local(local, mesh, ...)."
+            )
+        if not (DIST_AVAILABLE and dist.is_initialized()):
+            raise RuntimeError(
+                "solve_distributed_shard() requires torch.distributed "
+                "to be initialised."
+            )
+
+        if _is_dtensor(b):
+            b_owned = b.to_local()
+            wrap_output = True
+        else:
+            b_owned = b
+            wrap_output = False
+
+        x_owned = self._distributed_cg_shard(
+            b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
+            verbose=verbose)
+
+        if wrap_output:
+            from torch.distributed.tensor import DTensor as _DTensor, Shard
+            return _DTensor.from_local(
+                x_owned, self._spec.mesh, [Shard(0)])
+        return x_owned
+
+    def _distributed_cg_shard(
+        self,
+        b_owned: torch.Tensor,
+        *,
+        atol: float,
+        rtol: float,
+        maxiter: int,
+        verbose: bool,
+    ) -> torch.Tensor:
+        """Conjugate-gradient solve that stays in Shard(0) space the
+        whole time. Returns ``x_owned`` (size ``num_owned``)."""
+        local_matrix = self._local_matrix
+        no = local_matrix.num_owned
+
+        if b_owned.shape[0] != no:
+            raise ValueError(
+                f"b_owned size {b_owned.shape[0]} != num_owned {no}; "
+                "Shard(0) CG requires b to be the local owned slice."
+            )
+
+        # Inner-product helper: local dot + cross-rank all_reduce.
+        def _global_dot(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+            d_local = torch.dot(u, v)
+            dist.all_reduce(d_local, op=dist.ReduceOp.SUM)
+            return d_local
+
+        # Matvec helper: pad owned → local, halo exchange, slice.
+        def _matvec_owned(x_o: torch.Tensor) -> torch.Tensor:
+            x_padded = self._pad_owned_to_local(x_o)
+            y_full = local_matrix.matvec(x_padded, exchange_halo=True)
+            return y_full[:no]
+
+        x = torch.zeros_like(b_owned)
+        r = b_owned - _matvec_owned(x)
+        p = r.clone()
+        rs_old = _global_dot(r, r)
+
+        b_norm_sq = _global_dot(b_owned, b_owned)
+        tol_sq = max(atol * atol, rtol * rtol * float(b_norm_sq.item()))
+
+        for k in range(maxiter):
+            Ap = _matvec_owned(p)
+            pAp = _global_dot(p, Ap)
+            if float(pAp.abs().item()) < 1e-30:
+                if verbose:
+                    print(f"[shard-CG] iter {k}: pAp ~= 0, stop")
+                break
+            alpha = rs_old / pAp
+            x = x + alpha * p
+            r = r - alpha * Ap
+
+            rs_new = _global_dot(r, r)
+            res = float(rs_new.sqrt().item())
+            if verbose and (k % 100 == 0 or k < 5):
+                print(f"[shard-CG] iter {k}: ||r||={res:.3e}")
+            if float(rs_new.item()) < tol_sq:
+                if verbose:
+                    print(f"[shard-CG] converged at iter {k}, "
+                          f"||r||={res:.3e}")
+                break
+            beta = rs_new / rs_old
+            p = r + beta * p
+            rs_old = rs_new
+
+        return x
 
     def _matmul_dtensor(self, x: "DTensor") -> "DTensor":
         """
