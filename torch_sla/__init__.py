@@ -59,6 +59,11 @@ from .solve import (
     MatrixLike,
 )
 
+# Side-effect import: installs SolverConfig.for_spd_gpu(), for_matrix(),
+# etc. classmethods. Kept in its own module so the SolverConfig dataclass
+# itself stays focused on the scope-stack machinery.
+from . import presets as _presets  # noqa: F401
+
 from .solver_cache import SOLVER_CACHE  # singleton; the class itself is internal
 
 from .batch_solve import (
