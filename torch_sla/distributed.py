@@ -2110,19 +2110,53 @@ class Replicated:
 
 
 @dataclass(frozen=True)
-class RowPartitioned:
-    """DSparseTensor placement: rows are distributed across ranks via
-    a (potentially irregular) partition map. Mirrors DTensor's
-    ``Shard(0)`` but does not require uniform chunks.
+class SparseShard:
+    """DSparseTensor placement: shard one of the **sparse** axes of the
+    underlying :class:`SparseTensor` across the mesh.
 
-    The partition map (``owned_nodes`` per rank) lives on each rank's
-    :class:`DSparseMatrix`; this placement class is a marker only, so
-    it stays cheap to hash / compare.
+    Mirrors ``torch.distributed.tensor.Shard(dim)`` -- one generic
+    placement parameterised by axis number, not separate classes per
+    direction. For a 2-D sparse matrix ``(M, N)`` the canonical axes
+    are 0 (rows) and 1 (cols); for a batched / block-sparse tensor
+    ``(*batch, M, N, *block)`` the row axis is ``axis=len(batch_shape)``
+    and the col axis is ``axis=len(batch_shape) + 1``.
+
+    Unlike DTensor's ``Shard(dim)`` -- which assumes uniform chunks of
+    size ``N/world_size`` -- a sparse shard can carry an irregular
+    partition map (METIS / hypergraph / RCB). The map lives on each
+    rank's :class:`DSparseMatrix` for now; this placement class is a
+    cheap marker carrying only ``axis``. Phase B of the
+    ``DSparseMatrix`` dissolution will fold the partition metadata
+    in here.
     """
-    pass
+    axis: int = 0
 
 
-SparsePlacement = Union[Replicated, RowPartitioned]
+def row_shard(axis_offset: int = 0) -> SparseShard:
+    """Convenience: row sharding for a ``(*batch, M, N, *block)`` tensor
+    where there are ``axis_offset`` leading batch dims. Defaults to a
+    plain 2-D matrix (``axis_offset=0``)."""
+    return SparseShard(axis=axis_offset)
+
+
+def col_shard(axis_offset: int = 0) -> SparseShard:
+    """Convenience: col sharding for a ``(*batch, M, N, *block)`` tensor.
+    Defaults to a plain 2-D matrix (``axis_offset=0``)."""
+    return SparseShard(axis=axis_offset + 1)
+
+
+# ---------------------------------------------------------------------- #
+# Backward-compatibility aliases.
+# Pre-rename: ``RowPartitioned()`` -- empty marker for "row-sharded".
+# Post-rename: ``SparseShard(axis=0)`` is the canonical name.
+# Kept as a deprecated alias so external callers keep working.
+# ---------------------------------------------------------------------- #
+def RowPartitioned() -> SparseShard:  # noqa: N802 -- legacy capital
+    """Deprecated alias for :func:`row_shard()` / ``SparseShard(axis=0)``."""
+    return SparseShard(axis=0)
+
+
+SparsePlacement = Union[Replicated, SparseShard]
 
 
 @dataclass(frozen=True)
@@ -2514,7 +2548,7 @@ class DSparseTensor:
                 global_shape=self._spec.global_shape,
             )
 
-        if isinstance(self._spec.placement, RowPartitioned) \
+        if isinstance(self._spec.placement, SparseShard) \
                 and isinstance(placement, Replicated):
             full = self._all_gather_global_matrix()
             # ``DSparseMatrix.from_global`` is a static helper that
@@ -4341,7 +4375,7 @@ class DSparseTensor:
         # space -- halo exchange in, local matvec, wrap result as
         # DTensor with the same mesh + Shard(0) placement. No gather.
         if self._spec is not None and isinstance(self._spec.placement,
-                                                  RowPartitioned):
+                                                  SparseShard):
             return self._matmul_spec(x)
 
         # Check for DTensor input (legacy "replicate-and-densify" path
@@ -4464,11 +4498,12 @@ class DSparseTensor:
         ...     y = D.solve_distributed_shard(b, atol=1e-12)  # kwarg wins
         """
         if self._spec is None or not isinstance(
-                self._spec.placement, RowPartitioned):
+                self._spec.placement, SparseShard):
             raise RuntimeError(
                 "solve_distributed_shard() requires a DSparseTensor "
-                "with RowPartitioned placement -- build one via "
-                "DSparseTensor.from_local(local, mesh, ...)."
+                "with SparseShard placement -- build one via "
+                "DSparseTensor.from_local(local, mesh, ...) or "
+                "DSparseTensor.partition(A, mesh, ...)."
             )
         if not (DIST_AVAILABLE and dist.is_initialized()):
             raise RuntimeError(

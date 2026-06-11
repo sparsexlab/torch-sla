@@ -52,7 +52,7 @@ def _mirror_worker(rank: int, world_size: int,
         from torch.distributed.tensor import DTensor, Shard
 
         from torch_sla import (DSparseMatrix, DSparseTensor,
-                                SparseTensor, RowPartitioned, Replicated)
+                                SparseTensor, SparseShard, Replicated)
         from torch_sla.datasets import Synthetic
 
         # Use the project's standard catalogued PDE stencil.
@@ -69,7 +69,10 @@ def _mirror_worker(rank: int, world_size: int,
 
         # 1) spec metadata round-trips.
         assert D.spec is not None
-        assert isinstance(D.spec.placement, RowPartitioned)
+        # SparseShard with axis=0 is the canonical row-shard placement
+        # (replaces the deprecated RowPartitioned class).
+        assert isinstance(D.spec.placement, SparseShard)
+        assert D.spec.placement.axis == 0
         assert D.spec.global_shape == (N, N)
 
         # 2) to_local is the identity.

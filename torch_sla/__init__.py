@@ -113,8 +113,11 @@ from .distributed import (
     partition_simple,
     # DTensor-mirror placement vocabulary
     DSparseSpec,
-    RowPartitioned,
+    SparseShard,
+    row_shard,
+    col_shard,
     Replicated,
+    RowPartitioned,  # deprecated alias for SparseShard(axis=0)
 )
 
 from .io import (
