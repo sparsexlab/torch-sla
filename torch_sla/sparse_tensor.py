@@ -1259,6 +1259,71 @@ class SparseTensor:
             verbose=verbose
         )
     
+    def extract_partition(self, partition) -> "SparseTensor":
+        """Extract this rank's local subdomain as a plain
+        :class:`SparseTensor` in local coordinates.
+
+        Given a :class:`~torch_sla.distributed.Partition` (the irregular
+        owned/halo map produced by METIS / RCB / Hilbert), build a local
+        ``(num_local, num_local)`` :class:`SparseTensor` whose COO
+        triples are in **local** indexing: rows ``0..num_owned-1`` are
+        the rows this rank owns, rows ``num_owned..num_local-1`` are
+        the halo rows (zero-valued in the matrix; they exist so the
+        x vector that matvec consumes can be the same num_local size
+        used by the halo-exchange machinery).
+
+        This is the Phase B replacement for the
+        :class:`~torch_sla.distributed.DSparseMatrix`-construction half
+        of ``DSparseMatrix.from_global`` -- once Phase B finishes,
+        ``DSparseTensor._local_tensor`` will be one of these plain
+        :class:`SparseTensor` instances and the distributed-aware
+        methods (``matvec``, ``halo_exchange``, ``solve``) will live on
+        :class:`DSparseTensor`, not on a separate Matrix class.
+
+        Parameters
+        ----------
+        partition : Partition
+            Irregular partition map -- ``owned_nodes`` / ``halo_nodes`` /
+            ``global_to_local``. Usually produced by
+            :func:`~torch_sla.distributed.partition_graph_metis` etc.
+
+        Returns
+        -------
+        SparseTensor
+            Local subdomain. ``.shape == (num_local, num_local)``;
+            values live only in the owned-row slice.
+        """
+        if self.is_batched:
+            raise ValueError("extract_partition() does not support "
+                             "batched SparseTensor.")
+
+        device = self.values.device
+        g2l = partition.global_to_local.to(device=device,
+                                            dtype=torch.int64)
+        owned = partition.owned_nodes.to(device=device, dtype=torch.int64)
+        halo  = partition.halo_nodes.to(device=device, dtype=torch.int64)
+        num_owned = int(owned.numel())
+        num_halo  = int(halo.numel())
+        num_local = num_owned + num_halo
+
+        # Map global row/col to local indices via g2l. ``g2l[g] == -1``
+        # for globals not in this rank's (owned ∪ halo) set.
+        rows_g = self.row_indices.to(device=device, dtype=torch.int64)
+        cols_g = self.col_indices.to(device=device, dtype=torch.int64)
+        rows_l = g2l[rows_g]
+        cols_l = g2l[cols_g]
+
+        # Keep entries whose row is owned AND col is local (the
+        # owned-row slice of A_local, with cols mapped into the
+        # owned+halo local frame).
+        mask = (rows_l >= 0) & (rows_l < num_owned) & (cols_l >= 0)
+        local_rows = rows_l[mask]
+        local_cols = cols_l[mask]
+        local_vals = self.values[mask]
+
+        return SparseTensor(local_vals, local_rows, local_cols,
+                             (num_local, num_local))
+
     def partition_for_rank(
         self,
         rank: int,

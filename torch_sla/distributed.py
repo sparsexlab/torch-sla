@@ -2212,13 +2212,36 @@ class SparseShard:
 
     Unlike DTensor's ``Shard(dim)`` -- which assumes uniform chunks of
     size ``N/world_size`` -- a sparse shard can carry an irregular
-    partition map (METIS / hypergraph / RCB). The map lives on each
-    rank's :class:`DSparseMatrix` for now; this placement class is a
-    cheap marker carrying only ``axis``. Phase B of the
-    ``DSparseMatrix`` dissolution will fold the partition metadata
-    in here.
+    partition map (METIS / hypergraph / RCB) via the optional
+    ``partition`` field.
+
+    The ``partition`` field is the **target** state of the DSparseMatrix
+    dissolution: it eventually carries ``owned_nodes`` /
+    ``halo_nodes`` / ``neighbor_partitions`` so the placement is the
+    single source of truth for the irregular shard map. Today it
+    defaults to ``None`` and the per-rank ``DSparseMatrix.partition``
+    still owns that data; Phase B step B3 will swap the two so
+    ``_local_tensor`` becomes a plain :class:`SparseTensor` and the
+    placement carries the map.
     """
     axis: int = 0
+    partition: Optional["Partition"] = None
+
+    def __eq__(self, other: object) -> bool:
+        # Frozen dataclass eq would call torch.Tensor.__eq__ inside
+        # Partition and explode; restrict equality to the axis +
+        # partition_id pair, which is what placement dispatch needs.
+        if not isinstance(other, SparseShard):
+            return False
+        if self.axis != other.axis:
+            return False
+        my_pid = self.partition.partition_id if self.partition else None
+        ot_pid = other.partition.partition_id if other.partition else None
+        return my_pid == ot_pid
+
+    def __hash__(self) -> int:
+        pid = self.partition.partition_id if self.partition else -1
+        return hash((type(self).__name__, self.axis, pid))
 
 
 def row_shard(axis_offset: int = 0) -> SparseShard:
