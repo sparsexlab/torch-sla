@@ -213,9 +213,10 @@ preconditioning and high-end GPU AMG:
        :class:`~torch_sla.backends.pyamg_backend.PyAMGHierarchy` for
        preconditioner re-use.
    * - ``amgx``
-     - planned
+     - **available** (this release)
      - CUDA AMG + Krylov (Nvidia AmgX)
      - Linux + Windows only. NVIDIA GPU required.
+       Install via ``pip install torch-sla[amgx]`` (pulls torch-amgx wheels).
    * - ``petsc``
      - investigating
      - CPU/GPU direct + iterative, distributed (PETSc/hypre BoomerAMG)

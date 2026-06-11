@@ -1,19 +1,20 @@
-"""AmgX backend: GPU AMG / Krylov solvers via pyamgx.
+"""AmgX backend: GPU AMG / Krylov solvers via torch-amgx.
 
 NVIDIA AmgX (https://github.com/NVIDIA/AMGX) is a state-of-the-art
 GPU-resident sparse-linear-algebra library, providing classical
 algebraic multigrid, smoothed aggregation, and a suite of Krylov
-methods (PCG, PBICGSTAB, FGMRES, ...). pyamgx
-(https://github.com/shwina/pyamgx) is the Cython wrapper.
+methods (PCG, PBICGSTAB, FGMRES, ...). torch-amgx
+(https://github.com/sparsexlab/torch-amgx) is our maintained
+PyTorch-native binding, replacing the older pyamgx wrapper.
 
-Neither has a PyPI wheel. The build pipeline is captured in
-``sparsexlab/torch-sla-amgx`` (CMake + custom setup.py patches for
-Windows / MSVC); end users on Linux + Windows + NVIDIA GPU install via
+torch-amgx ships pre-compiled wheels for Linux + Windows + NVIDIA CUDA:
 
-    pip install --extra-index-url https://pypi.walkerchi.com torch-sla-amgx
+    pip install torch-amgx        # one wheel per (OS, py, CUDA major)
 
-macOS is not supported by Nvidia for CUDA, so this backend is
-unavailable there.
+macOS is not supported by NVIDIA for CUDA, so this backend is
+unavailable there. ``torch-amgx`` is an *optional* dependency of
+``torch-sla`` -- the import is lazy and ``is_amgx_available()`` returns
+``False`` cleanly if the package or CUDA is missing.
 
 Two entry points mirror the PyAMG-hybrid backend (PR #14):
 
@@ -29,220 +30,104 @@ The :class:`AmgXSolver` itself is transparently cached via
 config, so repeated solves on the same matrix reuse the GPU setup
 exactly like PyAMG does.
 
-Known limitations (validated on RTX 5060 / CUDA 12.8 / pyamgx 0.1):
+Compared to the previous pyamgx-based implementation:
 
-* **Cache invalidation mid-process is unsafe**: calling
-  ``SOLVER_CACHE.clear()`` and then building a *new* AmgX solver
-  with a *different* config inside the same Python process can trip
-  AmgX's internal resource accounting and abort with
-  ``STATUS_STACK_BUFFER_OVERRUN``. Workaround: build hierarchies
-  with a single config per process. The transparent same-config
-  reuse path (the common case) is solid.
-* **macOS** is not supported by Nvidia for CUDA -- the backend errors
-  cleanly on construction.
+* CSR assembly happens **on-device** via ``torch_amgx.Solver.setup_coo``
+  -- no GPU<->CPU round-trip for the matrix at construction time.
+* The solve path stays on GPU: ``b`` is consumed and ``x`` is returned
+  as a CUDA tensor without any numpy detour.
+* ``Config`` is a frozen dataclass from torch-amgx, not a printf-style
+  string we hand-roll. The literal-config-string escape hatch is
+  still supported (pass it as the ``method`` kwarg).
 """
 from __future__ import annotations
 
 import warnings
 from typing import Any, Callable, Optional, Tuple
 
-import numpy as np
 import torch
 from torch import Tensor
 
 
-# pyamgx (and the underlying amgxsh.dll on Windows) is imported lazily
-# so this module can be imported on machines without AmgX installed.
-_pyamgx = None
-_AMGX_INITIALIZED = False
+# torch-amgx is imported lazily so this module can be imported on
+# machines without it installed (macOS, CPU-only Linux/Windows).
+_torch_amgx = None
 
 
-def _load_pyamgx():
-    """Lazy import of pyamgx with a clear error when it's missing."""
-    global _pyamgx
-    if _pyamgx is not None:
-        return _pyamgx
+def _load_torch_amgx():
+    """Lazy import of torch-amgx with a clear error when it's missing."""
+    global _torch_amgx
+    if _torch_amgx is not None:
+        return _torch_amgx
     try:
-        import pyamgx
+        import torch_amgx
     except ImportError as exc:
         raise ImportError(
             "torch_sla.backends.amgx_backend requires the optional "
-            "dependency pyamgx (and an AmgX SDK build). The simplest way "
-            "to install both is\n\n"
-            "    pip install --extra-index-url https://pypi.walkerchi.com "
-            "torch-sla-amgx\n\n"
-            "which ships pre-compiled wheels for Linux + Windows + NVIDIA "
-            "CUDA. macOS is not supported by NVIDIA for CUDA."
+            "dependency torch-amgx. Install via\n\n"
+            "    pip install torch-amgx\n\n"
+            "which ships pre-compiled wheels for Linux + Windows + "
+            "NVIDIA CUDA. macOS is not supported by NVIDIA for CUDA."
         ) from exc
-    _pyamgx = pyamgx
-    return _pyamgx
+    _torch_amgx = torch_amgx
+    return _torch_amgx
 
 
 def is_amgx_available() -> bool:
-    """Return ``True`` iff pyamgx + AmgX shared library are loadable."""
+    """Return ``True`` iff torch-amgx is importable and CUDA is usable."""
     try:
-        _load_pyamgx()
-        return True
+        tam = _load_torch_amgx()
     except ImportError:
         return False
-
-
-def _ensure_initialized():
-    """``pyamgx.initialize()`` must be called once per process before any
-    AmgX resource is built.
-
-    We deliberately do **not** register ``pyamgx.finalize()`` with
-    :mod:`atexit`: the AmgX runtime requires all Config / Resources /
-    Matrix / Solver objects to be destroyed before ``finalize()`` runs,
-    but Python's interpreter-shutdown ordering destroys atexit-registered
-    callbacks before module-level globals (including :data:`SOLVER_CACHE`
-    which still holds :class:`AmgXSolver` instances). Letting the OS
-    reclaim GPU memory on process exit avoids a crash; the printed
-    \"memory leaks\" notice from AmgX during shutdown is cosmetic.
-    """
-    global _AMGX_INITIALIZED
-    if _AMGX_INITIALIZED:
-        return
-    pyamgx = _load_pyamgx()
-    pyamgx.initialize()
-    _AMGX_INITIALIZED = True
+    return tam.is_available()
 
 
 # ====================================================================== #
-# Method dispatch -- hand-rolled printf-style config strings. AmgX's
-# parser accepts ``config_version=2`` followed by ``solver(scope)=TYPE``
-# declarations plus ``scope:key=value`` settings. Nested preconditioners
-# are written ``parent:preconditioner(scope)=TYPE`` -- the parens around
-# the scope name are required, otherwise the parser errors with
-# "Incorrect amgx configuration provided".
+# Config builder -- delegates printf-style config-string construction
+# to torch_amgx.Config. The literal-config-string escape hatch is kept
+# for parity with the previous backend API.
 # ====================================================================== #
-
-
-def _amg_preconditioned(outer_solver: str, *,
-                        tol: float, maxiter: int) -> str:
-    """Build a printf-style config for ``outer_solver`` (e.g. PBICGSTAB,
-    PCG, FGMRES) preconditioned by classical AMG with a single V-cycle.
-
-    Mirrors the minimal valid subset of AmgX's stock ``PBICGSTAB.json``
-    /``PCG.json`` files. We intentionally omit settings the parser
-    rejects in printf-style mode (``scope``, ``interpolator``,
-    ``obtain_timings`` -- the first is implicit in ``solver(name)=`` and
-    the others are JSON-only keys)."""
-    return (
-        "config_version=2,"
-        f"solver(main)={outer_solver},"
-        f"main:max_iters={maxiter},"
-        f"main:tolerance={tol},"
-        "main:convergence=ABSOLUTE,"
-        "main:norm=L2,"
-        "main:monitor_residual=1,"
-        "main:print_solve_stats=0,"
-        "main:preconditioner(amg)=AMG,"
-        "amg:max_iters=1,"
-        "amg:cycle=V,"
-        "amg:presweeps=1,"
-        "amg:postsweeps=1"
-    )
-
-
-def _amg_standalone(*, tol: float, maxiter: int) -> str:
-    """AMG used as the standalone iterative solver (one V-cycle per
-    outer iteration)."""
-    return (
-        "config_version=2,"
-        "solver(main)=AMG,"
-        f"main:max_iters={maxiter},"
-        f"main:tolerance={tol},"
-        "main:convergence=ABSOLUTE,"
-        "main:norm=L2,"
-        "main:cycle=V,"
-        "main:presweeps=1,"
-        "main:postsweeps=1,"
-        "main:monitor_residual=1,"
-        "main:print_solve_stats=0"
-    )
-
-
-def _resolve_config(method: str, *, tol: float, maxiter: int) -> str:
-    """Map a torch-sla method label to a printf-style AmgX config blob.
-
-    Accepted methods:
-
-    * ``"auto"`` / ``"pbicgstab"`` / ``"bicgstab"`` -- PBICGSTAB + AMG
-    * ``"pcg"`` / ``"cg"``                          -- PCG + AMG
-    * ``"fgmres"`` / ``"gmres"``                    -- FGMRES + AMG
-    * ``"amg"``                                     -- standalone AMG
-
-    A literal AmgX config string (containing ``config_version=``) is
-    also accepted and passed through unchanged.
-    """
-    method = method.lower()
-    if "config_version" in method:
-        return method
-    if method in ("auto", "pbicgstab", "bicgstab"):
-        return _amg_preconditioned("PBICGSTAB", tol=tol, maxiter=maxiter)
-    if method in ("pcg", "cg"):
-        return _amg_preconditioned("PCG", tol=tol, maxiter=maxiter)
-    if method in ("fgmres", "gmres"):
-        return _amg_preconditioned("FGMRES", tol=tol, maxiter=maxiter)
-    if method == "amg":
-        return _amg_standalone(tol=tol, maxiter=maxiter)
-    raise ValueError(
-        f"Unknown AmgX method {method!r}; expected one of auto / amg / "
-        f"cg / pcg / bicgstab / pbicgstab / gmres / fgmres, or a literal "
-        f"AmgX config string."
-    )
+def _build_config(method: str, *, tol: float, maxiter: int):
+    tam = _load_torch_amgx()
+    if "config_version" in method.lower():
+        return tam.Config(amgx_config_str=method)
+    return tam.Config(method=method.lower(), tol=tol, maxiter=maxiter)
 
 
 # ====================================================================== #
-# AmgXSolver: lifecycle wrapper around the pyamgx resource graph
+# AmgXSolver: thin wrapper around torch_amgx.Solver
 # ====================================================================== #
 class AmgXSolver:
     """Captured AmgX resource graph (config + resources + matrix +
     factored solver).
 
     One instance owns the GPU setup for one matrix and can be solved
-    against any number of right-hand sides. Destruction releases all
-    GPU resources in reverse construction order.
+    against any number of right-hand sides. Garbage collecting the
+    instance tears down the underlying AmgX handles.
 
-    Build via :meth:`from_coo` (the path the torch-sla dispatcher takes)
-    or :meth:`from_scipy_csr` if you already have a scipy matrix.
+    Build via :meth:`from_coo` (the path the torch-sla dispatcher takes).
     """
 
     def __init__(self, *, config_str: str):
-        _ensure_initialized()
-        pyamgx = _load_pyamgx()
-        self._pyamgx = pyamgx
-        self._cfg = pyamgx.Config().create(config_str)
-        self._rsrc = pyamgx.Resources().create_simple(self._cfg)
-        self._A = pyamgx.Matrix().create(self._rsrc)
-        self._solver = pyamgx.Solver().create(self._rsrc, self._cfg)
+        tam = _load_torch_amgx()
+        # Keep ``config_str`` around so the cache key is stable across
+        # equivalent Config dataclass instances.
+        self._config_str = config_str
+        self._solver = tam.Solver(tam.Config(amgx_config_str=config_str))
         self._is_setup = False
 
     # ------------------------------------------------------------------ #
     # Construction
     # ------------------------------------------------------------------ #
     @classmethod
-    def from_scipy_csr(cls, A_csr, *, config_str: str) -> "AmgXSolver":
-        s = cls(config_str=config_str)
-        s._A.upload_CSR(A_csr)
-        s._solver.setup(s._A)
-        s._is_setup = True
-        return s
-
-    @classmethod
     def from_coo(cls, val: Tensor, row: Tensor, col: Tensor,
                  shape: Tuple[int, int], *, config_str: str) -> "AmgXSolver":
-        """Build a solver from a torch COO triple. Values are pulled to
-        CPU + assembled into scipy CSR before upload (pyamgx's
-        ``upload_CSR`` expects a scipy matrix)."""
-        import scipy.sparse as sp
-        A_csr = sp.coo_matrix(
-            (val.detach().cpu().numpy(),
-             (row.detach().cpu().numpy(), col.detach().cpu().numpy())),
-            shape=shape,
-        ).tocsr().astype(np.float64)
-        return cls.from_scipy_csr(A_csr, config_str=config_str)
+        """Build a solver from a torch COO triple. CSR assembly happens
+        on-device -- no GPU<->CPU round-trip for the matrix."""
+        s = cls(config_str=config_str)
+        s._solver.setup_coo(val, row, col, shape)
+        s._is_setup = True
+        return s
 
     # ------------------------------------------------------------------ #
     # Solve
@@ -250,46 +135,20 @@ class AmgXSolver:
     def solve(self, b: Tensor, *, x0: Optional[Tensor] = None) -> Tensor:
         """Solve ``A x = b`` using the previously-set-up solver.
 
-        Returns ``x`` with the same device + dtype as ``b``.
+        ``x0`` provides a warm-start initial guess when supplied.
         """
         if not self._is_setup:
             raise RuntimeError("AmgXSolver was not set up against a matrix")
-        pyamgx = self._pyamgx
-        device, dtype = b.device, b.dtype
-        b_np = b.detach().to(torch.float64).cpu().numpy()
-        x0_np = (np.zeros_like(b_np) if x0 is None
-                 else x0.detach().to(torch.float64).cpu().numpy())
-
-        bvec = pyamgx.Vector().create(self._rsrc)
-        xvec = pyamgx.Vector().create(self._rsrc)
-        try:
-            bvec.upload(b_np)
-            xvec.upload(x0_np)
-            self._solver.solve(bvec, xvec)
-            x = xvec.download()
-        finally:
-            bvec.destroy()
-            xvec.destroy()
-        return torch.from_numpy(x).to(dtype=dtype, device=device)
+        if x0 is None:
+            return self._solver.solve(b)
+        x = x0.clone()
+        self._solver.solve_into(b, x)
+        return x
 
     # Preconditioner interface so this object plugs into outer iterative
     # solvers as M^{-1} r -- AmgX's V-cycle is the preconditioner.
     def __call__(self, r: Tensor) -> Tensor:
         return self.solve(r)
-
-    # ------------------------------------------------------------------ #
-    # Cleanup
-    # ------------------------------------------------------------------ #
-    def __del__(self):
-        # Destroy in reverse-creation order. Guard each step so partial
-        # construction (failed in __init__) still cleans up correctly.
-        for attr in ("_solver", "_A", "_rsrc", "_cfg"):
-            obj = getattr(self, attr, None)
-            if obj is not None:
-                try:
-                    obj.destroy()
-                except Exception:
-                    pass
 
 
 # ====================================================================== #
@@ -329,16 +188,16 @@ def amgx_solve(val: Tensor, row: Tensor, col: Tensor,
         COO representation of the matrix.
     b : torch.Tensor
         Right-hand side. Must live on CUDA for the solve to happen on
-        GPU; ``b.to(\"cuda\")`` before calling if needed.
+        GPU; ``b.to("cuda")`` before calling if needed.
     tol : float
         Absolute residual tolerance. Default ``1e-8``.
     maxiter : int
         Max outer iterations. Default ``100``.
     method : str
-        Solver method. ``\"auto\"`` (= ``\"pbicgstab\"``) is the most
-        robust default; alternatives are ``\"cg\"`` / ``\"pcg\"`` /
-        ``\"bicgstab\"`` / ``\"pbicgstab\"`` / ``\"gmres\"`` /
-        ``\"fgmres\"`` / ``\"amg\"`` (standalone V-cycle iteration).
+        Solver method. ``"auto"`` (= ``"pbicgstab"``) is the most
+        robust default; alternatives are ``"cg"`` / ``"pcg"`` /
+        ``"bicgstab"`` / ``"pbicgstab"`` / ``"gmres"`` /
+        ``"fgmres"`` / ``"amg"`` (standalone V-cycle iteration).
         A literal AmgX config string is also accepted (must contain
         ``config_version=2``).
     solver : AmgXSolver, optional
@@ -353,39 +212,23 @@ def amgx_solve(val: Tensor, row: Tensor, col: Tensor,
             f"val.is_cuda={val.is_cuda}, b.is_cuda={b.is_cuda}"
         )
 
-    config_str = _resolve_config(method, tol=tol, maxiter=maxiter)
+    cfg = _build_config(method, tol=tol, maxiter=maxiter)
+    config_str = cfg.build_config_str()
 
     if solver is None:
         solver = _build_or_lookup_solver(val, row, col, shape,
                                          config_str=config_str)
 
-    x = solver.solve(b)
-
     if return_info:
-        # AmgX prints its own stats; we surface what the API allows.
-        # ``solver.solver.get_iters_number()`` etc. are available in
-        # pyamgx if the user enables ``main:obtain_timings``; default
-        # config keeps this off so we leave them best-effort.
-        info = {
-            "iter_count": -1,                  # not threaded yet
-            "residual": float((b - _residual_norm(val, row, col, shape, x)).item()
-                              if False else float("nan")),
-            "converged": True,                 # AmgX raises on divergence
+        x, info = solver._solver.solve(b, return_info=True)
+        return x, {
+            "iter_count": info.iter_count,
+            "residual": info.residual,
+            "converged": info.converged,
             "method":  f"amgx-{method}",
             "backend": "amgx",
         }
-        return x, info
-    return x
-
-
-def _residual_norm(val, row, col, shape, x):
-    """Best-effort residual reconstruction. Used only when callers ask
-    for ``return_info=True``; computing it via torch.sparse keeps
-    everything on device, no extra GPU<->CPU round-trip."""
-    indices = torch.stack([row, col], dim=0)
-    A = torch.sparse_coo_tensor(indices, val, shape,
-                                device=val.device).coalesce()
-    return torch.sparse.mm(A, x.unsqueeze(1)).squeeze(1)
+    return solver.solve(b)
 
 
 # ====================================================================== #
@@ -402,8 +245,9 @@ def amgx_preconditioner(val: Tensor, row: Tensor, col: Tensor,
     ``M^{-1}`` inside any outer iterative solver.
 
     Defaults to a single-V-cycle classical AMG configuration -- the
-    standard \"AMG as preconditioner for CG/BiCGStab\" pattern.
+    standard "AMG as preconditioner for CG/BiCGStab" pattern.
     """
-    config_str = _resolve_config(method, tol=tol, maxiter=maxiter)
+    cfg = _build_config(method, tol=tol, maxiter=maxiter)
+    config_str = cfg.build_config_str()
     return _build_or_lookup_solver(val, row, col, shape,
                                    config_str=config_str)
