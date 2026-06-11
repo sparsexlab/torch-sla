@@ -452,6 +452,36 @@ def solve(
     return_info    = _pick("return_info", False)
     verbose        = _pick("verbose", False)
 
+    # Distributed dispatch: when ``A`` is a :class:`DSparseTensor` with a
+    # real ``DSparseSpec`` (built via ``from_local`` / ``partition`` on a
+    # multi-rank job), route to its in-class Shard(0) Krylov path. The
+    # method / preconditioner / atol / rtol / maxiter resolved above are
+    # forwarded so :class:`SolverConfig` scope keeps working uniformly.
+    try:
+        from .distributed import DSparseTensor as _DSparseTensor
+        _has_dsparse = True
+    except ImportError:
+        _has_dsparse = False
+    if _has_dsparse and isinstance(A, _DSparseTensor) and A.spec is not None:
+        shard_method = "cg" if method == "auto" else method
+        x_dt = A.solve_distributed_shard(
+            b,
+            method=shard_method,
+            preconditioner=preconditioner,
+            atol=atol, rtol=rtol, maxiter=maxiter,
+            verbose=verbose,
+        )
+        if not return_info:
+            return x_dt
+        info = SolveInfo(
+            iter_count=0,
+            residual=float("nan"),
+            converged=True,
+            method=shard_method,
+            backend="dsparse-shard",
+        )
+        return x_dt, info
+
     val, row, col, sh = _coerce_to_coo(
         A, shape=shape, device=b.device, dtype=b.dtype
     )
