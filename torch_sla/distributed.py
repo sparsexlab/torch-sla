@@ -4355,12 +4355,14 @@ class DSparseTensor:
         self,
         b: Any,
         *,
-        atol: float = 1e-10,
-        rtol: float = 0.0,
-        maxiter: int = 1000,
-        verbose: bool = False,
+        method: Any = None,
+        atol: Any = None,
+        rtol: Any = None,
+        maxiter: Any = None,
+        restart: Any = None,
+        verbose: Any = None,
     ) -> Any:
-        """Distributed CG in Shard(0) space.
+        """Distributed Krylov solve entirely in Shard(0) space.
 
         Requires this :class:`DSparseTensor` to carry a real spec
         (built via :meth:`from_local`). The right-hand side ``b`` may
@@ -4368,9 +4370,28 @@ class DSparseTensor:
         ``torch.Tensor`` sized ``num_owned`` for the calling rank;
         the return value mirrors the input's wrapper.
 
-        Inner products use ``dist.all_reduce`` (sum) so global vectors
-        never need to materialise. The matrix's halo exchange handles
-        the matvec coupling between ranks.
+        Methods (all live in Shard(0) space):
+
+        * ``"cg"``       Saad §6.7 conjugate gradient -- SPD systems
+        * ``"bicgstab"`` Saad §7.4 BiCGStab -- non-symmetric, no restart
+        * ``"gmres"``    Saad §6.5 restarted GMRES(m) -- general
+        * ``"fgmres"``   Saad §9.4 flexible GMRES(m) -- variable preconditioner
+        * ``"minres"``   Paige-Saunders MINRES -- symmetric indefinite
+
+        Inner products go through ``dist.all_reduce`` (sum), matvec
+        through ``halo_exchange`` -- no rank ever sees a global vector.
+
+        SolverConfig integration
+        ------------------------
+        Every kwarg defaults to ``None``, meaning "look at the active
+        :class:`SolverConfig` scope on this thread, then fall back to
+        the hard-coded default". The precedence chain matches
+        :func:`solve` -- explicit kwarg → innermost scope → outer
+        scopes (LIFO) → hard-coded default.
+
+        >>> with SolverConfig(method="bicgstab", atol=1e-8):
+        ...     x = D.solve_distributed_shard(b)        # picks BiCGStab + 1e-8
+        ...     y = D.solve_distributed_shard(b, atol=1e-12)  # kwarg wins
         """
         if self._spec is None or not isinstance(
                 self._spec.placement, RowPartitioned):
@@ -4385,6 +4406,24 @@ class DSparseTensor:
                 "to be initialised."
             )
 
+        # Merge with active SolverConfig scope. Explicit kwargs (non-
+        # ``None``) win; otherwise we walk the scope stack via
+        # ``solve._active_defaults`` and fall back to hard-coded.
+        from .solve import _active_defaults
+        defaults = _active_defaults()
+        def _pick(value, name, hardcoded):
+            if value is not None:
+                return value
+            if name in defaults:
+                return defaults[name]
+            return hardcoded
+        method  = _pick(method,  "method",  "cg")
+        atol    = _pick(atol,    "atol",    1e-10)
+        rtol    = _pick(rtol,    "rtol",    0.0)
+        maxiter = _pick(maxiter, "maxiter", 1000)
+        restart = restart if restart is not None else 30  # not in SolverConfig
+        verbose = _pick(verbose, "verbose", False)
+
         if _is_dtensor(b):
             b_owned = b.to_local()
             wrap_output = True
@@ -4392,15 +4431,62 @@ class DSparseTensor:
             b_owned = b
             wrap_output = False
 
-        x_owned = self._distributed_cg_shard(
-            b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
-            verbose=verbose)
+        method_l = method.lower()
+        if method_l in ("cg", "pcg"):
+            x_owned = self._distributed_cg_shard(
+                b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
+                verbose=verbose)
+        elif method_l == "bicgstab":
+            x_owned = self._distributed_bicgstab_shard(
+                b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
+                verbose=verbose)
+        elif method_l in ("gmres", "fgmres"):
+            x_owned = self._distributed_gmres_shard(
+                b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
+                restart=restart, flexible=(method_l == "fgmres"),
+                verbose=verbose)
+        elif method_l == "minres":
+            # MINRES scaffold present but not yet validated against
+            # scipy; ships in a focused follow-up so we don't block the
+            # rest of the Krylov family. Use ``"gmres"`` for symmetric
+            # indefinite systems in the meantime.
+            raise NotImplementedError(
+                "MINRES Shard(0) variant is scaffolded but not yet "
+                "verified; use method='gmres' (or 'bicgstab') for "
+                "symmetric indefinite systems in this release."
+            )
+        else:
+            raise ValueError(
+                f"Unknown distributed solve method {method!r}; expected "
+                "one of cg, bicgstab, gmres, fgmres."
+            )
 
         if wrap_output:
             from torch.distributed.tensor import DTensor as _DTensor, Shard
             return _DTensor.from_local(
                 x_owned, self._spec.mesh, [Shard(0)])
         return x_owned
+
+    # ------------------------------------------------------------------ #
+    # Shard(0)-space primitives reused by every Krylov method.
+    # ------------------------------------------------------------------ #
+    def _shard_dot(self, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """Global inner product over Shard(0) vectors: local ``torch.dot``
+        then ``dist.all_reduce(SUM)`` across the mesh."""
+        d = torch.dot(u, v)
+        dist.all_reduce(d, op=dist.ReduceOp.SUM)
+        return d
+
+    def _shard_norm(self, u: torch.Tensor) -> torch.Tensor:
+        return self._shard_dot(u, u).sqrt()
+
+    def _shard_matvec(self, x_owned: torch.Tensor) -> torch.Tensor:
+        """Apply ``A`` to a Shard(0) vector. Pads with zeros for halo,
+        runs ``halo_exchange`` + local SpMV, slices result to num_owned."""
+        local_matrix = self._local_matrix
+        x_padded = self._pad_owned_to_local(x_owned)
+        y_full = local_matrix.matvec(x_padded, exchange_halo=True)
+        return y_full[:local_matrix.num_owned]
 
     def _distributed_cg_shard(
         self,
@@ -4422,29 +4508,17 @@ class DSparseTensor:
                 "Shard(0) CG requires b to be the local owned slice."
             )
 
-        # Inner-product helper: local dot + cross-rank all_reduce.
-        def _global_dot(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-            d_local = torch.dot(u, v)
-            dist.all_reduce(d_local, op=dist.ReduceOp.SUM)
-            return d_local
-
-        # Matvec helper: pad owned → local, halo exchange, slice.
-        def _matvec_owned(x_o: torch.Tensor) -> torch.Tensor:
-            x_padded = self._pad_owned_to_local(x_o)
-            y_full = local_matrix.matvec(x_padded, exchange_halo=True)
-            return y_full[:no]
-
         x = torch.zeros_like(b_owned)
-        r = b_owned - _matvec_owned(x)
+        r = b_owned - self._shard_matvec(x)
         p = r.clone()
-        rs_old = _global_dot(r, r)
+        rs_old = self._shard_dot(r, r)
 
-        b_norm_sq = _global_dot(b_owned, b_owned)
+        b_norm_sq = self._shard_dot(b_owned, b_owned)
         tol_sq = max(atol * atol, rtol * rtol * float(b_norm_sq.item()))
 
         for k in range(maxiter):
-            Ap = _matvec_owned(p)
-            pAp = _global_dot(p, Ap)
+            Ap = self._shard_matvec(p)
+            pAp = self._shard_dot(p, Ap)
             if float(pAp.abs().item()) < 1e-30:
                 if verbose:
                     print(f"[shard-CG] iter {k}: pAp ~= 0, stop")
@@ -4453,7 +4527,7 @@ class DSparseTensor:
             x = x + alpha * p
             r = r - alpha * Ap
 
-            rs_new = _global_dot(r, r)
+            rs_new = self._shard_dot(r, r)
             res = float(rs_new.sqrt().item())
             if verbose and (k % 100 == 0 or k < 5):
                 print(f"[shard-CG] iter {k}: ||r||={res:.3e}")
@@ -4465,6 +4539,283 @@ class DSparseTensor:
             beta = rs_new / rs_old
             p = r + beta * p
             rs_old = rs_new
+
+        return x
+
+    # ------------------------------------------------------------------ #
+    # BiCGStab (Saad §7.4.2). Handles non-symmetric A; no restart.
+    # ------------------------------------------------------------------ #
+    def _distributed_bicgstab_shard(
+        self,
+        b_owned: torch.Tensor,
+        *,
+        atol: float,
+        rtol: float,
+        maxiter: int,
+        verbose: bool,
+    ) -> torch.Tensor:
+        no = self._local_matrix.num_owned
+        if b_owned.shape[0] != no:
+            raise ValueError(
+                f"b_owned size {b_owned.shape[0]} != num_owned {no}")
+
+        x = torch.zeros_like(b_owned)
+        r = b_owned - self._shard_matvec(x)
+        r_hat = r.clone()                 # shadow residual, fixed
+        rho = alpha = omega = torch.tensor(1.0, dtype=b_owned.dtype,
+                                            device=b_owned.device)
+        p = torch.zeros_like(b_owned)
+        v = torch.zeros_like(b_owned)
+
+        b_norm = float(self._shard_norm(b_owned).item())
+        tol = max(atol, rtol * b_norm)
+
+        for k in range(maxiter):
+            rho_new = self._shard_dot(r_hat, r)
+            if float(rho_new.abs().item()) < 1e-30:
+                if verbose:
+                    print(f"[shard-BiCGStab] iter {k}: rho ~= 0, breakdown")
+                break
+            if k == 0:
+                p = r.clone()
+            else:
+                beta = (rho_new / rho) * (alpha / omega)
+                p = r + beta * (p - omega * v)
+            v = self._shard_matvec(p)
+            denom = self._shard_dot(r_hat, v)
+            if float(denom.abs().item()) < 1e-30:
+                if verbose:
+                    print(f"[shard-BiCGStab] iter {k}: r_hat.v ~= 0, breakdown")
+                break
+            alpha = rho_new / denom
+            s = r - alpha * v
+            s_norm = float(self._shard_norm(s).item())
+            if s_norm < tol:
+                x = x + alpha * p
+                if verbose:
+                    print(f"[shard-BiCGStab] half-iter {k}: ||s||={s_norm:.3e}")
+                break
+
+            t = self._shard_matvec(s)
+            tt = self._shard_dot(t, t)
+            ts = self._shard_dot(t, s)
+            if float(tt.abs().item()) < 1e-30:
+                omega = torch.tensor(0.0, dtype=b_owned.dtype,
+                                     device=b_owned.device)
+            else:
+                omega = ts / tt
+            x = x + alpha * p + omega * s
+            r = s - omega * t
+            r_norm = float(self._shard_norm(r).item())
+            if verbose and (k % 100 == 0 or k < 5):
+                print(f"[shard-BiCGStab] iter {k}: ||r||={r_norm:.3e}")
+            if r_norm < tol:
+                if verbose:
+                    print(f"[shard-BiCGStab] converged at iter {k}, "
+                          f"||r||={r_norm:.3e}")
+                break
+            rho = rho_new
+
+        return x
+
+    # ------------------------------------------------------------------ #
+    # Restarted GMRES(m) (Saad §6.5.1). Optionally flexible (FGMRES).
+    # ------------------------------------------------------------------ #
+    def _distributed_gmres_shard(
+        self,
+        b_owned: torch.Tensor,
+        *,
+        atol: float,
+        rtol: float,
+        maxiter: int,
+        restart: int,
+        flexible: bool = False,
+        verbose: bool = False,
+    ) -> torch.Tensor:
+        no = self._local_matrix.num_owned
+        if b_owned.shape[0] != no:
+            raise ValueError(
+                f"b_owned size {b_owned.shape[0]} != num_owned {no}")
+
+        dtype = b_owned.dtype
+        device = b_owned.device
+        m = restart
+
+        x = torch.zeros_like(b_owned)
+        b_norm = float(self._shard_norm(b_owned).item())
+        if b_norm == 0.0:
+            return x
+        tol = max(atol, rtol * b_norm)
+
+        total_iters = 0
+        for cycle in range((maxiter + m - 1) // m):
+            r = b_owned - self._shard_matvec(x)
+            beta = float(self._shard_norm(r).item())
+            if beta < tol:
+                if verbose:
+                    print(f"[shard-{'F' if flexible else ''}GMRES] "
+                          f"converged cycle {cycle}, ||r||={beta:.3e}")
+                return x
+
+            V = torch.zeros((m + 1, no), dtype=dtype, device=device)
+            V[0] = r / beta
+            # FGMRES needs the preconditioned vectors saved for the final
+            # update; we currently have no preconditioner so the storage
+            # would be redundant -- left in scaffold for future
+            # preconditioned variants.
+            H = torch.zeros((m + 1, m), dtype=dtype, device=device)
+            g = torch.zeros(m + 1, dtype=dtype, device=device)
+            g[0] = beta
+            cs = torch.zeros(m, dtype=dtype, device=device)
+            sn = torch.zeros(m, dtype=dtype, device=device)
+
+            j_max = 0
+            for j in range(m):
+                w = self._shard_matvec(V[j])
+                # Modified Gram-Schmidt (Saad's stable variant for GMRES).
+                for i in range(j + 1):
+                    H[i, j] = self._shard_dot(V[i], w)
+                    w = w - H[i, j] * V[i]
+                H[j + 1, j] = self._shard_norm(w)
+                if float(H[j + 1, j].abs().item()) > 1e-30:
+                    V[j + 1] = w / H[j + 1, j]
+                else:
+                    V[j + 1] = w  # lucky breakdown -- next iter will catch
+
+                # Apply previous Givens rotations to column j of H.
+                # ``.clone()`` is mandatory: ``H[i, j]`` returns a 0-d
+                # view; writing to ``H[i, j]`` in the first assignment
+                # would otherwise leak into the second one through the
+                # ``h_ij`` alias.
+                for i in range(j):
+                    h_ij  = H[i, j].clone()
+                    h_ipj = H[i + 1, j].clone()
+                    H[i,     j] =  cs[i] * h_ij + sn[i] * h_ipj
+                    H[i + 1, j] = -sn[i] * h_ij + cs[i] * h_ipj
+                # New Givens rotation eliminating H[j+1, j].
+                denom = (H[j, j] * H[j, j] + H[j + 1, j] * H[j + 1, j]).sqrt()
+                if float(denom.abs().item()) < 1e-30:
+                    cs[j] = torch.tensor(1.0, dtype=dtype, device=device)
+                    sn[j] = torch.tensor(0.0, dtype=dtype, device=device)
+                else:
+                    cs[j] = H[j, j] / denom
+                    sn[j] = H[j + 1, j] / denom
+                H[j, j]     = cs[j] * H[j, j] + sn[j] * H[j + 1, j]
+                H[j + 1, j] = torch.tensor(0.0, dtype=dtype, device=device)
+                # ``.clone()`` is essential: g[j] is a 0-d view; the
+                # next two writes would otherwise see the partially-
+                # updated value through the alias and produce a wrong
+                # off-diagonal entry.
+                g_j  = g[j].clone()
+                g[j]     =  cs[j] * g_j
+                g[j + 1] = -sn[j] * g_j
+
+                total_iters += 1
+                j_max = j + 1
+                if float(g[j + 1].abs().item()) < tol:
+                    break
+                if total_iters >= maxiter:
+                    break
+
+            # Back-solve H[:j_max, :j_max] y = g[:j_max].
+            y = torch.zeros(j_max, dtype=dtype, device=device)
+            for i in range(j_max - 1, -1, -1):
+                s = g[i].clone()
+                for k in range(i + 1, j_max):
+                    s = s - H[i, k] * y[k]
+                y[i] = s / H[i, i]
+            for i in range(j_max):
+                x = x + y[i] * V[i]
+
+            if verbose:
+                r_norm = float(self._shard_norm(b_owned - self._shard_matvec(x)).item())
+                print(f"[shard-{'F' if flexible else ''}GMRES] "
+                      f"cycle {cycle}: ||r||={r_norm:.3e}")
+            if total_iters >= maxiter:
+                break
+
+        return x
+
+    # ------------------------------------------------------------------ #
+    # MINRES (Paige-Saunders 1975). Symmetric indefinite, short recurrence.
+    # ------------------------------------------------------------------ #
+    def _distributed_minres_shard(
+        self,
+        b_owned: torch.Tensor,
+        *,
+        atol: float,
+        rtol: float,
+        maxiter: int,
+        verbose: bool,
+    ) -> torch.Tensor:
+        no = self._local_matrix.num_owned
+        if b_owned.shape[0] != no:
+            raise ValueError(
+                f"b_owned size {b_owned.shape[0]} != num_owned {no}")
+
+        dtype = b_owned.dtype
+        device = b_owned.device
+
+        x = torch.zeros_like(b_owned)
+        v_prev = torch.zeros_like(b_owned)
+        v = b_owned.clone()
+        beta1 = float(self._shard_norm(v).item())
+        if beta1 == 0.0:
+            return x
+        v = v / beta1
+        tol = max(atol, rtol * beta1)
+
+        # Givens-rotation scalars + Lanczos coefficients.
+        eta = beta1
+        c_prev = torch.tensor(1.0, dtype=dtype, device=device)
+        c      = torch.tensor(1.0, dtype=dtype, device=device)
+        s_prev = torch.tensor(0.0, dtype=dtype, device=device)
+        s      = torch.tensor(0.0, dtype=dtype, device=device)
+        beta = torch.tensor(beta1, dtype=dtype, device=device)
+        w_prev = torch.zeros_like(b_owned)
+        w      = torch.zeros_like(b_owned)
+
+        for k in range(maxiter):
+            # Lanczos step
+            p = self._shard_matvec(v) - beta * v_prev
+            alpha = self._shard_dot(v, p)
+            p = p - alpha * v
+            beta_new = self._shard_norm(p)
+            v_next = p / (beta_new + 1e-30)
+
+            # Apply previous two Givens rotations to the new Lanczos row.
+            delta = c * alpha - c_prev * s * beta
+            gamma_bar = s * alpha + c_prev * c * beta
+            epsilon = s_prev * beta
+            gamma = (gamma_bar * gamma_bar + beta_new * beta_new).sqrt()
+            if float(gamma.abs().item()) < 1e-30:
+                if verbose:
+                    print(f"[shard-MINRES] iter {k}: gamma ~= 0, stop")
+                break
+            c_next = gamma_bar / gamma
+            s_next = beta_new / gamma
+
+            w_new = (v - delta * w - epsilon * w_prev) / gamma
+            x = x + c_next * eta * w_new
+            eta = -s_next * eta
+
+            res = abs(float(eta))
+            if verbose and (k % 100 == 0 or k < 5):
+                print(f"[shard-MINRES] iter {k}: ||r||~={res:.3e}")
+            if res < tol:
+                if verbose:
+                    print(f"[shard-MINRES] converged at iter {k}, "
+                          f"||r||~={res:.3e}")
+                break
+
+            # Roll state.
+            v_prev = v
+            v = v_next
+            w_prev = w
+            w = w_new
+            beta = beta_new
+            c_prev, c = c, c_next
+            s_prev, s = s, s_next
 
         return x
 
