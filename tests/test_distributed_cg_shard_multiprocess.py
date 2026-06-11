@@ -36,7 +36,7 @@ def _shard_cg_worker(rank: int, world_size: int,
         from torch.distributed.device_mesh import init_device_mesh
         from torch.distributed.tensor import DTensor, Shard
 
-        from torch_sla import (DSparseTensor, SparseTensor, RowPartitioned)
+        from torch_sla import DSparseTensor, SparseTensor
         from torch_sla.datasets import Synthetic
 
         # Standard catalogued 2D Poisson stencil -- SPD, well-conditioned.
@@ -44,11 +44,11 @@ def _shard_cg_worker(rank: int, world_size: int,
         N = bench.shape[0]
         A_global = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
 
-        local_matrix = A_global.partition_for_rank(
-            rank, world_size, partition_method="simple")
+        # One-shot: global SparseTensor + mesh -> RowPartitioned DSparseTensor.
         mesh = init_device_mesh("cpu", (world_size,))
-        D = DSparseTensor.from_local(
-            local_matrix, mesh, placement=RowPartitioned())
+        D = DSparseTensor.partition(A_global, mesh,
+                                     partition_method="simple")
+        local_matrix = D.to_local()
 
         # Manufacture a known global RHS so every rank can derive its
         # owned slice without prior global gather.

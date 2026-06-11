@@ -2356,6 +2356,75 @@ class DSparseTensor:
                                  global_shape=global_shape)
         return self
 
+    @classmethod
+    def partition(
+        cls,
+        A: "SparseTensor",
+        mesh: Any,
+        *,
+        partition_method: str = "simple",
+        coords: Optional[torch.Tensor] = None,
+        verbose: bool = False,
+    ) -> "DSparseTensor":
+        """One-shot constructor: take a global :class:`SparseTensor` +
+        :class:`DeviceMesh`, partition rows across the mesh, return a
+        ready-to-use distributed tensor with :class:`RowPartitioned`
+        placement.
+
+        Equivalent to::
+
+            local = A.partition_for_rank(rank, world_size,
+                                          partition_method=partition_method,
+                                          coords=coords)
+            D = DSparseTensor.from_local(local, mesh,
+                                          placement=RowPartitioned())
+
+        but in one line. This is the recommended way to build a
+        distributed sparse tensor from a global :class:`SparseTensor`
+        for both unit tests and small-to-medium production runs (where
+        every rank can afford to hold the global ``A`` briefly).
+
+        For memory-tight scenarios where only rank 0 should ever
+        materialise the global matrix, use
+        :meth:`from_global_distributed` (which broadcasts only the
+        partition IDs from rank 0) and chain :meth:`from_local`
+        manually.
+
+        Parameters
+        ----------
+        A : SparseTensor
+            Global sparse matrix; every rank should hold an identical
+            copy at the time of the call.
+        mesh : DeviceMesh
+            Target device mesh. ``mesh.size()`` becomes the world size
+            and ``dist.get_rank()`` picks this rank's chunk.
+        partition_method : str
+            Partitioning algorithm passed through to
+            :meth:`SparseTensor.partition_for_rank`: ``"simple"`` /
+            ``"metis"`` / ``"rcb"`` / ``"slicing"``.
+        coords : torch.Tensor, optional
+            Node coordinates for geometric partitioning (RCB/slicing).
+        verbose : bool
+            Print partition info on each rank.
+        """
+        if DIST_AVAILABLE and dist.is_initialized():
+            rank = dist.get_rank()
+        else:
+            rank = 0
+        world_size = mesh.size() if mesh is not None else 1
+
+        local_matrix = A.partition_for_rank(
+            rank, world_size,
+            partition_method=partition_method,
+            coords=coords,
+            verbose=verbose,
+        )
+        return cls.from_local(
+            local_matrix, mesh,
+            placement=RowPartitioned(),
+            global_shape=tuple(A.shape),
+        )
+
     @property
     def spec(self) -> Optional[DSparseSpec]:
         """The :class:`DSparseSpec` for this tensor (placement + mesh +

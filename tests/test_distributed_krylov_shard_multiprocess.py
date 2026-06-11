@@ -53,11 +53,10 @@ def _krylov_worker(rank: int, world_size: int,
         N = bench.shape[0]
         A_global = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
 
-        local_matrix = A_global.partition_for_rank(
-            rank, world_size, partition_method="simple")
         mesh = init_device_mesh("cpu", (world_size,))
-        D = DSparseTensor.from_local(
-            local_matrix, mesh, placement=RowPartitioned())
+        D = DSparseTensor.partition(A_global, mesh,
+                                     partition_method="simple")
+        local_matrix = D.to_local()
 
         torch.manual_seed(0)
         b_global = torch.randn(N, dtype=torch.float64)
@@ -206,11 +205,9 @@ def _solverconfig_scope_worker(rank: int, world_size: int,
         bench = Synthetic["convdiff_2d_64_peclet_10"]
         N = bench.shape[0]
         A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
-        local_matrix = A.partition_for_rank(rank, world_size,
-                                             partition_method="simple")
         mesh = init_device_mesh("cpu", (world_size,))
-        D = DSparseTensor.from_local(local_matrix, mesh,
-                                       placement=RowPartitioned())
+        D = DSparseTensor.partition(A, mesh, partition_method="simple")
+        local_matrix = D.to_local()
 
         torch.manual_seed(0)
         b_owned = torch.randn(N, dtype=torch.float64)[

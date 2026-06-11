@@ -43,11 +43,9 @@ def _precond_worker(rank: int, world_size: int,
         bench = Synthetic[bench_key]
         N = bench.shape[0]
         A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
-        local_matrix = A.partition_for_rank(rank, world_size,
-                                             partition_method="simple")
         mesh = init_device_mesh("cpu", (world_size,))
-        D = DSparseTensor.from_local(local_matrix, mesh,
-                                       placement=RowPartitioned())
+        D = DSparseTensor.partition(A, mesh, partition_method="simple")
+        local_matrix = D.to_local()
 
         torch.manual_seed(0)
         b_owned = torch.randn(N, dtype=torch.float64)[
@@ -161,11 +159,9 @@ def _scope_precond_worker(rank, world_size, port, out_queue):
 
         bench = Synthetic["convdiff_2d_64_peclet_10"]
         A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
-        local = A.partition_for_rank(rank, world_size,
-                                      partition_method="simple")
         mesh = init_device_mesh("cpu", (world_size,))
-        D = DSparseTensor.from_local(local, mesh,
-                                      placement=RowPartitioned())
+        D = DSparseTensor.partition(A, mesh, partition_method="simple")
+        local = D.to_local()
 
         torch.manual_seed(0)
         N = bench.shape[0]

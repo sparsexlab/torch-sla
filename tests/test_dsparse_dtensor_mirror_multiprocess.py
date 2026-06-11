@@ -61,16 +61,11 @@ def _mirror_worker(rank: int, world_size: int,
         A_global = SparseTensor(bench.val, bench.row,
                                  bench.col, bench.shape)
 
-        # Per-rank subdomain via simple striping (deterministic across
-        # ranks; METIS would also work but adds nondeterminism that
-        # this unit test doesn't need).
-        local_matrix = A_global.partition_for_rank(
-            rank, world_size, partition_method="simple")
-
-        # New DTensor-mirror path
+        # One-shot DTensor-mirror construction.
         mesh = init_device_mesh("cpu", (world_size,))
-        D = DSparseTensor.from_local(
-            local_matrix, mesh, placement=RowPartitioned())
+        D = DSparseTensor.partition(A_global, mesh,
+                                     partition_method="simple")
+        local_matrix = D.to_local()
 
         # 1) spec metadata round-trips.
         assert D.spec is not None
