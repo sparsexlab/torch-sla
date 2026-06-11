@@ -4356,6 +4356,7 @@ class DSparseTensor:
         b: Any,
         *,
         method: Any = None,
+        preconditioner: Any = None,
         atol: Any = None,
         rtol: Any = None,
         maxiter: Any = None,
@@ -4423,6 +4424,13 @@ class DSparseTensor:
         maxiter = _pick(maxiter, "maxiter", 1000)
         restart = restart if restart is not None else 30  # not in SolverConfig
         verbose = _pick(verbose, "verbose", False)
+        # ``preconditioner`` is special-cased in SolverConfig because
+        # ``None`` is a legitimate "no preconditioning" choice (the
+        # _UNSET sentinel distinguishes that from "not set"). Mirror
+        # that here: explicit ``None`` means identity precond.
+        if preconditioner is None and "preconditioner" in defaults:
+            preconditioner = defaults["preconditioner"]
+        M_apply = self._make_preconditioner(preconditioner)
 
         if _is_dtensor(b):
             b_owned = b.to_local()
@@ -4434,17 +4442,17 @@ class DSparseTensor:
         method_l = method.lower()
         if method_l in ("cg", "pcg"):
             x_owned = self._distributed_cg_shard(
-                b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
-                verbose=verbose)
+                b_owned, M_apply=M_apply, atol=atol, rtol=rtol,
+                maxiter=maxiter, verbose=verbose)
         elif method_l == "bicgstab":
             x_owned = self._distributed_bicgstab_shard(
-                b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
-                verbose=verbose)
+                b_owned, M_apply=M_apply, atol=atol, rtol=rtol,
+                maxiter=maxiter, verbose=verbose)
         elif method_l in ("gmres", "fgmres"):
             x_owned = self._distributed_gmres_shard(
-                b_owned, atol=atol, rtol=rtol, maxiter=maxiter,
-                restart=restart, flexible=(method_l == "fgmres"),
-                verbose=verbose)
+                b_owned, M_apply=M_apply, atol=atol, rtol=rtol,
+                maxiter=maxiter, restart=restart,
+                flexible=(method_l == "fgmres"), verbose=verbose)
         elif method_l == "minres":
             # MINRES scaffold present but not yet validated against
             # scipy; ships in a focused follow-up so we don't block the
@@ -4488,17 +4496,155 @@ class DSparseTensor:
         y_full = local_matrix.matvec(x_padded, exchange_halo=True)
         return y_full[:local_matrix.num_owned]
 
+    # ------------------------------------------------------------------ #
+    # Shard(0)-space preconditioner factory.
+    #
+    # Each preconditioner is a callable ``apply(r_owned) -> z_owned`` that
+    # maps a Shard(0) residual to an "approximate inverse" Shard(0)
+    # update. Costs are independent per rank for the local ones
+    # (Jacobi / block-Jacobi / SSOR); the polynomial / Neumann variant
+    # internally uses ``_shard_matvec`` and so triggers halo exchange
+    # per inner iteration.
+    # ------------------------------------------------------------------ #
+    def _make_preconditioner(self,
+                              kind: Any,
+                              *,
+                              omega: float = 1.0,
+                              degree: int = 2):
+        """Build a ``apply(r_owned) -> z_owned`` callable.
+
+        Accepts:
+
+        * ``None`` / ``"none"``               -- identity (no precond)
+        * ``"jacobi"`` / ``"jacobi_l1"``      -- diagonal inverse on
+          owned rows (l1 variant scales by row-sum-of-abs instead of
+          diag(A), more robust for indefinite)
+        * ``"block_jacobi"``                  -- one-time dense LU on
+          the owned-by-owned block; ``apply`` is two triangular solves
+        * ``"ssor"``                           -- forward + backward
+          symmetric SOR sweep on the owned-by-owned block, ``omega``-
+          damped
+        * ``"polynomial"`` / ``"neumann"``    -- Neumann series M⁻¹ ≈
+          τ⁻¹ Σ_{k=0..degree-1} (I - A/τ)^k. Uses ``_shard_matvec`` so
+          halo exchange happens inside the preconditioner -- costly
+          but fully distributed
+        * A callable ``f(r_owned) -> z_owned`` is passed through
+          unchanged (for user-supplied custom preconditioners).
+        """
+        if callable(kind):
+            return kind
+        if kind is None or (isinstance(kind, str) and
+                            kind.lower() == "none"):
+            return lambda r: r
+
+        local_matrix = self._local_matrix
+        no = local_matrix.num_owned
+        device = local_matrix.device
+
+        # We need the owned-by-owned dense block for everything other
+        # than polynomial. Build it once on first call and cache.
+        def _owned_block() -> torch.Tensor:
+            if getattr(self, "_owned_block_cache", None) is not None:
+                return self._owned_block_cache
+            csr = local_matrix._get_csr()  # num_local x num_local sparse CSR
+            dense = csr.to_dense() if csr.is_sparse_csr or csr.is_sparse \
+                else csr
+            block = dense[:no, :no].contiguous()
+            self._owned_block_cache = block
+            return block
+
+        kind_l = str(kind).lower()
+        if kind_l in ("jacobi", "jacobi_l1"):
+            block = _owned_block()
+            if kind_l == "jacobi_l1":
+                # Row-l1 norm (Anzt et al. 2015). Robust to small
+                # diagonals + indefinite spectra.
+                scale = block.abs().sum(dim=1).clamp_min(1e-30)
+            else:
+                diag = block.diagonal().clamp_min(1e-30)
+                scale = diag
+            inv_scale = 1.0 / scale
+            return lambda r: inv_scale * r
+
+        if kind_l == "block_jacobi":
+            block = _owned_block()
+            # ``torch.linalg.lu_factor`` returns (LU, pivots).
+            LU, pivots = torch.linalg.lu_factor(block)
+            def apply_block_jacobi(r):
+                z = torch.linalg.lu_solve(
+                    LU, pivots, r.unsqueeze(-1)).squeeze(-1)
+                return z
+            return apply_block_jacobi
+
+        if kind_l == "ssor":
+            block = _owned_block()
+            # Decompose block = L + D + U; ``omega``-SSOR is
+            # (D/ω + L) (D/ω)⁻¹ (D/ω + U) z = r .
+            D = torch.diag(block.diagonal().clamp_min(1e-30))
+            L = torch.tril(block, diagonal=-1)
+            U = torch.triu(block, diagonal=1)
+            D_over_om = D / omega
+            M1 = D_over_om + L
+            M2 = D_over_om + U
+            def apply_ssor(r):
+                y = torch.linalg.solve_triangular(
+                    M1, r.unsqueeze(-1), upper=False).squeeze(-1)
+                w = D_over_om @ y
+                z = torch.linalg.solve_triangular(
+                    M2, w.unsqueeze(-1), upper=True).squeeze(-1)
+                return z
+            return apply_ssor
+
+        if kind_l in ("polynomial", "neumann"):
+            # Estimate τ ≈ ||A||_∞ on owned rows. The row-sum is local;
+            # no all_reduce needed because each rank covers its own
+            # owned rows and we just need an upper-bound spectral
+            # estimate. Take ``max`` across ranks for safety.
+            block = _owned_block()
+            tau_local = block.abs().sum(dim=1).max()
+            if DIST_AVAILABLE and dist.is_initialized():
+                dist.all_reduce(tau_local, op=dist.ReduceOp.MAX)
+            tau = float(tau_local.item()) if float(tau_local.item()) > 0 else 1.0
+            d = int(degree)
+
+            def apply_neumann(r):
+                # z = τ⁻¹ Σ_{k=0..d-1} (I - A/τ)^k r
+                #   = τ⁻¹ ( r + (I-A/τ)(r + (I-A/τ)(...)) ) -- Horner
+                z = r / tau
+                for _ in range(d - 1):
+                    Az = self._shard_matvec(z)
+                    z = (r + tau * z - Az) / tau
+                return z
+            return apply_neumann
+
+        raise ValueError(
+            f"Unknown preconditioner {kind!r}; expected one of None / "
+            "'none' / 'jacobi' / 'jacobi_l1' / 'block_jacobi' / "
+            "'ssor' / 'polynomial' / 'neumann', or a callable."
+        )
+
+    def _invalidate_precond_cache(self) -> None:
+        """Drop cached preconditioner factors. Call after the matrix's
+        local values change (the cache is keyed implicitly on the
+        DSparseTensor instance, not on a hash of the values)."""
+        self._owned_block_cache = None
+
     def _distributed_cg_shard(
         self,
         b_owned: torch.Tensor,
         *,
+        M_apply: Any,
         atol: float,
         rtol: float,
         maxiter: int,
         verbose: bool,
     ) -> torch.Tensor:
-        """Conjugate-gradient solve that stays in Shard(0) space the
-        whole time. Returns ``x_owned`` (size ``num_owned``)."""
+        """Preconditioned conjugate-gradient solve in Shard(0) space.
+
+        Saad §9.2 PCG: ``rho_k = <r_k, z_k>`` with ``z_k = M^{-1} r_k``,
+        ``p_k = z_k + beta_{k-1} p_{k-1}``. Identity preconditioner
+        recovers plain CG. ``M_apply`` is a callable Shard(0) → Shard(0)
+        produced by :meth:`_make_preconditioner`."""
         local_matrix = self._local_matrix
         no = local_matrix.num_owned
 
@@ -4510,34 +4656,36 @@ class DSparseTensor:
 
         x = torch.zeros_like(b_owned)
         r = b_owned - self._shard_matvec(x)
-        p = r.clone()
-        rs_old = self._shard_dot(r, r)
+        z = M_apply(r)
+        p = z.clone()
+        rs_old = self._shard_dot(r, z)             # <r, z>, not <r, r>
 
-        b_norm_sq = self._shard_dot(b_owned, b_owned)
-        tol_sq = max(atol * atol, rtol * rtol * float(b_norm_sq.item()))
+        b_norm = float(self._shard_norm(b_owned).item())
+        tol = max(atol, rtol * b_norm)
 
         for k in range(maxiter):
             Ap = self._shard_matvec(p)
             pAp = self._shard_dot(p, Ap)
             if float(pAp.abs().item()) < 1e-30:
                 if verbose:
-                    print(f"[shard-CG] iter {k}: pAp ~= 0, stop")
+                    print(f"[shard-PCG] iter {k}: pAp ~= 0, stop")
                 break
             alpha = rs_old / pAp
             x = x + alpha * p
             r = r - alpha * Ap
 
-            rs_new = self._shard_dot(r, r)
-            res = float(rs_new.sqrt().item())
+            r_norm = float(self._shard_norm(r).item())
             if verbose and (k % 100 == 0 or k < 5):
-                print(f"[shard-CG] iter {k}: ||r||={res:.3e}")
-            if float(rs_new.item()) < tol_sq:
+                print(f"[shard-PCG] iter {k}: ||r||={r_norm:.3e}")
+            if r_norm < tol:
                 if verbose:
-                    print(f"[shard-CG] converged at iter {k}, "
-                          f"||r||={res:.3e}")
+                    print(f"[shard-PCG] converged at iter {k}, "
+                          f"||r||={r_norm:.3e}")
                 break
+            z = M_apply(r)
+            rs_new = self._shard_dot(r, z)
             beta = rs_new / rs_old
-            p = r + beta * p
+            p = z + beta * p
             rs_old = rs_new
 
         return x
@@ -4549,11 +4697,15 @@ class DSparseTensor:
         self,
         b_owned: torch.Tensor,
         *,
+        M_apply: Any,
         atol: float,
         rtol: float,
         maxiter: int,
         verbose: bool,
     ) -> torch.Tensor:
+        """Preconditioned BiCGStab (Saad §9.3): apply ``M^{-1}`` to
+        the search directions ``p`` and ``s`` before the matvec.
+        Identity ``M`` recovers plain BiCGStab."""
         no = self._local_matrix.num_owned
         if b_owned.shape[0] != no:
             raise ValueError(
@@ -4574,29 +4726,31 @@ class DSparseTensor:
             rho_new = self._shard_dot(r_hat, r)
             if float(rho_new.abs().item()) < 1e-30:
                 if verbose:
-                    print(f"[shard-BiCGStab] iter {k}: rho ~= 0, breakdown")
+                    print(f"[shard-PBiCGStab] iter {k}: rho ~= 0, breakdown")
                 break
             if k == 0:
                 p = r.clone()
             else:
                 beta = (rho_new / rho) * (alpha / omega)
                 p = r + beta * (p - omega * v)
-            v = self._shard_matvec(p)
+            p_hat = M_apply(p)                       # preconditioned p
+            v = self._shard_matvec(p_hat)
             denom = self._shard_dot(r_hat, v)
             if float(denom.abs().item()) < 1e-30:
                 if verbose:
-                    print(f"[shard-BiCGStab] iter {k}: r_hat.v ~= 0, breakdown")
+                    print(f"[shard-PBiCGStab] iter {k}: r_hat.v ~= 0, breakdown")
                 break
             alpha = rho_new / denom
             s = r - alpha * v
             s_norm = float(self._shard_norm(s).item())
             if s_norm < tol:
-                x = x + alpha * p
+                x = x + alpha * p_hat
                 if verbose:
-                    print(f"[shard-BiCGStab] half-iter {k}: ||s||={s_norm:.3e}")
+                    print(f"[shard-PBiCGStab] half-iter {k}: ||s||={s_norm:.3e}")
                 break
 
-            t = self._shard_matvec(s)
+            s_hat = M_apply(s)                       # preconditioned s
+            t = self._shard_matvec(s_hat)
             tt = self._shard_dot(t, t)
             ts = self._shard_dot(t, s)
             if float(tt.abs().item()) < 1e-30:
@@ -4604,14 +4758,14 @@ class DSparseTensor:
                                      device=b_owned.device)
             else:
                 omega = ts / tt
-            x = x + alpha * p + omega * s
+            x = x + alpha * p_hat + omega * s_hat
             r = s - omega * t
             r_norm = float(self._shard_norm(r).item())
             if verbose and (k % 100 == 0 or k < 5):
-                print(f"[shard-BiCGStab] iter {k}: ||r||={r_norm:.3e}")
+                print(f"[shard-PBiCGStab] iter {k}: ||r||={r_norm:.3e}")
             if r_norm < tol:
                 if verbose:
-                    print(f"[shard-BiCGStab] converged at iter {k}, "
+                    print(f"[shard-PBiCGStab] converged at iter {k}, "
                           f"||r||={r_norm:.3e}")
                 break
             rho = rho_new
@@ -4625,6 +4779,7 @@ class DSparseTensor:
         self,
         b_owned: torch.Tensor,
         *,
+        M_apply: Any,
         atol: float,
         rtol: float,
         maxiter: int,
@@ -4659,10 +4814,13 @@ class DSparseTensor:
 
             V = torch.zeros((m + 1, no), dtype=dtype, device=device)
             V[0] = r / beta
-            # FGMRES needs the preconditioned vectors saved for the final
-            # update; we currently have no preconditioner so the storage
-            # would be redundant -- left in scaffold for future
-            # preconditioned variants.
+            # Right-preconditioned GMRES (Saad §9.3.2): we apply A M^{-1}
+            # at every Arnoldi step. For FGMRES the preconditioner may
+            # vary per step, so we have to remember the preconditioned
+            # vectors ``Z[:, j] = M_j^{-1} V[j]`` for the final update.
+            # Plain GMRES could reuse ``V`` (since M is fixed), but
+            # storing ``Z`` lets both branches share one code path.
+            Z = torch.zeros((m, no), dtype=dtype, device=device)
             H = torch.zeros((m + 1, m), dtype=dtype, device=device)
             g = torch.zeros(m + 1, dtype=dtype, device=device)
             g[0] = beta
@@ -4671,7 +4829,8 @@ class DSparseTensor:
 
             j_max = 0
             for j in range(m):
-                w = self._shard_matvec(V[j])
+                Z[j] = M_apply(V[j])
+                w = self._shard_matvec(Z[j])
                 # Modified Gram-Schmidt (Saad's stable variant for GMRES).
                 for i in range(j + 1):
                     H[i, j] = self._shard_dot(V[i], w)
@@ -4724,8 +4883,12 @@ class DSparseTensor:
                 for k in range(i + 1, j_max):
                     s = s - H[i, k] * y[k]
                 y[i] = s / H[i, i]
+            # Right-preconditioned update: x += Z y (the preconditioned
+            # Arnoldi vectors), NOT V y. This is the right-precond /
+            # FGMRES update; the two cases coincide because M is fixed
+            # per-call here.
             for i in range(j_max):
-                x = x + y[i] * V[i]
+                x = x + y[i] * Z[i]
 
             if verbose:
                 r_norm = float(self._shard_norm(b_owned - self._shard_matvec(x)).item())
