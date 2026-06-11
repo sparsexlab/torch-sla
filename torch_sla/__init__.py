@@ -106,6 +106,10 @@ from .distributed import (
     partition_graph_metis,
     partition_coordinates,
     partition_simple,
+    # DTensor-mirror placement vocabulary
+    DSparseSpec,
+    RowPartitioned,
+    Replicated,
 )
 
 from .io import (
