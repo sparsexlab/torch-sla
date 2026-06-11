@@ -1875,46 +1875,71 @@ class DSparseMatrix:
         owned_nodes = self.partition.owned_nodes
         return Q[owned_nodes]
     
-    def gather_global(self, x_local: torch.Tensor) -> Optional[torch.Tensor]:
-        """
-        Gather local vectors to global vector (on rank 0).
-        
+    def gather_global(self, x_local: torch.Tensor) -> torch.Tensor:
+        """Gather local vectors into the global vector on **every** rank.
+
+        Semantics match MPI ``Allgather``: after the call every rank
+        holds an identical ``[global_shape[0]]``-sized tensor whose
+        entry at global index ``i`` equals the owning rank's
+        ``x_local[local_index_of(i)]``.
+
+        Use this for I/O and debugging (write the full solution to
+        disk, compare against scipy single-process). Don't call it in
+        a Krylov hot loop -- distributed CG / GMRES should keep
+        vectors local and use ``dist.all_reduce`` for inner products.
+
         Parameters
         ----------
         x_local : torch.Tensor
-            Local vector [num_owned]
-            
+            Local vector [num_owned] (halo entries beyond ``num_owned``
+            are ignored).
+
         Returns
         -------
-        x_global : torch.Tensor or None
-            Global vector on rank 0, None on other ranks
+        x_global : torch.Tensor
+            Global vector [global_shape[0]] on every rank.
         """
         if not DIST_AVAILABLE or not dist.is_initialized():
             # Single process: just expand to global
             x_global = torch.zeros(self.global_shape[0], dtype=x_local.dtype, device=x_local.device)
             x_global[self.partition.owned_nodes] = x_local[:self.num_owned]
             return x_global
-        
-        # Distributed gather
-        owned_vals = x_local[:self.num_owned]
-        
-        # Gather sizes
-        local_size = torch.tensor([self.num_owned], device=self.device)
-        sizes = [torch.zeros(1, dtype=torch.int64, device=self.device) for _ in range(self.num_partitions)]
+
+        # Distributed all-gather. We need two things from every rank
+        # to reconstruct the global vector: the owned values *and*
+        # the global indices each rank owns. The previous code did a
+        # one-to-rank-0 gather and forgot to apply the gathered values
+        # (inline TODO admitted as much). Switch to ``dist.all_gather``
+        # so every rank ends up with an identical x_global -- matches
+        # the symmetric MPI Allgather semantics.
+        world_size = dist.get_world_size()
+
+        owned_vals  = x_local[:self.num_owned].contiguous()
+        owned_nodes = self.partition.owned_nodes.to(
+            device=self.device, dtype=torch.int64).contiguous()
+
+        # Each rank's num_owned can differ, so we exchange sizes first
+        # to size the all_gather buffers correctly.
+        local_size = torch.tensor([self.num_owned],
+                                  dtype=torch.int64, device=self.device)
+        sizes = [torch.zeros(1, dtype=torch.int64, device=self.device)
+                 for _ in range(world_size)]
         dist.all_gather(sizes, local_size)
-        
-        # Gather values
-        if dist.get_rank() == 0:
-            x_global = torch.zeros(self.global_shape[0], dtype=x_local.dtype, device=self.device)
-            gathered = [torch.zeros(s.item(), dtype=x_local.dtype, device=self.device) for s in sizes]
-            dist.gather(owned_vals, gather_list=gathered, dst=0)
-            
-            # Place in global vector (need owned_nodes from all partitions)
-            # This requires additional communication of owned_nodes
-            return x_global
-        else:
-            dist.gather(owned_vals, dst=0)
-            return None
+
+        nodes_list = [torch.zeros(int(s.item()), dtype=torch.int64,
+                                  device=self.device)
+                      for s in sizes]
+        vals_list  = [torch.zeros(int(s.item()), dtype=x_local.dtype,
+                                  device=self.device)
+                      for s in sizes]
+        dist.all_gather(nodes_list, owned_nodes)
+        dist.all_gather(vals_list,  owned_vals)
+
+        x_global = torch.zeros(self.global_shape[0],
+                               dtype=x_local.dtype, device=self.device)
+        for nodes, vals in zip(nodes_list, vals_list):
+            x_global[nodes] = vals
+        return x_global
     
     def det(self) -> torch.Tensor:
         """
