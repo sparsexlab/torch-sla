@@ -4475,42 +4475,81 @@ class DSparseTensor:
         return self._distributed_matvec(x)
 
     def _matmul_spec(self, x: Any) -> Any:
-        """DTensor-mirror matvec: ``y_Shard0 = D_RowPart @ x_Shard0``.
+        """DTensor-mirror matvec dispatcher.
 
-        Input contract (DTensor's ``Shard(0)`` style):
+        Routes on the spec's ``SparseShard.axis`` (the placement
+        carries which sparse axis is partitioned):
 
-        * ``x`` is a ``DTensor`` -- its ``num_owned``-sized local shard
-          is extracted via ``to_local()``.
-        * Or a raw ``torch.Tensor`` sized either ``num_owned`` (clean
-          Shard(0) input; halo is internally zero-padded then refilled
-          by ``halo_exchange``) or ``num_local`` (legacy callers that
-          pre-fill halo themselves; supported for backward compat).
+        * ``axis == 0`` -- row-partitioned: halo exchange + local SpMV
+          → ``Shard(0)`` result (the original RowPartitioned path).
+        * ``axis == 1`` -- col-partitioned: each rank has a column
+          slice; local partial SpMV + ``dist.all_reduce(SUM)`` →
+          ``Replicate()`` result (each rank ends up with the full y).
 
-        Output:
-
-        * If the input was a ``DTensor``, returns ``DTensor.from_local(
-          y_owned, mesh, [Shard(0)])`` -- pure Shard(0) → Shard(0).
-        * Otherwise the raw ``y_owned`` tensor.
+        Other axis values raise -- block-axis sharding isn't covered
+        by SpMV in the same code path.
         """
         local_matrix = self._local_matrix
         assert local_matrix is not None, "spec-mode requires _local_matrix"
 
+        placement = self._spec.placement
+        if not isinstance(placement, SparseShard):
+            raise RuntimeError(
+                "_matmul_spec expects a SparseShard placement; got "
+                f"{type(placement).__name__}")
+        axis = placement.axis
+
+        if axis == 0:
+            return self._matmul_row_shard(x)
+        if axis == 1:
+            return self._matmul_col_shard(x)
+        raise NotImplementedError(
+            f"SparseShard(axis={axis}) matvec dispatch not implemented; "
+            "axis must be 0 (row) or 1 (col) for SpMV.")
+
+    def _matmul_row_shard(self, x: Any) -> Any:
+        """Row-partitioned SpMV (``SparseShard(axis=0)``): halo exchange
+        + local SpMV → ``DTensor[Shard(0)]``."""
+        local_matrix = self._local_matrix
         if _is_dtensor(x):
             x_local = x.to_local()
         else:
             x_local = x
-
-        # Pad x_owned → x_local (num_local) before matvec; halo entries
-        # will be overwritten in-place by halo_exchange.
         x_padded = self._pad_owned_to_local(x_local)
         y_full = local_matrix.matvec(x_padded, exchange_halo=True)
         y_owned = y_full[:local_matrix.num_owned]
-
         if _is_dtensor(x):
             from torch.distributed.tensor import DTensor as _DTensor, Shard
             return _DTensor.from_local(
                 y_owned, self._spec.mesh, [Shard(0)])
         return y_owned
+
+    def _matmul_col_shard(self, x: Any) -> Any:
+        """Col-partitioned SpMV (``SparseShard(axis=1)``).
+
+        **Status**: scaffolded but not wired to a real col-partition data
+        layout. Today's ``DSparseMatrix`` (built by
+        ``partition_for_rank`` / ``DSparseTensor.partition``) is
+        **row-partitioned**; each rank owns a row slice plus a halo
+        of columns it reads from. Column partitioning requires:
+
+        1. A new ``SparseTensor.extract_column_partition(partition)``
+           that slices columns into a local ``(M, num_owned_cols)``
+           submatrix.
+        2. A 2-D mesh sharding shim so the halo *and* the
+           ``all_reduce(SUM)`` semantics line up.
+
+        Both land in Phase B (DSparseMatrix dissolution) -- step B2 adds
+        the column extraction; step B3 wires it through this method.
+        Until then this dispatch raises so callers don't silently get
+        wrong answers.
+        """
+        raise NotImplementedError(
+            "SparseShard(axis=1) col-partitioned matvec is scaffolded "
+            "but requires the column-partition data path that ships "
+            "with Phase B (DSparseMatrix dissolution). Today's "
+            "DSparseMatrix is row-partitioned -- use SparseShard(axis=0)."
+        )
 
     def _pad_owned_to_local(self, x: torch.Tensor) -> torch.Tensor:
         """Convert a Shard(0)-sized ``[num_owned]`` tensor into a full
