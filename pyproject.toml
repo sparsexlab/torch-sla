@@ -77,11 +77,16 @@ cupy = [
 cudss = [
     "nvmath-python[cu12]",
 ]
+# NVIDIA AmgX backend (CUDA 12+, Linux + Windows; macOS unsupported by NVIDIA)
+amgx = [
+    "torch-amgx>=0.1.0a1",
+]
 # Full installation with all runtime backends (does not include dev/docs)
 all = [
     "pytest>=6.0",
     "nvmath-python[cu12]",
     "cupy-cuda12x>=13.0",
+    "torch-amgx>=0.1.0a1",
 ]
 
 [project.urls]

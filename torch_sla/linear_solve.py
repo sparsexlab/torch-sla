@@ -102,7 +102,7 @@ class SparseLinearSolveScipySuperLU(Function):
 
 
 class SparseLinearSolveAmgX(Function):
-    """NVIDIA AmgX (via pyamgx) GPU solver with gradient support.
+    """NVIDIA AmgX (via torch-amgx) GPU solver with gradient support.
 
     Forward: build AmgX resources/config/matrix/solver (consulting
     ``SOLVER_CACHE``), run ``solver.solve`` on the right-hand side.
@@ -672,8 +672,8 @@ def spsolve(
         if not is_amgx_available():
             raise RuntimeError(
                 "AmgX backend is not available. Install with: "
-                "pip install --extra-index-url https://pypi.walkerchi.com "
-                "torch-sla-amgx"
+                "pip install torch-sla[amgx]    "
+                "# pulls torch-amgx wheel (Linux/Windows + NVIDIA CUDA)"
             )
         amgx_method = "pbicgstab" if method == "auto" else method
         return SparseLinearSolveAmgX.apply(val, row, col, shape, b,

@@ -178,11 +178,13 @@ _amgx_available = None
 def is_amgx_available() -> bool:
     """Check if the AmgX backend is available (Linux + Windows + NVIDIA CUDA).
 
-    Requires both ``pyamgx`` (the Cython wrapper) *and* the AmgX shared
-    library (``amgxsh.dll`` / ``libamgxsh.so``). Both come bundled in
-    the optional ``torch-sla-amgx`` package; install via::
+    The ``torch-amgx`` PyPI package (https://pypi.org/p/torch-amgx) bundles
+    the AmgX shared library inside its wheels for Linux + Windows. Install
+    via::
 
-        pip install --extra-index-url https://pypi.walkerchi.com torch-sla-amgx
+        pip install torch-amgx                # or: pip install torch-sla[amgx]
+
+    macOS is not supported (NVIDIA does not ship CUDA on macOS).
     """
     global _amgx_available
     if _amgx_available is None:
@@ -190,8 +192,8 @@ def is_amgx_available() -> bool:
             _amgx_available = False
         else:
             try:
-                import pyamgx  # noqa: F401
-                _amgx_available = True
+                import torch_amgx  # noqa: F401
+                _amgx_available = torch_amgx.is_available()
             except ImportError:
                 _amgx_available = False
     return _amgx_available
