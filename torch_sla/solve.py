@@ -214,11 +214,25 @@ class SolverConfig:
     mixed_precision: Optional[bool] = None
     return_info: Optional[bool] = None
     verbose: Optional[bool] = None
+    # Private state powering the chainable preset builders attached by
+    # ``torch_sla.presets`` (``SolverConfig.spd().gpu().direct()`` etc).
+    # ``compare=False`` keeps them out of __eq__ and ``repr=False`` keeps
+    # them out of repr so the public surface looks unchanged.
+    _kind: Optional[str] = dataclasses.field(
+        default=None, compare=False, repr=False)
+    _device: Optional[str] = dataclasses.field(
+        default=None, compare=False, repr=False)
+    _direct: Optional[bool] = dataclasses.field(
+        default=None, compare=False, repr=False)
 
     def _kwargs(self) -> dict:
         """Return only the fields the user actually set."""
         out: dict = {}
         for f in dataclasses.fields(self):
+            # Private chain-state fields don't participate in the scope
+            # stack; they're builder bookkeeping, not solve() kwargs.
+            if f.name.startswith("_"):
+                continue
             v = getattr(self, f.name)
             # preconditioner uses _UNSET (None is a legitimate user choice meaning
             # "no preconditioning"); the others use None as the inactive marker.
