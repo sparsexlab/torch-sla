@@ -60,6 +60,38 @@ def test_amgx_solve_through_solve_api():
     assert err.item() < 1e-6, f"||x - x*|| / ||x*|| = {err.item():.2e}"
 
 
+@pytest.mark.parametrize("preconditioner", [
+    "jacobi_l1", "block_jacobi", "multicolor_dilu", "chebyshev", "none",
+])
+def test_amgx_solve_with_alternative_preconditioner(preconditioner):
+    """Each non-default preconditioner can drive a PCG solve to
+    convergence on the 1-D Poisson stencil. Tolerance is loose because
+    'none' (unpreconditioned) and 'chebyshev' need plenty of iterations."""
+    from torch_sla.backends.amgx_backend import amgx_solve
+    device = torch.device("cuda")
+    val, row, col, shape, b, x_exact = _poisson_1d_coo(128, device)
+    x = amgx_solve(val, row, col, shape, b,
+                   tol=1e-8, maxiter=2000, method="pcg",
+                   preconditioner=preconditioner)
+    err = (x - x_exact).norm() / x_exact.norm()
+    assert err.item() < 1e-4, \
+        f"preconditioner={preconditioner!r} stalled: rel-err {err.item():.2e}"
+
+
+def test_solve_api_threads_preconditioner_through():
+    """solve(backend='amgx', preconditioner='multicolor_dilu') reaches
+    the amgx backend with the kwarg intact (no silent fallback to AMG)."""
+    from torch_sla import solve
+    device = torch.device("cuda")
+    val, row, col, shape, b, x_exact = _poisson_1d_coo(64, device)
+    x = solve(val, row, col, shape, b,
+              backend="amgx", method="pcg",
+              preconditioner="multicolor_dilu",
+              atol=1e-9, maxiter=500)
+    err = (x - x_exact).norm() / x_exact.norm()
+    assert err.item() < 1e-4, f"rel-err {err.item():.2e}"
+
+
 def test_amgx_solver_cache_reuses_setup():
     """Two solves on the same matrix should hit the cache, not rebuild
     the AmgX hierarchy."""

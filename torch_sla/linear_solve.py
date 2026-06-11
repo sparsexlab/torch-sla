@@ -111,15 +111,18 @@ class SparseLinearSolveAmgX(Function):
     """
 
     @staticmethod
-    def forward(ctx, val, row, col, shape, b, tol, maxiter, method):
+    def forward(ctx, val, row, col, shape, b, tol, maxiter, method,
+                preconditioner):
         from .backends.amgx_backend import amgx_solve
         u = amgx_solve(val, row, col, shape, b,
-                       tol=tol, maxiter=maxiter, method=method)
+                       tol=tol, maxiter=maxiter, method=method,
+                       preconditioner=preconditioner)
         ctx.save_for_backward(val, row, col, u)
         ctx.shape = shape
         ctx.tol = tol
         ctx.maxiter = maxiter
         ctx.method = method
+        ctx.preconditioner = preconditioner
         return u
 
     @staticmethod
@@ -129,11 +132,13 @@ class SparseLinearSolveAmgX(Function):
         shape = ctx.shape
         gradb = amgx_solve(torch.conj_physical(val), col, row,
                            (shape[1], shape[0]), gradu,
-                           tol=ctx.tol, maxiter=ctx.maxiter, method=ctx.method)
+                           tol=ctx.tol, maxiter=ctx.maxiter,
+                           method=ctx.method,
+                           preconditioner=ctx.preconditioner)
         gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
-        return gradval, None, None, None, gradb, None, None, None
+        return gradval, None, None, None, gradb, None, None, None, None
 
 
 class SparseLinearSolvePyAMG(Function):
@@ -676,8 +681,15 @@ def spsolve(
                 "# pulls torch-amgx wheel (Linux/Windows + NVIDIA CUDA)"
             )
         amgx_method = "pbicgstab" if method == "auto" else method
+        # ``preconditioner`` propagated from the public solve() API:
+        # "none" (Krylov w/o preconditioner), "jacobi"/"jacobi_l1",
+        # "block_jacobi", "multicolor_dilu" (etc.), default "amg".
+        amgx_pc = preconditioner or "amg"
+        if amgx_pc == "jacobi":   # torch-sla's generic name -> AmgX
+            amgx_pc = "jacobi_l1"
         return SparseLinearSolveAmgX.apply(val, row, col, shape, b,
-                                           atol, maxiter, amgx_method)
+                                           atol, maxiter, amgx_method,
+                                           amgx_pc)
 
     # ========================================================================
     # PyAMG-hybrid backend (CPU setup + torch.sparse V-cycle; cross-platform)
