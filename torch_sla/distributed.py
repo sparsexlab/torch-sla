@@ -4945,9 +4945,45 @@ class DSparseTensor:
     def _shard_norm(self, u: torch.Tensor) -> torch.Tensor:
         return self._shard_dot(u, u).sqrt()
 
+    def _num_owned(self) -> int:
+        """Owned-row count regardless of which local backing is set."""
+        if self._local_tensor is not None:
+            return int(self._spec.placement.partition.owned_nodes.numel())
+        return int(self._local_matrix.num_owned)
+
     def _shard_matvec(self, x_owned: torch.Tensor) -> torch.Tensor:
-        """Apply ``A`` to a Shard(0) vector. Pads with zeros for halo,
-        runs ``halo_exchange`` + local SpMV, slices result to num_owned."""
+        """Apply ``A`` to a Shard(0) vector.
+
+        Routes through whichever backing is set on the spec'd
+        DSparseTensor:
+
+        * ``_local_tensor`` (B3 path, plain :class:`SparseTensor`)
+          → pad → ``_halo_exchange_via_spec`` →
+          ``_local_tensor @ x`` → slice.
+        * ``_local_matrix`` (legacy :class:`DSparseMatrix`)
+          → ``local_matrix.matvec(..., exchange_halo=True)`` → slice.
+
+        Used by every Shard(0)-space Krylov method (CG / BiCGStab /
+        GMRES / FGMRES / MINRES) and the polynomial preconditioner.
+        """
+        if self._local_tensor is not None:
+            partition = self._spec.placement.partition
+            num_owned = int(partition.owned_nodes.numel())
+            num_local = int(partition.local_to_global.numel())
+            if x_owned.shape[0] == num_owned:
+                x_padded = torch.zeros(num_local, dtype=x_owned.dtype,
+                                        device=x_owned.device)
+                x_padded[:num_owned] = x_owned
+            elif x_owned.shape[0] == num_local:
+                x_padded = x_owned
+            else:
+                raise ValueError(
+                    f"x shape[0]={x_owned.shape[0]}, expected "
+                    f"num_owned={num_owned} or num_local={num_local}")
+            self._halo_exchange_via_spec(x_padded, partition)
+            y_full = self._local_tensor @ x_padded
+            return y_full[:num_owned]
+
         local_matrix = self._local_matrix
         x_padded = self._pad_owned_to_local(x_owned)
         y_full = local_matrix.matvec(x_padded, exchange_halo=True)
@@ -4994,19 +5030,34 @@ class DSparseTensor:
                             kind.lower() == "none"):
             return lambda r: r
 
-        local_matrix = self._local_matrix
-        no = local_matrix.num_owned
-        device = local_matrix.device
+        # B4: read owned size + device from whichever local backing is
+        # set so preconditioner construction works on the B3 path too.
+        if self._local_tensor is not None:
+            partition = self._spec.placement.partition
+            no = int(partition.owned_nodes.numel())
+            device = self._local_tensor.values.device
+        else:
+            local_matrix = self._local_matrix
+            no = local_matrix.num_owned
+            device = local_matrix.device
 
         # We need the owned-by-owned dense block for everything other
         # than polynomial. Build it once on first call and cache.
         def _owned_block() -> torch.Tensor:
             if getattr(self, "_owned_block_cache", None) is not None:
                 return self._owned_block_cache
-            csr = local_matrix._get_csr()  # num_local x num_local sparse CSR
-            dense = csr.to_dense() if csr.is_sparse_csr or csr.is_sparse \
-                else csr
-            block = dense[:no, :no].contiguous()
+            if self._local_tensor is not None:
+                # B3 path: extract the owned-by-owned slice from the
+                # SparseTensor directly. We materialise the local CSR
+                # via to_dense (cheap on the modest owned blocks
+                # preconditioners care about).
+                csr = self._local_tensor.to_dense()
+                block = csr[:no, :no].contiguous()
+            else:
+                csr = self._local_matrix._get_csr()
+                dense = csr.to_dense() if (csr.is_sparse_csr or csr.is_sparse) \
+                    else csr
+                block = dense[:no, :no].contiguous()
             self._owned_block_cache = block
             return block
 
@@ -5102,8 +5153,7 @@ class DSparseTensor:
         ``p_k = z_k + beta_{k-1} p_{k-1}``. Identity preconditioner
         recovers plain CG. ``M_apply`` is a callable Shard(0) → Shard(0)
         produced by :meth:`_make_preconditioner`."""
-        local_matrix = self._local_matrix
-        no = local_matrix.num_owned
+        no = self._num_owned()
 
         if b_owned.shape[0] != no:
             raise ValueError(
@@ -5163,7 +5213,7 @@ class DSparseTensor:
         """Preconditioned BiCGStab (Saad §9.3): apply ``M^{-1}`` to
         the search directions ``p`` and ``s`` before the matvec.
         Identity ``M`` recovers plain BiCGStab."""
-        no = self._local_matrix.num_owned
+        no = self._num_owned()
         if b_owned.shape[0] != no:
             raise ValueError(
                 f"b_owned size {b_owned.shape[0]} != num_owned {no}")
@@ -5244,7 +5294,7 @@ class DSparseTensor:
         flexible: bool = False,
         verbose: bool = False,
     ) -> torch.Tensor:
-        no = self._local_matrix.num_owned
+        no = self._num_owned()
         if b_owned.shape[0] != no:
             raise ValueError(
                 f"b_owned size {b_owned.shape[0]} != num_owned {no}")
@@ -5379,7 +5429,7 @@ class DSparseTensor:
         does halo exchange + local SpMV. M_apply is a Shard(0)
         preconditioner; identity recovers plain MINRES.
         """
-        no = self._local_matrix.num_owned
+        no = self._num_owned()
         if b_owned.shape[0] != no:
             raise ValueError(
                 f"b_owned size {b_owned.shape[0]} != num_owned {no}")
