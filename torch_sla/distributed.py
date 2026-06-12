@@ -902,9 +902,10 @@ class DSparseTensor:
         """Halo exchange: read ``partition`` (from spec), exchange the
         ghost-node values with neighbour ranks in-place on ``x``.
 
-        Per-rank send/recv buffers are cached on
-        ``self._halo_send_buffers`` / ``self._halo_recv_buffers`` keyed
-        by ``(neighbor_id, dtype)``.
+        Buffers + send/recv index tensors are cached on the instance so
+        the hot path does nothing but ``torch.index_select`` (gather),
+        ``batch_isend_irecv`` (async NCCL), wait, ``index_copy_``
+        (scatter). Per-rank caches are keyed by ``(neighbor_id, dtype)``.
         """
         if not DIST_AVAILABLE or not dist.is_initialized():
             return x
@@ -912,52 +913,66 @@ class DSparseTensor:
         device = x.device
         dtype = x.dtype
 
-        send_bufs = {}
-        recv_bufs = {}
+        # Cache buffers + idx tensors on first call. After that, every
+        # matvec iter hits the cache.
+        send_bufs, recv_bufs = {}, {}
+        send_idxs, recv_idxs = {}, {}
         for nid in partition.neighbor_partitions:
             key = (nid, dtype)
-            sb = self._halo_send_buffers.get(key)
-            if sb is None:
+            entry = self._halo_send_buffers.get(key)
+            if entry is None:
                 idx = partition.send_indices[nid].to(device=device,
                                                        dtype=torch.int64)
-                sb = torch.empty(int(idx.numel()),
-                                  dtype=dtype, device=device)
-                self._halo_send_buffers[key] = sb
-            send_bufs[nid] = sb
-            rb = self._halo_recv_buffers.get(key)
-            if rb is None:
+                buf = torch.empty(int(idx.numel()),
+                                   dtype=dtype, device=device)
+                entry = (buf, idx)
+                self._halo_send_buffers[key] = entry
+            send_bufs[nid], send_idxs[nid] = entry
+
+            entry = self._halo_recv_buffers.get(key)
+            if entry is None:
                 ridx = partition.recv_indices[nid].to(device=device,
                                                        dtype=torch.int64)
-                rb = torch.empty(int(ridx.numel()),
-                                  dtype=dtype, device=device)
-                self._halo_recv_buffers[key] = rb
-            recv_bufs[nid] = rb
+                buf = torch.empty(int(ridx.numel()),
+                                   dtype=dtype, device=device)
+                entry = (buf, ridx)
+                self._halo_recv_buffers[key] = entry
+            recv_bufs[nid], recv_idxs[nid] = entry
 
-        # Fill send buffers (gather from x at send_indices).
+        # Gather: send_buf <- x[send_idx]. Fused on GPU.
         for nid in partition.neighbor_partitions:
-            send_idx = partition.send_indices[nid].to(device=device,
-                                                       dtype=torch.int64)
-            send_bufs[nid].copy_(x[send_idx])
+            torch.index_select(x, 0, send_idxs[nid], out=send_bufs[nid])
 
-        # Exchange. NCCL serialises P2P -- if every rank calls ``isend``
-        # before any ``irecv``, both peers deadlock. Order the pairs by
-        # comparing partition ids: lower id sends-then-recvs, higher id
-        # recvs-then-sends. Gloo doesn't need it but it doesn't hurt.
+        # ``batch_isend_irecv`` schedules every send/recv in one go.
+        # NCCL serialises P2P under the hood but accepts a batched
+        # plan without deadlocking, and lets the CPU return immediately
+        # so subsequent kernel launches can overlap with the halo
+        # comm on the same device. Falls back to the legacy synchronous
+        # ordering on gloo (gloo + NCCL P2P don't share the batched API).
+        backend = dist.get_backend() if dist.is_initialized() else "gloo"
         my_id = int(partition.partition_id)
-        for nid in sorted(partition.neighbor_partitions, key=int):
-            nid_i = int(nid)
-            if my_id < nid_i:
-                dist.send(send_bufs[nid], dst=nid_i)
-                dist.recv(recv_bufs[nid], src=nid_i)
-            else:
-                dist.recv(recv_bufs[nid], src=nid_i)
-                dist.send(send_bufs[nid], dst=nid_i)
+        ordered = sorted(partition.neighbor_partitions, key=int)
+        if backend == "nccl":
+            ops = []
+            for nid in ordered:
+                ops.append(dist.P2POp(dist.isend, send_bufs[nid], int(nid)))
+                ops.append(dist.P2POp(dist.irecv, recv_bufs[nid], int(nid)))
+            for req in dist.batch_isend_irecv(ops):
+                req.wait()
+        else:
+            for nid in ordered:
+                nid_i = int(nid)
+                if my_id < nid_i:
+                    dist.send(send_bufs[nid], dst=nid_i)
+                    dist.recv(recv_bufs[nid], src=nid_i)
+                else:
+                    dist.recv(recv_bufs[nid], src=nid_i)
+                    dist.send(send_bufs[nid], dst=nid_i)
 
-        # Scatter recv buffers into x at recv_indices.
+        # Scatter: x[recv_idx] <- recv_buf. ``index_copy_`` is in-place
+        # and faster than fancy-indexed assignment on CUDA.
         for nid in partition.neighbor_partitions:
-            recv_idx = partition.recv_indices[nid].to(device=device,
-                                                       dtype=torch.int64)
-            x[recv_idx] = recv_bufs[nid]
+            x.index_copy_(0, recv_idxs[nid], recv_bufs[nid])
         return x
 
     def _matmul_col_shard(self, x: Any) -> Any:
@@ -1122,19 +1137,31 @@ class DSparseTensor:
         exchange, local SpMV via a cached CSR multiply, slice back to
         the owned-row range.
 
-        Used by every Shard(0)-space Krylov method (CG / BiCGStab /
-        GMRES / FGMRES / MINRES) and the polynomial preconditioner.
-        ``SparseTensor.__matmul__`` would fall back to a COO
-        gather+scatter_add SpMV (~2× slower than torch's CSR kernel
-        on CPU at 64k DOF), so we cache a single CSR per partition.
+        Buffers cached on the instance:
+        * ``_local_csr_cache`` -- the local CSR.
+        * ``_x_padded_cache``  -- the (num_local,) input scratch.
+        * ``_y_full_cache``    -- the (num_local,) output scratch.
+
+        With caches warm, the per-iter work is: index_copy_ + halo
+        exchange + ``torch.mv`` + slice -- no large allocations.
         """
         partition = self._spec.placement.partition
         num_owned = int(partition.owned_nodes.numel())
         num_local = int(partition.local_to_global.numel())
+        dtype = x_owned.dtype
+        device = x_owned.device
+
         if x_owned.shape[0] == num_owned:
-            x_padded = torch.zeros(num_local, dtype=x_owned.dtype,
-                                    device=x_owned.device)
-            x_padded[:num_owned] = x_owned
+            # Reuse the padded scratch across iters; only owned rows
+            # actually need rewriting -- halo positions get
+            # overwritten by _halo_exchange_via_spec below.
+            xp = getattr(self, "_x_padded_cache", None)
+            if (xp is None or xp.shape[0] != num_local
+                    or xp.dtype != dtype or xp.device != device):
+                xp = torch.zeros(num_local, dtype=dtype, device=device)
+                self._x_padded_cache = xp
+            xp[:num_owned].copy_(x_owned)
+            x_padded = xp
         elif x_owned.shape[0] == num_local:
             x_padded = x_owned
         else:

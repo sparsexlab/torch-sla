@@ -181,9 +181,14 @@ def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
             f"b_owned size {b_owned.shape[0]} != num_owned {no}; "
             "Shard(0) CG requires b to be the local owned slice.")
 
+    # Allocate the working set once -- the hot loop only does in-place
+    # axpy / dot / matvec on these.
     x = torch.zeros_like(b_owned)
-    r = b_owned - D._shard_matvec(x)
+    Ax0 = D._shard_matvec(x)
+    r = b_owned - Ax0
     z = M_apply(r)
+    # Note: ``z`` may alias ``r`` (identity preconditioner). Clone into
+    # the persistent p buffer to be safe.
     p = z.clone()
     rs_old = D._shard_dot(r, z)
 
@@ -192,14 +197,18 @@ def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
 
     for k in range(maxiter):
         Ap = D._shard_matvec(p)
+        # Note: Ap may be a view of ``_y_full_cache`` / local CSR scratch.
+        # We consume it within the iter and never hold it across calls,
+        # so the next ``_shard_matvec`` overwriting that buffer is safe.
         pAp = D._shard_dot(p, Ap)
         if float(pAp.abs().item()) < 1e-30:
             if verbose:
                 print(f"[shard-PCG] iter {k}: pAp ~= 0, stop")
             break
-        alpha = rs_old / pAp
-        x = x + alpha * p
-        r = r - alpha * Ap
+        alpha = rs_old / pAp                           # 0-d tensor
+        # x += alpha * p   /   r -= alpha * Ap   in-place (no fresh alloc).
+        torch.addcmul(x, alpha, p, value=1.0, out=x)
+        torch.addcmul(r, alpha, Ap, value=-1.0, out=r)
 
         r_norm = float(D._shard_norm(r).item())
         if verbose and (k % 100 == 0 or k < 5):
@@ -211,7 +220,8 @@ def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
         z = M_apply(r)
         rs_new = D._shard_dot(r, z)
         beta = rs_new / rs_old
-        p = z + beta * p
+        # p = z + beta * p   in-place: p *= beta; p += z.
+        p.mul_(beta).add_(z)
         rs_old = rs_new
 
     return x
