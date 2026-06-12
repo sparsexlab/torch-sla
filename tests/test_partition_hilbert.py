@@ -10,7 +10,7 @@ import torch
 from torch_sla.distributed import (
     partition_coordinates,
     _hilbert_sort_indices,
-    _hilbert_index_from_axes,
+    _hilbert_curve_indices,
 )
 
 
@@ -93,13 +93,14 @@ def test_hilbert_sort_indices_returns_permutation():
 def test_hilbert_index_distinct_on_unique_axes():
     """Distinct quantised coordinates produce distinct Hilbert indices."""
     order = 4
-    seen = set()
-    for x in range(1 << order):
-        for y in range(1 << order):
-            h = _hilbert_index_from_axes([x, y], order)
-            assert h not in seen, (x, y, h)
-            seen.add(h)
-    assert len(seen) == (1 << (2 * order))
+    side = 1 << order
+    xs, ys = torch.meshgrid(torch.arange(side), torch.arange(side),
+                             indexing="ij")
+    coords = torch.stack([xs.flatten(), ys.flatten()], dim=1)
+    h = _hilbert_curve_indices(coords, order=order)
+    # Bijection on the full quantised grid: every value 0..side^2-1 hit
+    # exactly once.
+    assert torch.equal(h.sort().values, torch.arange(side * side, dtype=h.dtype))
 
 
 # ---------------------------------------------------------------------- #

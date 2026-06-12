@@ -183,21 +183,19 @@ def partition_coordinates(
     return partition_ids
 
 
-def _hilbert_sort_indices(coords: torch.Tensor,
-                          order: int = 16) -> torch.Tensor:
-    """Sort node indices by their Hilbert space-filling-curve position.
+def _hilbert_curve_indices(coords: torch.Tensor,
+                            order: int = 16) -> torch.Tensor:
+    """Map each row of ``coords`` to its position along a 2-D / 3-D
+    Hilbert space-filling curve.
 
-    Each row of ``coords`` is mapped to its position along a 2-D / 3-D
-    Hilbert curve; the returned tensor lists node indices in curve
-    order. Sorting by Hilbert index gives blocks that have **strong
-    geometric locality** -- exactly what sparse matvec wants for cheap
-    halo exchange on PDE-discretised matrices.
+    Vectorised Skilling 2003 ``AxesToTranspose`` / ``TransposeToHilbert``
+    bit-twiddling: the per-point loop is folded into a torch tensor
+    axis so every bit op runs on all ``N`` points at once. The
+    remaining loops are over ``d`` (=2/3) and ``order`` (=16), both
+    tiny. ``order`` is the bit-depth per axis (default 16 → up to
+    ~65k cells per dim before precision becomes the bottleneck).
 
-    Implementation uses Skilling 2003's ``AxestoTranspose`` /
-    ``TransposeToHilbert`` bit-twiddling algorithm; pure-Python, no
-    binding required. ``order`` is the number of bits per axis
-    (default 16, supports up to ~65k cells per dim before precision
-    becomes the bottleneck).
+    Returns the raw Hilbert index per row (shape ``(N,)``, dtype int64).
     """
     if coords.dim() != 2:
         raise ValueError(f"coords must be 2-D, got shape {tuple(coords.shape)}")
@@ -206,61 +204,60 @@ def _hilbert_sort_indices(coords: torch.Tensor,
         raise ValueError(
             f"Hilbert partitioner supports 2-D / 3-D coords, got d={d}")
 
-    # Quantise coords to ``order``-bit non-negative integers per axis.
-    c_min = coords.min(0).values
-    c_max = coords.max(0).values
-    extent = (c_max - c_min).clamp_min(1e-30)
-    scale = (1 << order) - 1
-    qcoords = ((coords - c_min) / extent * scale).clamp_(0, scale).long()
+    if coords.dtype.is_floating_point:
+        # Quantise to ``order``-bit non-negative integers per axis.
+        c_min = coords.min(0).values
+        c_max = coords.max(0).values
+        extent = (c_max - c_min).clamp_min(1e-30)
+        scale = (1 << order) - 1
+        x = ((coords - c_min) / extent * scale).clamp_(0, scale).long()
+    else:
+        # Caller already passed quantised integer coords.
+        x = coords.long().clone()
 
-    # Compute Hilbert index per node.
-    hilbert_indices = torch.empty(n, dtype=torch.int64)
-    qarr = qcoords.tolist()
-    for i in range(n):
-        hilbert_indices[i] = _hilbert_index_from_axes(qarr[i], order)
-    return hilbert_indices.argsort()
-
-
-def _hilbert_index_from_axes(axes: List[int], order: int) -> int:
-    """Skilling 2003: convert per-axis bit-array to a single
-    Hilbert-curve index. ``axes`` is one quantised coordinate per
-    dimension; ``order`` is the bit-depth per axis."""
-    n = len(axes)
-    x = list(axes)
-    # Skilling's algorithm: transformations to make the bits Gray-code-
-    # like before bit-interleaving.
-    m = 1 << (order - 1)
-    # Inverse undo
-    q = m
+    # --- Skilling 2003 "inverse undo" pass --------------------------- #
+    q = 1 << (order - 1)
     while q > 1:
         p = q - 1
-        for i in range(n):
-            if x[i] & q:
-                x[0] ^= p
-            else:
-                t = (x[0] ^ x[i]) & p
-                x[0] ^= t
-                x[i] ^= t
+        for i in range(d):
+            mask = (x[:, i] & q) != 0
+            t = (x[:, 0] ^ x[:, i]) & p
+            x_zero_true  = x[:, 0] ^ p
+            x_zero_false = x[:, 0] ^ t
+            x_i_false    = x[:, i] ^ t
+            x[:, 0] = torch.where(mask, x_zero_true, x_zero_false)
+            x[:, i] = torch.where(mask, x[:, i],     x_i_false)
         q >>= 1
-    # Gray encode
-    for i in range(1, n):
-        x[i] ^= x[i - 1]
-    t = 0
-    q = m
-    while q > 1:
-        if x[n - 1] & q:
-            t ^= q - 1
-        q >>= 1
-    for i in range(n):
-        x[i] ^= t
 
-    # Interleave the bits: build the Hilbert index by taking one bit
-    # from each axis at each level, MSB-to-LSB.
-    h = 0
+    # --- Gray-encode pass ------------------------------------------- #
+    for i in range(1, d):
+        x[:, i] ^= x[:, i - 1]
+
+    # --- Untangle pass ---------------------------------------------- #
+    t = torch.zeros(n, dtype=torch.int64)
+    q = 1 << (order - 1)
+    while q > 1:
+        mask = (x[:, d - 1] & q) != 0
+        t ^= torch.where(mask, torch.full_like(t, q - 1),
+                                torch.zeros_like(t))
+        q >>= 1
+    x ^= t.unsqueeze(1)
+
+    # --- Bit interleave: take one bit from each axis at each level,
+    # MSB to LSB. Final index has ``d * order`` bits total.
+    h = torch.zeros(n, dtype=torch.int64)
     for bit in range(order - 1, -1, -1):
-        for i in range(n):
-            h = (h << 1) | ((x[i] >> bit) & 1)
+        for i in range(d):
+            h = (h << 1) | ((x[:, i] >> bit) & 1)
     return h
+
+
+def _hilbert_sort_indices(coords: torch.Tensor,
+                          order: int = 16) -> torch.Tensor:
+    """Return node indices sorted by Hilbert-curve position. Sorting by
+    Hilbert index gives blocks with strong geometric locality -- exactly
+    what sparse matvec wants for cheap halo exchange on PDE matrices."""
+    return _hilbert_curve_indices(coords, order=order).argsort()
 
 
 def _rcb_partition(
