@@ -181,7 +181,10 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
     
-    from torch.distributed.device_mesh import init_device_mesh
+    try:
+        from torch.distributed.device_mesh import init_device_mesh
+    except ImportError:
+        from torch.distributed._tensor.device_mesh import init_device_mesh
 
     from torch_sla import SparseTensor, DSparseTensor
 

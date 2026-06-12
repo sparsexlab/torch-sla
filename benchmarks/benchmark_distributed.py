@@ -96,7 +96,11 @@ def get_memory_mb():
 def benchmark_distributed(args):
     """Run distributed benchmark."""
     import torch.distributed as dist
-    from torch.distributed.device_mesh import init_device_mesh
+    # torch ≥2.2: device_mesh promoted to top level. torch 2.1.x: still under _tensor.
+    try:
+        from torch.distributed.device_mesh import init_device_mesh
+    except ImportError:
+        from torch.distributed._tensor.device_mesh import init_device_mesh
 
     from torch_sla import SparseTensor, DSparseTensor, solve, SolverConfig
 
@@ -208,7 +212,17 @@ def benchmark_distributed(args):
 
             # Residual via public ops only: r_dt = b_dt - D @ x_dt; gather.
             r_dt = b_dt - D @ x_dt
-            global_res_sq = (r_dt.full_tensor() ** 2).sum()
+            # ``full_tensor()`` is torch 2.3+; fall back to redistribute
+            # for older releases (e.g. the torch 2.1 on autodl).
+            if hasattr(r_dt, "full_tensor"):
+                r_full = r_dt.full_tensor()
+            else:
+                try:
+                    from torch.distributed.tensor import Replicate
+                except ImportError:
+                    from torch.distributed._tensor import Replicate
+                r_full = r_dt.redistribute(mesh, [Replicate()]).to_local()
+            global_res_sq = (r_full ** 2).sum()
             
             residual = global_res_sq.sqrt().item()
             

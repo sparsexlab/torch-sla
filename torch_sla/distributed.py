@@ -49,22 +49,27 @@ try:
 except ImportError:
     DIST_AVAILABLE = False
 
-# DTensor support (PyTorch 2.0+)
+# DTensor support (PyTorch 2.0+). On torch >=2.2 these live under
+# ``torch.distributed.tensor``; torch 2.0-2.1 still keeps them under the
+# private ``_tensor`` namespace. Centralise the version check here so
+# every runtime import below can use the same names.
 try:
     from torch.distributed.tensor import DTensor
     from torch.distributed.tensor.placement_types import Shard, Replicate
     DTENSOR_AVAILABLE = True
+    _dtensor_module = "torch.distributed.tensor"
 except ImportError:
     try:
-        # Older import path (PyTorch 2.0-2.1)
         from torch.distributed._tensor import DTensor
         from torch.distributed._tensor.placement_types import Shard, Replicate
         DTENSOR_AVAILABLE = True
+        _dtensor_module = "torch.distributed._tensor"
     except ImportError:
         DTENSOR_AVAILABLE = False
         DTensor = None
         Shard = None
         Replicate = None
+        _dtensor_module = None
 
 
 def _is_dtensor(x) -> bool:
@@ -465,7 +470,7 @@ class DSparseTensor:
         owned = partition.owned_nodes.to(device=global_vec.device,
                                           dtype=torch.int64)
         local_slice = global_vec[owned].contiguous()
-        from torch.distributed.tensor import DTensor as _DTensor, Shard
+        _DTensor = DTensor  # use module-level import with fallback
         return _DTensor.from_local(local_slice, self._spec.mesh,
                                     [Shard(0)])
 
@@ -653,7 +658,10 @@ class DSparseTensor:
         # If no mesh was passed, build a 1-D mesh from the process
         # group so the result is still a real ``DSparseTensor[Shard(0)]``.
         if mesh is None:
-            from torch.distributed.device_mesh import init_device_mesh
+            try:
+                from torch.distributed.device_mesh import init_device_mesh
+            except ImportError:
+                from torch.distributed._tensor.device_mesh import init_device_mesh
             mesh = init_device_mesh(str(device.type), (world_size,))
 
         return cls.from_sparse_local(
@@ -883,7 +891,7 @@ class DSparseTensor:
         y_owned = y_full[:num_owned]
 
         if _is_dtensor(x):
-            from torch.distributed.tensor import DTensor as _DTensor, Shard
+            _DTensor = DTensor  # use module-level import with fallback
             return _DTensor.from_local(
                 y_owned, self._spec.mesh, [Shard(0)])
         return y_owned
@@ -931,13 +939,19 @@ class DSparseTensor:
                                                        dtype=torch.int64)
             send_bufs[nid].copy_(x[send_idx])
 
-        # Exchange (gloo-friendly: isend/irecv pairs).
-        requests = []
-        for nid in partition.neighbor_partitions:
-            requests.append(dist.isend(send_bufs[nid], dst=int(nid)))
-            requests.append(dist.irecv(recv_bufs[nid], src=int(nid)))
-        for r in requests:
-            r.wait()
+        # Exchange. NCCL serialises P2P -- if every rank calls ``isend``
+        # before any ``irecv``, both peers deadlock. Order the pairs by
+        # comparing partition ids: lower id sends-then-recvs, higher id
+        # recvs-then-sends. Gloo doesn't need it but it doesn't hurt.
+        my_id = int(partition.partition_id)
+        for nid in sorted(partition.neighbor_partitions, key=int):
+            nid_i = int(nid)
+            if my_id < nid_i:
+                dist.send(send_bufs[nid], dst=nid_i)
+                dist.recv(recv_bufs[nid], src=nid_i)
+            else:
+                dist.recv(recv_bufs[nid], src=nid_i)
+                dist.send(send_bufs[nid], dst=nid_i)
 
         # Scatter recv buffers into x at recv_indices.
         for nid in partition.neighbor_partitions:
@@ -1081,7 +1095,7 @@ class DSparseTensor:
             )
 
         if wrap_output:
-            from torch.distributed.tensor import DTensor as _DTensor, Shard
+            _DTensor = DTensor  # use module-level import with fallback
             return _DTensor.from_local(
                 x_owned, self._spec.mesh, [Shard(0)])
         return x_owned

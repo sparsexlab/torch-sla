@@ -28,7 +28,10 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from torch.distributed.device_mesh import init_device_mesh
+try:
+    from torch.distributed.device_mesh import init_device_mesh
+except ImportError:
+    from torch.distributed._tensor.device_mesh import init_device_mesh
 
 from torch_sla import SparseTensor, DSparseTensor, solve, SolverConfig
 
