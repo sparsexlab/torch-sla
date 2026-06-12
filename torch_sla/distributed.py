@@ -1,28 +1,29 @@
 """
-Distributed Sparse Matrix for large-scale CFD/FEM computations.
+Distributed sparse matrix for large-scale CFD / FEM / GNN computations.
 
-Provides domain decomposition with halo exchange, following the standard
-approach used in Ansys, OpenFOAM, and other industrial CFD/FEM solvers.
+:class:`DSparseTensor` mirrors :class:`torch.distributed.tensor.DTensor`:
+each rank holds a local :class:`~torch_sla.sparse_tensor.SparseTensor`
+chunk plus a :class:`~torch_sla.partition.Partition` map (owned rows +
+halo) and the matvec stays entirely in the ``Shard(0)`` space via halo
+exchange + local SpMV.
 
-Key Features:
-- Graph-based partitioning (METIS or simple geometric methods)
-- Halo/ghost node exchange for parallel computations
-- Support for both CPU and CUDA devices
-- Same API as SparseTensor for easy migration
+::
 
-Example
--------
->>> from torch_sla import DSparseMatrix
->>> 
->>> # Create from global matrix
->>> A_global = SparseTensor(val, row, col, shape)
->>> A_dist = DSparseMatrix.from_global(A_global, num_partitions=4)
->>> 
->>> # Distributed solve
->>> x_dist = A_dist.solve(b_dist)
->>> 
->>> # Halo exchange for iterative methods
->>> A_dist.halo_exchange(local_x)
+    from torch_sla import SparseTensor, DSparseTensor, solve, SolverConfig
+    from torch.distributed.device_mesh import init_device_mesh
+
+    A    = SparseTensor(val, row, col, shape)
+    mesh = init_device_mesh("cpu", (world_size,))
+    D    = DSparseTensor.partition(A, mesh, partition_method="metis")
+    b_dt = D.scatter(b_global)
+
+    with SolverConfig(method="cg", atol=1e-10, rtol=1e-10, maxiter=2000):
+        x_dt = solve(D, b_dt)
+
+The Krylov methods (CG / BiCGStab / GMRES / FGMRES / MINRES) and
+preconditioners (Jacobi / block-Jacobi / SSOR / polynomial) live in
+:mod:`torch_sla.distributed_solve`; partitioning lives in
+:mod:`torch_sla.partition`.
 """
 
 import os
@@ -256,101 +257,30 @@ class DSparseTensor:
     >>> A.halo_exchange_local(x_list)
     """
     
-    def __init__(
-        self,
-        values: torch.Tensor,
-        row_indices: torch.Tensor,
-        col_indices: torch.Tensor,
-        shape: Tuple[int, int],
-        num_partitions: int,
-        coords: Optional[torch.Tensor] = None,
-        partition_method: str = 'auto',
-        device: Optional[Union[str, torch.device]] = None,
-        verbose: bool = True
-    ):
-        self._values = values
-        self._row_indices = row_indices
-        self._col_indices = col_indices
-        self._shape = shape
-        self._num_partitions = num_partitions
-        self._coords = coords
-        self._partition_method = partition_method
-        self._verbose = verbose
-        
-        # Infer device from input tensor if not explicitly specified
-        if device is None:
-            device = values.device
-        if isinstance(device, str):
-            device = torch.device(device)
-        self._device = device
-        
-        # Compute partition IDs
-        # NOTE: In distributed mode, this should be computed on rank 0 and broadcast
-        # to ensure consistency. See _compute_partitions_distributed() for distributed-safe version.
-        self._partition_ids = self._compute_partitions(partition_method, coords)
-        
-        # Create all partitions
-        self._partitions: List[DSparseMatrix] = []
-        self._create_partitions()
+    def __init__(self) -> None:
+        """Direct instantiation isn't supported -- use one of the
+        classmethod constructors:
 
-        # DTensor-mirror state. Populated by :meth:`from_local` and
-        # related classmethods that wrap an already-distributed local
-        # matrix; ``None`` for the legacy single-process simulator
-        # constructor so existing call sites keep behaving identically.
-        self._local_matrix: Optional[DSparseMatrix] = None
-        # ``_local_tensor`` is the per-rank chunk -- a
-        # plain :class:`SparseTensor` in local coordinates. When set,
-        # matvec uses this + ``_spec.placement.partition`` and bypasses
-        # ``DSparseMatrix`` entirely. Built via
-        # :meth:`from_sparse_local`.
-        self._local_tensor: Optional["SparseTensor"] = None
-        # Per-rank caches for halo-exchange (populated lazily by
-        # ``_halo_exchange_via_spec``).
-        self._halo_send_buffers: Dict[int, torch.Tensor] = {}
-        self._halo_recv_buffers: Dict[int, torch.Tensor] = {}
-        self._spec: Optional[DSparseSpec] = None
+        * :meth:`partition` -- global :class:`SparseTensor` + mesh →
+          row-sharded :class:`DSparseTensor`.
+        * :meth:`from_global_distributed` -- global COO + rank/world
+          → row-sharded :class:`DSparseTensor` (broadcasts partition
+          ids from rank 0 for determinism).
+        * :meth:`from_sparse_local` -- per-rank ``(SparseTensor,
+          Partition)`` → :class:`DSparseTensor`.
+
+        Each populates ``_local_tensor`` (the per-rank SparseTensor
+        backing) and ``_spec`` (the placement + mesh + global shape).
+        """
+        raise TypeError(
+            "DSparseTensor() does not support direct instantiation. Use "
+            "DSparseTensor.partition(A, mesh) / "
+            "DSparseTensor.from_global_distributed(...) / "
+            "DSparseTensor.from_sparse_local(...)."
+        )
+
+
     
-    def _compute_partitions(
-        self, 
-        method: str, 
-        coords: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        """Compute partition assignments for each node."""
-        if method == 'auto':
-            if coords is not None:
-                method = 'rcb'
-            else:
-                method = 'metis'
-        
-        if method == 'metis':
-            return partition_graph_metis(
-                self._row_indices, self._col_indices, 
-                self._shape[0], self._num_partitions
-            )
-        elif method in ['rcb', 'slicing']:
-            if coords is None:
-                raise ValueError(f"Partition method '{method}' requires coords")
-            return partition_coordinates(coords, self._num_partitions, method=method)
-        elif method == 'simple':
-            return partition_simple(self._shape[0], self._num_partitions)
-        else:
-            raise ValueError(f"Unknown partition method: {method}")
-    
-    def _create_partitions(self):
-        """Create all partition matrices."""
-        for i in range(self._num_partitions):
-            mat = DSparseMatrix._from_global_impl(
-                self._values, self._row_indices, self._col_indices,
-                self._shape, self._num_partitions, i,
-                partition_ids=self._partition_ids,
-                device=self._device,
-                verbose=self._verbose
-            )
-            self._partitions.append(mat)
-        
-        # Store reference to all partitions for local halo exchange
-        for mat in self._partitions:
-            mat._all_partitions = [m.partition for m in self._partitions]
     
     # ====================================================================== #
     # DTensor-mirror API: from_local / to_local / full_tensor / redistribute.
@@ -368,67 +298,6 @@ class DSparseTensor:
     # ``None`` -- callers that don't want the DTensor mirror keep
     # working byte-for-byte.
     # ====================================================================== #
-    @classmethod
-    def from_local(
-        cls,
-        local_matrix: "DSparseMatrix",
-        mesh: Any,
-        *,
-        placement: SparsePlacement = None,
-        global_shape: Optional[Tuple[int, int]] = None,
-    ) -> "DSparseTensor":
-        """Wrap an already-distributed :class:`DSparseMatrix` chunk as a
-        DTensor-mirror :class:`DSparseTensor`.
-
-        Mirrors :meth:`torch.distributed.tensor.DTensor.from_local`. Each
-        rank passes the local subdomain it received from
-        :meth:`DSparseTensor.from_global_distributed` /
-        :meth:`from_device_mesh`; the placement / mesh metadata is
-        carried in :class:`DSparseSpec` for downstream dispatch.
-
-        Parameters
-        ----------
-        local_matrix : DSparseMatrix
-            This rank's owned + halo subdomain.
-        mesh : DeviceMesh
-            The PyTorch device mesh the matrix is distributed over.
-        placement : SparsePlacement, optional
-            Defaults to :class:`RowPartitioned` (rows split across the
-            mesh, which is what ``from_global_distributed`` produces).
-            Pass :class:`Replicated` for the full-matrix-on-every-rank
-            layout.
-        global_shape : Tuple[int, int], optional
-            Override the deduced global shape. Defaults to
-            ``local_matrix.global_shape``.
-        """
-        if placement is None:
-            placement = RowPartitioned()
-        if global_shape is None:
-            global_shape = tuple(local_matrix.global_shape)
-
-        # We deliberately bypass __init__ -- the legacy constructor
-        # builds an in-process Python list of every partition, which is
-        # the opposite of what we want here. Build a minimal instance
-        # and stamp the DTensor-mirror state on directly.
-        self = cls.__new__(cls)
-        self._values = None
-        self._row_indices = None
-        self._col_indices = None
-        self._shape = global_shape
-        self._num_partitions = mesh.size() if mesh is not None else 1
-        self._coords = None
-        self._partition_method = None
-        self._verbose = False
-        self._device = local_matrix.device
-        self._partition_ids = None
-        self._partitions = []
-        self._local_matrix = local_matrix
-        self._local_tensor = None
-        self._halo_send_buffers = {}
-        self._halo_recv_buffers = {}
-        self._spec = DSparseSpec(placement=placement, mesh=mesh,
-                                 global_shape=global_shape)
-        return self
 
     @classmethod
     def from_sparse_local(
@@ -499,9 +368,6 @@ class DSparseTensor:
         self._partition_method = None
         self._verbose = False
         self._device = local_tensor.values.device
-        self._partition_ids = None
-        self._partitions = []
-        self._local_matrix = None
         self._local_tensor = local_tensor
         self._halo_send_buffers = {}
         self._halo_recv_buffers = {}
@@ -619,248 +485,96 @@ class DSparseTensor:
                                     [Shard(0)])
 
     def _partition_for_dispatch(self) -> Optional["Partition"]:
-        """Return the active :class:`Partition` regardless of which
-        local backing is set. ``None`` for the legacy simulator
-        constructor (no real spec)."""
+        """Return the active :class:`Partition` from the spec, or
+        ``None`` if no spec is set."""
         if self._spec is not None and isinstance(
                 self._spec.placement, SparseShard) \
                 and self._spec.placement.partition is not None:
             return self._spec.placement.partition
-        if self._local_matrix is not None:
-            return self._local_matrix.partition
         return None
-
-    def to_local(self) -> "DSparseMatrix":
-        """Return this rank's local :class:`DSparseMatrix` chunk.
-
-        Mirrors :meth:`DTensor.to_local`. For the legacy single-process
-        simulator instance the call falls back to the gathered global
-        matrix (logically equivalent: the "local" tensor IS the global
-        tensor when there's only one rank)."""
-        if self._local_matrix is not None:
-            return self._local_matrix
-        if not self._partitions:
-            raise RuntimeError(
-                "DSparseTensor has neither a DTensor-mirror local "
-                "matrix nor a simulated partition list -- nothing to "
-                "hand back as 'local'."
-            )
-        # Single-process simulator path: rank 0 owns everything.
-        return self._partitions[0]
 
     def full_tensor(self) -> "SparseTensor":
         """Materialise the full global matrix on every rank.
 
-        Mirrors :meth:`DTensor.full_tensor` (the symmetric ``Allgather``
-        return -- every rank ends up with the same result). Returns a
-        plain :class:`SparseTensor` so callers can pipe it into the
-        non-distributed code path.
-
-        Cheap when the placement is already :class:`Replicated` (just a
-        format conversion); for :class:`RowPartitioned` we Allgather
-        the global COO triples across the mesh.
+        Mirrors :meth:`DTensor.full_tensor`: every rank ends up with
+        the same :class:`SparseTensor`. For :class:`SparseShard(axis=0)`
+        we drop the halo rows from the local SparseTensor (only owned
+        rows count), translate local indices back to global, and
+        all-gather the (val, row, col) triples across the mesh.
         """
         from .sparse_tensor import SparseTensor
 
         if self._spec is None:
-            # Single-process simulator: the original COO triple still
-            # lives on the instance; convert directly.
-            return self.to_sparse_tensor()
+            raise RuntimeError(
+                "DSparseTensor.full_tensor() requires a spec -- build "
+                "via .partition(...) / .from_sparse_local(...).")
 
-        if isinstance(self._spec.placement, Replicated):
-            # Every rank already has the full matrix; rebuild a global
-            # SparseTensor from the local one's COO state.
-            local = self._local_matrix
-            return SparseTensor(local.local_values, local.local_row,
-                                local.local_col, self._spec.global_shape)
+        partition = self._partition_for_dispatch()
+        if partition is None:
+            raise RuntimeError(
+                "DSparseTensor.full_tensor() requires a SparseShard "
+                "placement with a Partition.")
+
+        st = self._local_tensor
+        if st is None:
+            raise RuntimeError(
+                "DSparseTensor.full_tensor() requires a SparseTensor "
+                "backing.")
+
+        # Drop halo rows -- only owned rows participate in the global
+        # matrix. Local row indices < num_owned are the owned ones.
+        device = st.values.device
+        num_owned = int(partition.owned_nodes.numel())
+        owned_mask = st.row_indices < num_owned
+        local_rows = st.row_indices[owned_mask]
+        local_cols = st.col_indices[owned_mask]
+        local_vals = st.values[owned_mask]
+
+        # Translate local row / col → global indices.
+        l2g = partition.local_to_global.to(device=device,
+                                            dtype=torch.int64)
+        global_rows = l2g[local_rows]
+        global_cols = l2g[local_cols]
 
         if not (DIST_AVAILABLE and dist.is_initialized()):
-            raise RuntimeError(
-                "DSparseTensor.full_tensor() with RowPartitioned "
-                "placement requires torch.distributed to be initialised."
-            )
-        return self._all_gather_global_matrix()
+            return SparseTensor(local_vals, global_rows, global_cols,
+                                 tuple(self._spec.global_shape))
 
-    def redistribute(
-        self,
-        placement: SparsePlacement,
-        *,
-        mesh: Any = None,
-    ) -> "DSparseTensor":
-        """Convert this :class:`DSparseTensor` to a new placement.
+        # All-gather the per-rank triples across the mesh.
+        world_size = dist.get_world_size()
+        nnz_t = torch.tensor([int(global_rows.numel())], device=device,
+                              dtype=torch.int64)
+        all_nnz = [torch.zeros(1, device=device, dtype=torch.int64)
+                    for _ in range(world_size)]
+        dist.all_gather(all_nnz, nnz_t)
+        sizes = [int(t.item()) for t in all_nnz]
+        max_nnz = max(sizes)
 
-        Mirrors :meth:`DTensor.redistribute`. Only two transitions are
-        currently meaningful for sparse matrices: ``RowPartitioned ->
-        Replicated`` (Allgather every rank's COO triples and rebuild)
-        and ``Replicated -> RowPartitioned`` (drop the rows this rank
-        doesn't own).
-        """
-        if self._spec is None:
-            raise RuntimeError(
-                "redistribute() requires a DTensor-mirror DSparseTensor;"
-                " build one via DSparseTensor.from_local(...) first."
-            )
-        target_mesh = mesh or self._spec.mesh
+        def _padded(t, dtype):
+            out = torch.zeros(max_nnz, device=device, dtype=dtype)
+            out[:t.numel()] = t.to(dtype=dtype)
+            return out
 
-        if type(self._spec.placement) is type(placement):
-            # Same placement: no-op besides optionally re-stamping mesh.
-            if target_mesh is self._spec.mesh:
-                return self
-            return DSparseTensor.from_local(
-                self._local_matrix, target_mesh,
-                placement=placement,
-                global_shape=self._spec.global_shape,
-            )
+        val_pad = _padded(local_vals, local_vals.dtype)
+        row_pad = _padded(global_rows, torch.int64)
+        col_pad = _padded(global_cols, torch.int64)
 
-        if isinstance(self._spec.placement, SparseShard) \
-                and isinstance(placement, Replicated):
-            full = self._all_gather_global_matrix()
-            # ``DSparseMatrix.from_global`` is a static helper that
-            # builds a single-partition local chunk -- pass ``num_part=1``
-            # so the whole matrix is owned by this rank.
-            full_local = DSparseMatrix._from_global_impl(
-                SparseTensor(full.val, full.row, full.col,
-                             self._spec.global_shape),
-                num_partitions=1,
-                partition_id=0,
-                device=self._local_matrix.device,
-                verbose=False,
-            )
-            return DSparseTensor.from_local(
-                full_local, target_mesh,
-                placement=Replicated(),
-                global_shape=self._spec.global_shape,
-            )
+        all_vals = [torch.zeros_like(val_pad) for _ in range(world_size)]
+        all_rows = [torch.zeros_like(row_pad) for _ in range(world_size)]
+        all_cols = [torch.zeros_like(col_pad) for _ in range(world_size)]
+        dist.all_gather(all_vals, val_pad)
+        dist.all_gather(all_rows, row_pad)
+        dist.all_gather(all_cols, col_pad)
 
-        raise NotImplementedError(
-            f"redistribute {type(self._spec.placement).__name__} -> "
-            f"{type(placement).__name__} not yet supported"
-        )
+        out_vals = torch.cat([all_vals[r][:sizes[r]] for r in range(world_size)])
+        out_rows = torch.cat([all_rows[r][:sizes[r]] for r in range(world_size)])
+        out_cols = torch.cat([all_cols[r][:sizes[r]] for r in range(world_size)])
+        return SparseTensor(out_vals, out_rows, out_cols,
+                             tuple(self._spec.global_shape))
 
-    def _all_gather_global_matrix(self) -> "SparseTensor":
-        """Allgather the per-rank COO triples and rebuild a global
-        :class:`SparseTensor`. Used by :meth:`full_tensor` and
-        :meth:`redistribute`."""
-        from .sparse_tensor import SparseTensor
 
-        local = self._local_matrix
-        device = local.device
-        world_size = self._spec.mesh.size()
 
-        # Local row/col indices live in the LOCAL coordinate system; we
-        # need them in GLOBAL coordinates before stitching. Use the
-        # partition's ``local_nodes`` map (local idx -> global idx).
-        l2g = local.partition.local_nodes.to(device)
-        # Only owned-row entries -- duplicates across ranks would
-        # otherwise show up after the all_gather.
-        owned_mask = local.local_row < local.num_owned
-        rows_g = l2g[local.local_row[owned_mask]].contiguous()
-        cols_g = l2g[local.local_col[owned_mask]].contiguous()
-        vals   = local.local_values[owned_mask].contiguous()
-
-        # Allgather variable-length COO triples. Same shape pattern as
-        # gather_global: exchange sizes, allocate per-rank buffers,
-        # all_gather each field.
-        owned_nnz = torch.tensor([int(vals.numel())],
-                                 dtype=torch.int64, device=device)
-        sizes = [torch.zeros(1, dtype=torch.int64, device=device)
-                 for _ in range(world_size)]
-        dist.all_gather(sizes, owned_nnz)
-        ns = [int(s.item()) for s in sizes]
-
-        rows_list = [torch.zeros(n, dtype=torch.int64, device=device)
-                     for n in ns]
-        cols_list = [torch.zeros(n, dtype=torch.int64, device=device)
-                     for n in ns]
-        vals_list = [torch.zeros(n, dtype=vals.dtype, device=device)
-                     for n in ns]
-        dist.all_gather(rows_list, rows_g)
-        dist.all_gather(cols_list, cols_g)
-        dist.all_gather(vals_list, vals)
-
-        return SparseTensor(
-            torch.cat(vals_list),
-            torch.cat(rows_list),
-            torch.cat(cols_list),
-            self._spec.global_shape,
-        )
-
-    @classmethod
-    def from_sparse_tensor(
-        cls,
-        sparse_tensor: "SparseTensor",
-        num_partitions: int,
-        coords: Optional[torch.Tensor] = None,
-        partition_method: str = 'auto',
-        device: Optional[Union[str, torch.device]] = None,
-        verbose: bool = True
-    ) -> "DSparseTensor":
-        """
-        Create DSparseTensor from a SparseTensor.
-        
-        Parameters
-        ----------
-        sparse_tensor : SparseTensor
-            Input sparse tensor (must be 2D, not batched)
-        num_partitions : int
-            Number of partitions
-        coords : torch.Tensor, optional
-            Node coordinates for geometric partitioning
-        partition_method : str
-            Partitioning method
-        device : str or torch.device, optional
-            Target device (defaults to sparse_tensor's device)
-        verbose : bool
-            Whether to print partition info
-            
-        Returns
-        -------
-        DSparseTensor
-            Distributed sparse tensor
-        """
-        # Avoid circular import
-        from .sparse_tensor import SparseTensor
-        
-        if sparse_tensor.is_batched:
-            raise ValueError("DSparseTensor does not support batched SparseTensor. "
-                           "Use a 2D SparseTensor.")
-        
-        if device is None:
-            device = sparse_tensor.device
-        
-        # Use sparse_shape for the matrix dimensions
-        sparse_shape = sparse_tensor.sparse_shape
-        
-        return cls(
-            sparse_tensor.values,
-            sparse_tensor.row_indices,
-            sparse_tensor.col_indices,
-            sparse_shape,
-            num_partitions=num_partitions,
-            coords=coords,
-            partition_method=partition_method,
-            device=device,
-            verbose=verbose
-        )
     
-    @classmethod
-    def from_torch_sparse(
-        cls,
-        A: torch.Tensor,
-        num_partitions: int,
-        **kwargs
-    ) -> "DSparseTensor":
-        """Create DSparseTensor from PyTorch sparse tensor."""
-        if A.layout == torch.sparse_csr:
-            A = A.to_sparse_coo()
-        
-        indices = A._indices()
-        values = A._values()
-        
-        return cls(
-            values, indices[0], indices[1], tuple(A.shape),
-            num_partitions=num_partitions, **kwargs
-        )
     
     @classmethod
     def from_global_distributed(
@@ -961,101 +675,6 @@ class DSparseTensor:
             local_st, mesh, partition, global_shape=tuple(shape),
         )
     
-    @classmethod
-    def from_device_mesh(
-        cls,
-        values: torch.Tensor,
-        row_indices: torch.Tensor,
-        col_indices: torch.Tensor,
-        shape: Tuple[int, int],
-        device_mesh: "DeviceMesh",
-        coords: Optional[torch.Tensor] = None,
-        partition_method: str = 'simple',
-        placement: str = 'shard_rows',
-        verbose: bool = False
-    ) -> "DSparseMatrix":
-        """
-        Create local partition using PyTorch DeviceMesh.
-        
-        This is the recommended method for distributed training with PyTorch's
-        DTensor ecosystem. Each rank receives only its local partition.
-        
-        Parameters
-        ----------
-        values : torch.Tensor
-            Global non-zero values [nnz] (same on all ranks)
-        row_indices : torch.Tensor
-            Global row indices [nnz]
-        col_indices : torch.Tensor
-            Global column indices [nnz]
-        shape : Tuple[int, int]
-            Global matrix shape (M, N)
-        device_mesh : DeviceMesh
-            PyTorch DeviceMesh specifying device topology
-        coords : torch.Tensor, optional
-            Node coordinates for geometric partitioning
-        partition_method : str
-            Partitioning method: 'metis', 'rcb', 'simple'
-            Default is 'simple' for determinism in distributed setting
-        placement : str
-            How to distribute: 'shard_rows', 'shard_cols', 'replicate'
-        verbose : bool
-            Whether to print partition info
-            
-        Returns
-        -------
-        DSparseMatrix
-            Local partition for this rank
-            
-        Example
-        -------
-        >>> from torch.distributed.device_mesh import init_device_mesh
-        >>> from torch_sla import DSparseTensor
-        >>> 
-        >>> # Initialize 4-GPU device mesh
-        >>> mesh = init_device_mesh("cuda", (4,), mesh_dim_names=("dp",))
-        >>> 
-        >>> # Create distributed sparse tensor (each rank gets its partition)
-        >>> local_matrix = DSparseTensor.from_device_mesh(
-        ...     val, row, col, shape,
-        ...     device_mesh=mesh,
-        ...     partition_method='simple'
-        ... )
-        >>> 
-        >>> # Local operations
-        >>> y_local = local_matrix.matvec(x_local)
-        >>> x_local = local_matrix.solve(b_local)
-        """
-        try:
-            from torch.distributed.device_mesh import DeviceMesh
-        except ImportError:
-            raise ImportError("DeviceMesh requires PyTorch 2.0+. "
-                            "Use from_global_distributed() instead.")
-        
-        if not DIST_AVAILABLE or not dist.is_initialized():
-            raise RuntimeError("torch.distributed must be initialized. "
-                             "Call dist.init_process_group() first.")
-        
-        # Get rank info from device mesh
-        rank = device_mesh.get_local_rank()
-        world_size = device_mesh.size()
-        device_type = device_mesh.device_type
-        
-        # Determine target device
-        if device_type == "cuda":
-            device = torch.device(f"cuda:{rank}")
-        else:
-            device = torch.device(device_type)
-        
-        # Use the distributed-safe factory method
-        return cls.from_global_distributed(
-            values, row_indices, col_indices, shape,
-            rank=rank, world_size=world_size,
-            coords=coords,
-            partition_method=partition_method,
-            device=device,
-            verbose=verbose
-        )
     
     # =========================================================================
     # Properties
@@ -1079,1320 +698,75 @@ class DSparseTensor:
     @property
     def dtype(self) -> torch.dtype:
         """Data type of matrix values."""
-        return self._values.dtype
-    
+        return self._local_tensor.values.dtype
+
     @property
     def nnz(self) -> int:
-        """Total number of non-zeros."""
-        return self._values.size(0)
+        """Number of non-zeros in this rank's local chunk (owned + halo
+        rows). For the global nnz call :meth:`full_tensor` first."""
+        return int(self._local_tensor.values.numel())
     
-    @property
-    def partition_ids(self) -> torch.Tensor:
-        """Partition assignment for each node."""
-        return self._partition_ids
     
-    @property
-    def is_cuda(self) -> bool:
-        """Check if matrix is on CUDA."""
-        return self._device.type == 'cuda'
     
     # =========================================================================
     # Indexing and Iteration
     # =========================================================================
     
-    def __len__(self) -> int:
-        """Number of partitions."""
-        return self._num_partitions
     
-    def __getitem__(self, idx: int) -> DSparseMatrix:
-        """Get a specific partition."""
-        if idx < 0:
-            idx = self._num_partitions + idx
-        if idx < 0 or idx >= self._num_partitions:
-            raise IndexError(f"Partition index {idx} out of range [0, {self._num_partitions})")
-        return self._partitions[idx]
     
-    def __iter__(self):
-        """Iterate over partitions."""
-        return iter(self._partitions)
     
     # =========================================================================
     # Device Management
     # =========================================================================
     
-    def to(self, device: Union[str, torch.device]) -> "DSparseTensor":
-        """
-        Move all partitions to a different device.
-        
-        Parameters
-        ----------
-        device : str or torch.device
-            Target device
-            
-        Returns
-        -------
-        DSparseTensor
-            New distributed tensor on target device
-        """
-        if isinstance(device, str):
-            device = torch.device(device)
-        
-        new_tensor = DSparseTensor.__new__(DSparseTensor)
-        new_tensor._values = self._values.to(device)
-        new_tensor._row_indices = self._row_indices.to(device)
-        new_tensor._col_indices = self._col_indices.to(device)
-        new_tensor._shape = self._shape
-        new_tensor._num_partitions = self._num_partitions
-        new_tensor._coords = self._coords
-        new_tensor._partition_method = self._partition_method
-        new_tensor._verbose = False  # Don't print again
-        new_tensor._device = device
-        new_tensor._partition_ids = self._partition_ids
-        
-        # Move partitions
-        new_tensor._partitions = [p.to(device) for p in self._partitions]
-        
-        # Update references
-        for mat in new_tensor._partitions:
-            mat._all_partitions = [m.partition for m in new_tensor._partitions]
-        
-        return new_tensor
     
-    def cuda(self, device: Optional[int] = None) -> "DSparseTensor":
-        """Move to CUDA device."""
-        if device is not None:
-            return self.to(f'cuda:{device}')
-        return self.to('cuda')
     
-    def cpu(self) -> "DSparseTensor":
-        """Move to CPU."""
-        return self.to('cpu')
     
     # =========================================================================
     # Distributed Operations
     # =========================================================================
     
-    def halo_exchange_local(self, x_list: List[torch.Tensor]) -> None:
-        """
-        Local halo exchange for single-process simulation.
-        
-        Exchanges halo values between all partitions locally.
-        Useful for testing without actual distributed setup.
-        
-        Parameters
-        ----------
-        x_list : List[torch.Tensor]
-            List of local vectors, one per partition. Each vector is
-            modified in-place to update halo values.
-        """
-        if len(x_list) != self._num_partitions:
-            raise ValueError(f"Expected {self._num_partitions} vectors, got {len(x_list)}")
-        
-        for part_id in range(self._num_partitions):
-            partition = self._partitions[part_id].partition
-            x = x_list[part_id]
-            
-            halo_offset = len(partition.owned_nodes)
-            
-            for halo_idx, global_node in enumerate(partition.halo_nodes.tolist()):
-                local_halo_idx = halo_offset + halo_idx
-                
-                for neighbor_id in partition.neighbor_partitions:
-                    neighbor_partition = self._partitions[neighbor_id].partition
-                    neighbor_g2l = neighbor_partition.global_to_local
-                    
-                    if global_node < len(neighbor_g2l):
-                        local_idx_in_neighbor = neighbor_g2l[global_node].item()
-                        if local_idx_in_neighbor >= 0 and local_idx_in_neighbor < len(neighbor_partition.owned_nodes):
-                            x[local_halo_idx] = x_list[neighbor_id][local_idx_in_neighbor]
-                            break
     
-    def matvec_all(
-        self,
-        x_list: List[torch.Tensor],
-        exchange_halo: bool = True
-    ) -> List[torch.Tensor]:
-        """
-        Matrix-vector multiply on all partitions.
-        
-        Performs y = A @ x for each partition, with optional halo exchange.
-        
-        Parameters
-        ----------
-        x_list : List[torch.Tensor]
-            List of local vectors, one per partition. Each vector should have
-            size = num_owned + num_halo for that partition.
-        exchange_halo : bool
-            Whether to perform halo exchange before multiplication.
-            Default True.
-            
-        Returns
-        -------
-        List[torch.Tensor]
-            List of result vectors, one per partition. Each result has
-            size = num_owned (only owned nodes have valid results).
-            
-        Example
-        -------
-        >>> D = SparseTensor(val, row, col, shape).partition(4)
-        >>> x_local = D.scatter_local(x_global)
-        >>> y_local = D.matvec_all(x_local)
-        >>> y_global = D.gather_global(y_local)
-        """
-        return [self._partitions[i].matvec(x_list[i], exchange_halo=exchange_halo)
-                for i in range(self._num_partitions)]
     
-    def solve_all(
-        self,
-        b_list: List[torch.Tensor],
-        **kwargs
-    ) -> List[torch.Tensor]:
-        """
-        Solve on all partitions (subdomain solves).
-        
-        NOTE: This performs LOCAL subdomain solves, NOT a global distributed solve.
-        Each partition solves its own local system independently.
-        For a true distributed solve, use `solve_distributed()`.
-        
-        Parameters
-        ----------
-        b_list : List[torch.Tensor]
-            List of local RHS vectors, one per partition
-        **kwargs
-            Additional arguments passed to each partition's solve method
-            
-        Returns
-        -------
-        List[torch.Tensor]
-            List of solution vectors, one per partition
-        """
-        return [self._partitions[i].solve(b_list[i], **kwargs) 
-                for i in range(self._num_partitions)]
     
-    def solve_distributed(
-        self,
-        b_global: Union[torch.Tensor, "DTensor"],
-        method: str = 'cg',
-        atol: float = 1e-10,
-        maxiter: int = 1000,
-        verbose: bool = False
-    ) -> Union[torch.Tensor, "DTensor"]:
-        """
-        Distributed solve: find x such that A @ x = b using all partitions.
-        
-        This performs a TRUE distributed solve where all partitions collaborate
-        to solve the global system. Uses distributed CG with global reductions.
-        
-        Parameters
-        ----------
-        b_global : torch.Tensor or DTensor
-            Global RHS vector [N].
-            - If torch.Tensor: treated as global vector
-            - If DTensor: automatically handles distributed input/output
-        method : str
-            Solver method: 'cg' (Conjugate Gradient)
-        atol : float
-            Absolute tolerance for convergence
-        maxiter : int
-            Maximum iterations
-        verbose : bool
-            Print convergence info
-            
-        Returns
-        -------
-        torch.Tensor or DTensor
-            Global solution vector [N].
-            Returns DTensor if input is DTensor, otherwise torch.Tensor.
-            
-        Example
-        -------
-        >>> D = A.partition(num_partitions=4)
-        >>> x = D.solve_distributed(b)  # Distributed CG solve
-        >>> residual = torch.norm(A @ x - b)
-        
-        >>> # With DTensor input
-        >>> from torch.distributed.tensor import DTensor, Replicate
-        >>> b_dt = DTensor.from_local(b_local, mesh, [Replicate()])
-        >>> x_dt = D.solve_distributed(b_dt)  # Returns DTensor
-        """
-        # Check for DTensor input
-        if _is_dtensor(b_global):
-            return self._solve_distributed_dtensor(b_global, method, atol, maxiter, verbose)
-        
-        N = self._shape[0]
-        dtype = b_global.dtype
-        device = self._device
-        
-        # Initialize x = 0
-        x_global = torch.zeros(N, dtype=dtype, device=device)
-        
-        # Scatter b to local
-        b_local = self.scatter_local(b_global)
-        
-        # Distributed CG
-        if method == 'cg':
-            x_global = self._distributed_cg(x_global, b_global, atol, maxiter, verbose)
-        else:
-            raise ValueError(f"Unknown method: {method}. Supported: 'cg'")
-        
-        return x_global
     
-    def _solve_distributed_dtensor(
-        self,
-        b_dtensor: "DTensor",
-        method: str,
-        atol: float,
-        maxiter: int,
-        verbose: bool
-    ) -> "DTensor":
-        """
-        Distributed solve with DTensor input.
-        
-        Handles DTensor layout conversion and result wrapping.
-        
-        Parameters
-        ----------
-        b_dtensor : DTensor
-            Right-hand side as DTensor
-        method : str
-            Solver method
-        atol : float
-            Absolute tolerance
-        maxiter : int
-            Maximum iterations
-        verbose : bool
-            Print convergence info
-            
-        Returns
-        -------
-        DTensor
-            Solution as DTensor with same placement as input
-        """
-        if not DTENSOR_AVAILABLE:
-            raise RuntimeError("DTensor support requires PyTorch 2.0+")
-        
-        # Get DTensor metadata
-        device_mesh = b_dtensor.device_mesh
-        placements = b_dtensor.placements
-        original_placements = tuple(placements)
-        
-        # Check if input is replicated
-        is_replicated = all(isinstance(p, Replicate) for p in placements)
-        
-        if is_replicated:
-            # Input is replicated - extract and solve
-            b_local = b_dtensor.to_local()
-            x_local = self._solve_distributed_tensor(b_local, method, atol, maxiter, verbose)
-            # Wrap result as replicated DTensor
-            return DTensor.from_local(x_local, device_mesh, [Replicate()])
-        
-        # Input is sharded - redistribute to replicated for solve
-        replicate_placements = [Replicate() for _ in placements]
-        b_replicated = b_dtensor.redistribute(device_mesh, replicate_placements)
-        b_full = b_replicated.to_local()
-        
-        # Solve with full vector
-        x_full = self._solve_distributed_tensor(b_full, method, atol, maxiter, verbose)
-        
-        # Wrap as replicated DTensor
-        x_replicated = DTensor.from_local(x_full, device_mesh, [Replicate()])
-        
-        # Redistribute back to original placement if it was sharded
-        if not is_replicated:
-            output_placements = []
-            for p in original_placements:
-                if isinstance(p, Shard):
-                    output_placements.append(Shard(p.dim))
-                else:
-                    output_placements.append(Replicate())
-            
-            return x_replicated.redistribute(device_mesh, output_placements)
-        
-        return x_replicated
     
-    def _solve_distributed_tensor(
-        self,
-        b_global: torch.Tensor,
-        method: str,
-        atol: float,
-        maxiter: int,
-        verbose: bool
-    ) -> torch.Tensor:
-        """
-        Internal solve implementation for torch.Tensor input.
-        
-        Separated from solve_distributed to allow DTensor wrapper to call it.
-        """
-        N = self._shape[0]
-        dtype = b_global.dtype
-        device = self._device
-        
-        # Initialize x = 0
-        x_global = torch.zeros(N, dtype=dtype, device=device)
-        
-        # Scatter b to local
-        b_local = self.scatter_local(b_global)
-        
-        # Distributed CG
-        if method == 'cg':
-            x_global = self._distributed_cg(x_global, b_global, atol, maxiter, verbose)
-        else:
-            raise ValueError(f"Unknown method: {method}. Supported: 'cg'")
-        
-        return x_global
     
-    def _distributed_cg(
-        self,
-        x: torch.Tensor,
-        b: torch.Tensor,
-        atol: float,
-        maxiter: int,
-        verbose: bool
-    ) -> torch.Tensor:
-        """
-        Distributed Conjugate Gradient.
-        
-        All partitions work together, with global reductions for inner products.
-        """
-        N = self._shape[0]
-        dtype = b.dtype
-        device = self._device
-        
-        # r = b - A @ x
-        Ax = self @ x  # Uses __matmul__ which does scatter -> matvec_all -> gather
-        r = b - Ax
-        
-        # p = r
-        p = r.clone()
-        
-        # rs_old = r^T @ r (global)
-        rs_old = torch.dot(r, r)
-        
-        for i in range(maxiter):
-            # Ap = A @ p
-            Ap = self @ p
-            
-            # pAp = p^T @ A @ p (global)
-            pAp = torch.dot(p, Ap)
-            
-            if pAp.abs() < 1e-30:
-                if verbose:
-                    print(f"  Distributed CG: pAp too small at iter {i}")
-                break
-            
-            # alpha = rs_old / pAp
-            alpha = rs_old / pAp
-            
-            # x = x + alpha * p
-            x = x + alpha * p
-            
-            # r = r - alpha * Ap
-            r = r - alpha * Ap
-            
-            # rs_new = r^T @ r (global)
-            rs_new = torch.dot(r, r)
-            
-            residual = rs_new.sqrt()
-            
-            if verbose and i % 100 == 0:
-                print(f"  Distributed CG iter {i}: residual = {residual:.2e}")
-            
-            if residual < atol:
-                if verbose:
-                    print(f"  Distributed CG converged at iter {i}, residual = {residual:.2e}")
-                break
-            
-            if rs_old.abs() < 1e-30:
-                break
-            
-            # beta = rs_new / rs_old
-            beta = rs_new / rs_old
-            
-            # p = r + beta * p
-            p = r + beta * p
-            
-            rs_old = rs_new
-        
-        return x
     
-    def gather_global(self, x_list: List[torch.Tensor]) -> torch.Tensor:
-        """
-        Gather local vectors to global vector.
-        
-        Parameters
-        ----------
-        x_list : List[torch.Tensor]
-            List of local vectors, one per partition
-            
-        Returns
-        -------
-        torch.Tensor
-            Global vector
-        """
-        x_global = torch.zeros(self._shape[0], dtype=x_list[0].dtype, device=self._device)
-        
-        for i in range(self._num_partitions):
-            partition = self._partitions[i].partition
-            owned_nodes = partition.owned_nodes
-            num_owned = len(owned_nodes)
-            x_global[owned_nodes] = x_list[i][:num_owned].to(self._device)
-        
-        return x_global
     
-    def scatter_local(self, x_global: torch.Tensor) -> List[torch.Tensor]:
-        """
-        Scatter global vector to local vectors.
-        
-        Parameters
-        ----------
-        x_global : torch.Tensor
-            Global vector
-            
-        Returns
-        -------
-        List[torch.Tensor]
-            List of local vectors (with halo values filled)
-        """
-        x_list = []
-        
-        for i in range(self._num_partitions):
-            partition = self._partitions[i].partition
-            local_nodes = partition.local_nodes
-            x_local = x_global[local_nodes].to(self._partitions[i].device)
-            x_list.append(x_local)
-        
-        return x_list
     
-    def to_sparse_tensor(self) -> "SparseTensor":
-        """
-        Gather all partitions into a single SparseTensor.
-        
-        This creates a global SparseTensor from the distributed data.
-        Useful for verification, debugging, or when you need to perform
-        operations that require the full matrix.
-        
-        Returns
-        -------
-        SparseTensor
-            Global sparse tensor containing all data
-            
-        Example
-        -------
-        >>> D = DSparseTensor(val, row, col, shape, num_partitions=4)
-        >>> A = D.to_sparse_tensor()  # Gather to global SparseTensor
-        >>> x = A.solve(b)  # Solve on the full matrix
-        """
-        from .sparse_tensor import SparseTensor
-        
-        # Return the original global data as SparseTensor
-        return SparseTensor(
-            self._values.to(self._device),
-            self._row_indices.to(self._device),
-            self._col_indices.to(self._device),
-            self._shape
-        )
-    
-    # Alias for convenience
-    gather = to_sparse_tensor
     
     # =========================================================================
     # DTensor Utilities
     # =========================================================================
     
-    def scatter_to_dtensor(
-        self,
-        x_global: torch.Tensor,
-        device_mesh: "DeviceMesh",
-        shard_dim: int = 0
-    ) -> "DTensor":
-        """
-        Convert a global tensor to a sharded DTensor aligned with matrix partitioning.
-        
-        This creates a DTensor where each rank holds the portion of the vector
-        corresponding to its owned nodes in the matrix partitioning.
-        
-        Parameters
-        ----------
-        x_global : torch.Tensor
-            Global vector of shape [N]
-        device_mesh : DeviceMesh
-            PyTorch DeviceMesh for distribution
-        shard_dim : int
-            Dimension to shard (default 0 for vectors)
-            
-        Returns
-        -------
-        DTensor
-            Sharded DTensor with local data for this rank
-            
-        Example
-        -------
-        >>> mesh = init_device_mesh("cuda", (4,))
-        >>> x_global = torch.randn(N)
-        >>> x_dt = D.scatter_to_dtensor(x_global, mesh)
-        """
-        if not DTENSOR_AVAILABLE:
-            raise RuntimeError("DTensor support requires PyTorch 2.0+")
-        
-        # Create sharded DTensor
-        # Each rank gets the portion corresponding to its partition
-        placements = [Shard(shard_dim)]
-        return DTensor.from_local(
-            x_global,  # Will be redistributed by DTensor
-            device_mesh,
-            placements
-        )
     
-    def gather_from_dtensor(
-        self,
-        x_dtensor: "DTensor"
-    ) -> torch.Tensor:
-        """
-        Convert a DTensor to a global tensor.
-        
-        Parameters
-        ----------
-        x_dtensor : DTensor
-            Distributed tensor
-            
-        Returns
-        -------
-        torch.Tensor
-            Full global tensor
-            
-        Example
-        -------
-        >>> x_global = D.gather_from_dtensor(x_dt)
-        """
-        if not DTENSOR_AVAILABLE:
-            raise RuntimeError("DTensor support requires PyTorch 2.0+")
-        
-        return x_dtensor.full_tensor()
     
-    def to_dtensor(
-        self,
-        x: torch.Tensor,
-        device_mesh: "DeviceMesh",
-        replicate: bool = True
-    ) -> "DTensor":
-        """
-        Convert a tensor to DTensor with specified placement.
-        
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input tensor
-        device_mesh : DeviceMesh
-            PyTorch DeviceMesh
-        replicate : bool
-            If True, create a replicated DTensor (same data on all ranks).
-            If False, create a sharded DTensor (data is split).
-            
-        Returns
-        -------
-        DTensor
-            Resulting DTensor
-            
-        Example
-        -------
-        >>> mesh = init_device_mesh("cuda", (4,))
-        >>> x_dt = D.to_dtensor(x, mesh, replicate=True)
-        """
-        if not DTENSOR_AVAILABLE:
-            raise RuntimeError("DTensor support requires PyTorch 2.0+")
-        
-        if replicate:
-            placements = [Replicate()]
-        else:
-            placements = [Shard(0)]
-        
-        return DTensor.from_local(x, device_mesh, placements)
     
-    @property
-    def supports_dtensor(self) -> bool:
-        """Check if DTensor operations are available."""
-        return DTENSOR_AVAILABLE
     
     # =========================================================================
     # Distributed Algorithms (True Distributed, No Gather)
     # =========================================================================
     
-    def _global_matvec_with_grad(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Global matrix-vector multiplication that preserves gradients.
-        
-        Uses the original COO data to maintain gradient flow.
-        For true distributed MPI execution, use _distributed_matvec instead.
-        
-        This method is used for gradient-enabled operations like eigsh, solve.
-        """
-        # Use original global COO data for gradient support
-        # y[i] = sum_j A[i,j] * x[j]
-        # y = scatter_add(values * x[col], row)
-        y = torch.zeros(self._shape[0], dtype=x.dtype, device=x.device)
-        vals = self._values.to(x.device)
-        rows = self._row_indices.to(x.device)
-        cols = self._col_indices.to(x.device)
-        
-        # y[row] += values * x[col]
-        contributions = vals * x[cols]
-        y = y.scatter_add(0, rows, contributions)
-        return y
     
-    def _distributed_matvec(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Distributed matrix-vector multiplication with gradient support.
-        
-        For single-node simulation with gradient support, uses _global_matvec_with_grad.
-        For true distributed MPI execution, uses scatter -> local matvec -> gather.
-        """
-        # Check if we need gradients
-        if self._values.requires_grad or x.requires_grad:
-            # Use global matvec that preserves gradients
-            return self._global_matvec_with_grad(x)
-        
-        # Otherwise use true distributed pattern
-        x_local = self.scatter_local(x)
-        y_local = self.matvec_all(x_local)
-        return self.gather_global(y_local)
     
-    def _distributed_lobpcg(
-        self,
-        k: int,
-        largest: bool = True,
-        maxiter: int = 1000,
-        tol: float = 1e-8
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Distributed LOBPCG eigenvalue solver.
-        
-        Uses distributed matvec with global QR and Rayleigh-Ritz.
-        No data gather required - only needs global reductions.
-        """
-        N = self._shape[0]
-        dtype = self._values.dtype
-        device = self._device
-        
-        # Initialize random subspace (global vectors)
-        m = min(2 * k, N)
-        X = torch.randn(N, m, dtype=dtype, device=device)
-        
-        # Global QR decomposition
-        X, _ = torch.linalg.qr(X)
-        
-        eigenvalues_prev = None
-        
-        for iteration in range(maxiter):
-            # Distributed matvec: AX = D @ X (column by column or batched)
-            AX = torch.zeros_like(X)
-            for j in range(X.shape[1]):
-                AX[:, j] = self._distributed_matvec(X[:, j])
-            
-            # Rayleigh-Ritz: project onto subspace
-            # H = X^T @ AX (global reduction)
-            H = X.T @ AX
-            
-            # Solve small eigenvalue problem
-            eigenvalues, eigenvectors = torch.linalg.eigh(H)
-            
-            # Sort eigenvalues
-            if largest:
-                idx = eigenvalues.argsort(descending=True)
-            else:
-                idx = eigenvalues.argsort()
-            
-            eigenvalues = eigenvalues[idx]
-            eigenvectors = eigenvectors[:, idx]
-            
-            # Update X = X @ V
-            X = X @ eigenvectors
-            
-            # Check convergence
-            if eigenvalues_prev is not None:
-                diff = (eigenvalues[:k] - eigenvalues_prev[:k]).abs()
-                if (diff < tol * eigenvalues[:k].abs().clamp(min=1e-10)).all():
-                    break
-            eigenvalues_prev = eigenvalues.clone()
-            
-            # Expand subspace with residual
-            if iteration < maxiter - 1:
-                # Compute residual: R = AX - X @ diag(eigenvalues)
-                AX_new = torch.zeros_like(X)
-                for j in range(X.shape[1]):
-                    AX_new[:, j] = self._distributed_matvec(X[:, j])
-                
-                residual = AX_new - X * eigenvalues.unsqueeze(0)
-                
-                # Orthogonalize and expand
-                combined = torch.cat([X[:, :k], residual[:, :k]], dim=1)
-                X, _ = torch.linalg.qr(combined)
-                
-                # Pad if needed
-                if X.size(1) < m:
-                    extra = torch.randn(N, m - X.size(1), dtype=dtype, device=device)
-                    X = torch.cat([X, extra], dim=1)
-                    X, _ = torch.linalg.qr(X)
-        
-        return eigenvalues[:k], X[:, :k]
     
-    def eigsh(
-        self,
-        k: int = 6,
-        which: str = "LM",
-        sigma: Optional[float] = None,
-        return_eigenvectors: bool = True,
-        maxiter: int = 1000,
-        tol: float = 1e-8
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Compute k eigenvalues for symmetric matrices using distributed LOBPCG.
-        
-        This is a TRUE distributed algorithm - no data gather required.
-        Uses distributed matvec with global QR decomposition.
-        
-        Parameters
-        ----------
-        k : int, optional
-            Number of eigenvalues to compute. Default: 6.
-        which : {"LM", "SM", "LA", "SA"}, optional
-            Which eigenvalues to find:
-            - "LM"/"LA": Largest (default)
-            - "SM"/"SA": Smallest
-        sigma : float, optional
-            Find eigenvalues near sigma (not yet supported).
-        return_eigenvectors : bool, optional
-            Whether to return eigenvectors. Default: True.
-        maxiter : int, optional
-            Maximum LOBPCG iterations. Default: 1000.
-        tol : float, optional
-            Convergence tolerance. Default: 1e-8.
-            
-        Returns
-        -------
-        eigenvalues : torch.Tensor
-            Shape [k].
-        eigenvectors : torch.Tensor or None
-            Shape [N, k] if return_eigenvectors is True.
-        
-        Notes
-        -----
-        **Distributed Algorithm:**
-        
-        - Uses distributed LOBPCG (Locally Optimal Block PCG)
-        - Only requires distributed matvec + global reductions
-        - Memory: O(N * k) per node for eigenvectors
-        - Communication: O(k^2) per iteration for Rayleigh-Ritz
-        
-        **Gradient Support:**
-        
-        - Gradients flow through the distributed matvec operations
-        - O(iterations) graph nodes (not O(1) like adjoint)
-        """
-        if sigma is not None:
-            warnings.warn("sigma (shift-invert) not yet supported for distributed eigsh. Ignoring.")
-        
-        largest = which in ('LM', 'LA')
-        eigenvalues, eigenvectors = self._distributed_lobpcg(k, largest=largest, maxiter=maxiter, tol=tol)
-        
-        if return_eigenvectors:
-            return eigenvalues, eigenvectors
-        return eigenvalues, None
     
-    def eigs(
-        self,
-        k: int = 6,
-        which: str = "LM",
-        sigma: Optional[float] = None,
-        return_eigenvectors: bool = True,
-        maxiter: int = 1000,
-        tol: float = 1e-8
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Compute k eigenvalues using distributed LOBPCG.
-        
-        For symmetric matrices, equivalent to eigsh().
-        For non-symmetric, currently falls back to eigsh() (symmetric assumption).
-        
-        Parameters
-        ----------
-        k : int, optional
-            Number of eigenvalues to compute. Default: 6.
-        which : str, optional
-            Which eigenvalues to find.
-        sigma : float, optional
-            Find eigenvalues near sigma.
-        return_eigenvectors : bool, optional
-            Whether to return eigenvectors. Default: True.
-        maxiter : int, optional
-            Maximum iterations. Default: 1000.
-        tol : float, optional
-            Convergence tolerance. Default: 1e-8.
-            
-        Returns
-        -------
-        eigenvalues : torch.Tensor
-            Shape [k].
-        eigenvectors : torch.Tensor or None
-            Shape [N, k] if return_eigenvectors is True.
-        """
-        # For now, use eigsh (assumes symmetric)
-        # TODO: Implement Arnoldi for non-symmetric
-        return self.eigsh(k=k, which=which, sigma=sigma, 
-                         return_eigenvectors=return_eigenvectors,
-                         maxiter=maxiter, tol=tol)
     
-    def svd(
-        self, 
-        k: int = 6,
-        maxiter: int = 1000,
-        tol: float = 1e-8
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Compute truncated SVD using distributed power iteration.
-        
-        Uses A^T @ A for eigenvalues, then recovers U from A @ V.
-        
-        Parameters
-        ----------
-        k : int, optional
-            Number of singular values to compute. Default: 6.
-        maxiter : int, optional
-            Maximum iterations. Default: 1000.
-        tol : float, optional
-            Convergence tolerance. Default: 1e-8.
-            
-        Returns
-        -------
-        U : torch.Tensor
-            Left singular vectors. Shape [M, k].
-        S : torch.Tensor
-            Singular values. Shape [k].
-        Vt : torch.Tensor
-            Right singular vectors. Shape [k, N].
-        
-        Notes
-        -----
-        **Distributed Algorithm:**
-        
-        - Computes eigenvalues of A^T @ A using distributed LOBPCG
-        - No data gather required
-        """
-        M, N = self._shape
-        dtype = self._values.dtype
-        device = self._device
-        
-        # For SVD, we need A^T @ A which requires transpose
-        # Create A^T as a DSparseTensor
-        A_T = self.T()
-        
-        # Power iteration for A^T @ A
-        # Initialize random vectors
-        V = torch.randn(N, k, dtype=dtype, device=device)
-        V, _ = torch.linalg.qr(V)
-        
-        for iteration in range(maxiter):
-            # AV = A @ V
-            AV = torch.zeros(M, k, dtype=dtype, device=device)
-            for j in range(k):
-                AV[:, j] = self._distributed_matvec(V[:, j])
-            
-            # AtAV = A^T @ (A @ V)
-            AtAV = torch.zeros(N, k, dtype=dtype, device=device)
-            for j in range(k):
-                AtAV[:, j] = A_T._distributed_matvec(AV[:, j])
-            
-            # QR decomposition
-            V_new, R = torch.linalg.qr(AtAV)
-            
-            # Check convergence
-            diff = (V_new - V).norm()
-            V = V_new
-            
-            if diff < tol:
-                break
-        
-        # Compute singular values and U
-        # AV = A @ V, then normalize to get U
-        AV = torch.zeros(M, k, dtype=dtype, device=device)
-        for j in range(k):
-            AV[:, j] = self._distributed_matvec(V[:, j])
-        
-        # S = ||AV[:, j]||
-        S = AV.norm(dim=0)
-        
-        # U = AV / S
-        U = AV / S.unsqueeze(0).clamp(min=1e-10)
-        
-        return U, S, V.T
     
-    def norm(self, ord: Literal['fro', 1, 2] = 'fro') -> torch.Tensor:
-        """
-        Compute matrix norm (distributed).
-        
-        For Frobenius norm, computed locally and aggregated.
-        For spectral norm, uses distributed SVD.
-        
-        Parameters
-        ----------
-        ord : {'fro', 1, 2}
-            Type of norm:
-            - 'fro': Frobenius norm (distributed sum)
-            - 1: Maximum column sum
-            - 2: Spectral norm (largest singular value via distributed SVD)
-            
-        Returns
-        -------
-        torch.Tensor
-            Scalar tensor containing the norm value.
-        """
-        if ord == 'fro':
-            # Frobenius norm: sqrt(sum(values^2))
-            # This is truly distributed - each partition has its own values
-            return torch.sqrt((self._values ** 2).sum())
-        elif ord == 2:
-            # Spectral norm: largest singular value
-            _, S, _ = self.svd(k=1, maxiter=100)
-            return S[0]
-        elif ord == 1:
-            # Maximum column sum - need to gather
-            warnings.warn("1-norm requires data gather. Using to_sparse_tensor().")
-            return self.to_sparse_tensor().norm(ord=1)
-        else:
-            raise ValueError(f"Unknown norm order: {ord}")
     
-    def condition_number(self, ord: int = 2) -> torch.Tensor:
-        """
-        Estimate condition number using distributed SVD.
-        
-        Parameters
-        ----------
-        ord : int, optional
-            Norm order. Default: 2 (spectral).
-            
-        Returns
-        -------
-        torch.Tensor
-            Condition number estimate (σ_max / σ_min).
-        """
-        if ord == 2:
-            # Need largest and smallest singular values
-            # Compute k=6 singular values
-            _, S, _ = self.svd(k=6, maxiter=200)
-            return S[0] / S[-1].clamp(min=1e-10)
-        else:
-            warnings.warn(f"ord={ord} requires data gather. Using to_sparse_tensor().")
-            return self.to_sparse_tensor().condition_number(ord=ord)
     
-    def det(self) -> torch.Tensor:
-        """
-        Compute determinant of the distributed sparse matrix.
-        
-        WARNING: This operation requires gathering the full matrix to compute
-        the determinant, as determinant is a global property that cannot be
-        computed in a truly distributed manner without full matrix information.
-        
-        The determinant is computed by:
-        1. Gathering all partitions into a global SparseTensor
-        2. Computing the determinant using LU decomposition (CPU) or 
-           torch.linalg.det (CUDA)
-        
-        Returns
-        -------
-        torch.Tensor
-            Determinant value (scalar tensor).
-            
-        Raises
-        ------
-        ValueError
-            If matrix is not square
-            
-        Notes
-        -----
-        - Only square matrices have determinants
-        - This method gathers all data, so use with caution for large matrices
-        - Supports gradient computation via autograd
-        - For very large matrices, consider using log-determinant or other
-          approximations instead
-        
-        Examples
-        --------
-        >>> import torch
-        >>> from torch_sla import DSparseTensor
-        >>> 
-        >>> # Create distributed sparse matrix
-        >>> val = torch.tensor([4.0, -1.0, -1.0, 4.0, -1.0, -1.0, 4.0])
-        >>> row = torch.tensor([0, 0, 1, 1, 1, 2, 2])
-        >>> col = torch.tensor([0, 1, 0, 1, 2, 1, 2])
-        >>> D = DSparseTensor(val, row, col, (3, 3), num_partitions=2)
-        >>> 
-        >>> # Compute determinant (gathers to single node)
-        >>> det = D.det()
-        >>> print(det)
-        >>>
-        >>> # With gradient support
-        >>> val = val.requires_grad_(True)
-        >>> D = DSparseTensor(val, row, col, (3, 3), num_partitions=2)
-        >>> det = D.det()
-        >>> det.backward()
-        >>> print(val.grad)  # Gradient w.r.t. matrix values
-        """
-        M, N = self._shape
-        
-        if M != N:
-            raise ValueError(f"Matrix must be square for determinant, got shape ({M}, {N})")
-        
-        # Warn user about data gather
-        warnings.warn(
-            "det() requires gathering all partitions to compute the determinant. "
-            "This is a global operation that cannot be computed in a truly distributed manner. "
-            "For large matrices, this may be memory-intensive."
-        )
-        
-        # Gather to global SparseTensor and compute determinant
-        A_global = self.to_sparse_tensor()
-        return A_global.det()
     
-    def T(self) -> "DSparseTensor":
-        """
-        Transpose the distributed sparse tensor.
-        
-        Returns a new DSparseTensor with swapped row/column indices.
-        
-        Returns
-        -------
-        DSparseTensor
-            Transposed matrix.
-        """
-        # Swap row and column indices
-        return DSparseTensor(
-            self._values,
-            self._col_indices,  # swap
-            self._row_indices,  # swap
-            (self._shape[1], self._shape[0]),
-            num_partitions=self._num_partitions,
-            coords=self._coords,
-            partition_method=self._partition_method,
-            device=self._device,
-            verbose=False
-        )
     
     # =========================================================================
     # Methods that require data gather (with warnings)
     # =========================================================================
     
-    def to_dense(self) -> torch.Tensor:
-        """
-        Convert to dense tensor.
-        
-        WARNING: This gathers all data to a single node.
-        Only use for small matrices or debugging.
-        
-        Returns
-        -------
-        torch.Tensor
-            Dense matrix of shape (M, N).
-        """
-        warnings.warn("to_dense() gathers all data to a single node. "
-                     "Only use for debugging or small matrices.")
-        return self.to_sparse_tensor().to_dense()
     
-    def is_symmetric(self, atol: float = 1e-8, rtol: float = 1e-5) -> torch.Tensor:
-        """
-        Check if matrix is symmetric.
-        
-        Can be done distributedly by comparing values with transpose.
-        
-        Parameters
-        ----------
-        atol : float
-            Absolute tolerance for symmetry check.
-        rtol : float
-            Relative tolerance for symmetry check.
-            
-        Returns
-        -------
-        torch.Tensor
-            Boolean scalar tensor.
-        """
-        # This can be done without gather by checking local values
-        # For now, use simple implementation
-        return self.to_sparse_tensor().is_symmetric(atol=atol, rtol=rtol)
     
-    def is_positive_definite(self) -> torch.Tensor:
-        """
-        Check if matrix is positive definite.
-        
-        Uses distributed eigenvalue computation.
-        
-        Returns
-        -------
-        torch.Tensor
-            Boolean scalar tensor.
-        """
-        # Check smallest eigenvalue > 0
-        eigenvalues, _ = self.eigsh(k=1, which='SA', return_eigenvectors=False, maxiter=200)
-        return eigenvalues[0] > 0
     
-    def lu(self):
-        """
-        Compute LU decomposition.
-        
-        WARNING: LU is inherently not distributed-friendly.
-        This gathers data to a single node.
-        
-        For distributed solves, use solve_distributed() with iterative methods.
-        
-        Returns
-        -------
-        LUFactorization
-            Factorization object with solve() method.
-        """
-        warnings.warn("LU decomposition is not distributed. "
-                     "Use solve_distributed() for distributed solves.")
-        return self.to_sparse_tensor().lu()
     
-    def spy(self, **kwargs):
-        """
-        Visualize sparsity pattern.
-        
-        Gathers data for visualization.
-        
-        Parameters
-        ----------
-        **kwargs
-            Arguments passed to SparseTensor.spy().
-        """
-        return self.to_sparse_tensor().spy(**kwargs)
     
-    def nonlinear_solve(
-        self,
-        residual_fn,
-        u0: torch.Tensor,
-        *params,
-        method: str = 'newton',
-        tol: float = 1e-6,
-        atol: float = 1e-10,
-        max_iter: int = 50,
-        line_search: bool = True,
-        verbose: bool = False,
-    ) -> torch.Tensor:
-        """
-        Solve nonlinear equation F(u, D, *params) = 0 using distributed Newton-Krylov.
-        
-        Uses Jacobian-free Newton-Krylov with distributed CG for linear solves.
-        
-        Parameters
-        ----------
-        residual_fn : callable
-            Function F(u, D, *params) -> residual tensor.
-            D is this DSparseTensor.
-        u0 : torch.Tensor
-            Initial guess (global vector).
-        *params : torch.Tensor
-            Additional parameters.
-        method : str
-            'newton': Newton-Krylov with distributed CG
-            'picard': Fixed-point iteration
-        tol : float
-            Relative tolerance.
-        atol : float
-            Absolute tolerance.
-        max_iter : int
-            Maximum outer iterations.
-        line_search : bool
-            Use Armijo line search.
-        verbose : bool
-            Print convergence info.
-            
-        Returns
-        -------
-        torch.Tensor
-            Solution u such that F(u, D, *params) ≈ 0.
-        
-        Notes
-        -----
-        **Distributed Algorithm:**
-        
-        - Uses Jacobian-free Newton-Krylov (JFNK)
-        - Linear solves use distributed CG
-        - Jacobian-vector products computed via finite differences
-        """
-        u = u0.clone()
-        N = u.shape[0]
-        dtype = u.dtype
-        device = u.device
-        
-        for outer_iter in range(max_iter):
-            # Compute residual
-            F = residual_fn(u, self, *params)
-            F_norm = F.norm()
-            
-            if verbose:
-                print(f"  Newton iter {outer_iter}: ||F|| = {F_norm:.2e}")
-            
-            if F_norm < atol:
-                if verbose:
-                    print(f"  Converged (atol) at iteration {outer_iter}")
-                break
-            
-            if outer_iter > 0 and F_norm < tol * F_norm_init:
-                if verbose:
-                    print(f"  Converged (rtol) at iteration {outer_iter}")
-                break
-            
-            if outer_iter == 0:
-                F_norm_init = F_norm
-            
-            if method == 'picard':
-                # Simple fixed-point: u = u - F (assuming F = Au - b form)
-                u = u - F
-            else:
-                # Newton-Krylov: solve J @ du = -F using CG with Jacobian-vector products
-                # J @ v ≈ (F(u + eps*v) - F(u)) / eps
-                eps = 1e-7 * max(u.norm(), 1.0)
-                
-                def matvec(v):
-                    """Jacobian-vector product via finite differences."""
-                    F_plus = residual_fn(u + eps * v, self, *params)
-                    return (F_plus - F) / eps
-                
-                # Distributed CG for J @ du = -F
-                du = torch.zeros_like(u)
-                r = -F - matvec(du)  # r = -F - J @ 0 = -F
-                p = r.clone()
-                rs_old = torch.dot(r, r)
-                
-                for cg_iter in range(min(100, N)):
-                    Jp = matvec(p)
-                    pJp = torch.dot(p, Jp)
-                    
-                    if pJp.abs() < 1e-30:
-                        break
-                    
-                    alpha = rs_old / pJp
-                    du = du + alpha * p
-                    r = r - alpha * Jp
-                    rs_new = torch.dot(r, r)
-                    
-                    if rs_new.sqrt() < 1e-10:
-                        break
-                    
-                    beta = rs_new / rs_old
-                    p = r + beta * p
-                    rs_old = rs_new
-                
-                # Line search
-                if line_search:
-                    alpha = 1.0
-                    F_new_norm = residual_fn(u + alpha * du, self, *params).norm()
-                    while F_new_norm > F_norm and alpha > 1e-8:
-                        alpha *= 0.5
-                        F_new_norm = residual_fn(u + alpha * du, self, *params).norm()
-                    u = u + alpha * du
-                else:
-                    u = u + du
-        
-        return u
     
     # =========================================================================
     # Matrix Operations
@@ -2441,21 +815,17 @@ class DSparseTensor:
         - Replicated DTensor: extracts local tensor and computes as global
         - Sharded DTensor: redistributes to Replicate, computes, then reshards
         """
-        # DTensor-mirror fast path: when this DSparseTensor carries a
-        # real distributed spec (built via ``from_local`` on a multi-
-        # rank job), the matvec stays entirely in the ``Shard(0)``
-        # space -- halo exchange in, local matvec, wrap result as
-        # DTensor with the same mesh + Shard(0) placement. No gather.
+        # The matvec stays entirely in the ``Shard(0)`` space:
+        # halo exchange in, local matvec, wrap result as
+        # ``DTensor[Shard(0)]`` with the same mesh. No gather.
         if self._spec is not None and isinstance(self._spec.placement,
                                                   SparseShard):
             return self._matmul_spec(x)
 
-        # Check for DTensor input (legacy "replicate-and-densify" path
-        # for the single-process simulator).
-        if _is_dtensor(x):
-            return self._matmul_dtensor(x)
-
-        return self._distributed_matvec(x)
+        raise RuntimeError(
+            "DSparseTensor.__matmul__ requires a SparseShard placement; "
+            "build via DSparseTensor.partition(A, mesh) or "
+            "DSparseTensor.from_sparse_local(...).")
 
     def _matmul_spec(self, x: Any) -> Any:
         """DTensor-mirror matvec dispatcher.
@@ -2472,11 +842,10 @@ class DSparseTensor:
         Other axis values raise -- block-axis sharding isn't covered
         by SpMV in the same code path.
         """
-        # Spec mode requires *some* local backing -- either the legacy
-        # DSparseMatrix or the SparseTensor backing.
-        assert (self._local_matrix is not None
-                or self._local_tensor is not None), \
-            "spec-mode requires _local_matrix or _local_tensor"
+        if self._local_tensor is None:
+            raise RuntimeError(
+                "DSparseTensor matvec requires a SparseTensor backing. "
+                "Build via .partition(...) / .from_sparse_local(...).")
 
         placement = self._spec.placement
         if not isinstance(placement, SparseShard):
@@ -2486,40 +855,13 @@ class DSparseTensor:
         axis = placement.axis
 
         if axis == 0:
-            return self._matmul_row_shard(x)
+            return self._matmul_row_shard_via_sparse_tensor(x)
         if axis == 1:
             return self._matmul_col_shard(x)
         raise NotImplementedError(
             f"SparseShard(axis={axis}) matvec dispatch not implemented; "
             "axis must be 0 (row) or 1 (col) for SpMV.")
 
-    def _matmul_row_shard(self, x: Any) -> Any:
-        """Row-partitioned SpMV (``SparseShard(axis=0)``): halo exchange
-        + local SpMV → ``DTensor[Shard(0)]``.
-
-        Dispatches on which backing is set:
-
-        * ``_local_tensor`` (plain :class:`SparseTensor`, SparseTensor-backed path)
-          → ``_matmul_row_shard_via_sparse_tensor``
-        * ``_local_matrix`` (legacy :class:`DSparseMatrix`) → original
-          path.
-        """
-        if self._local_tensor is not None:
-            return self._matmul_row_shard_via_sparse_tensor(x)
-
-        local_matrix = self._local_matrix
-        if _is_dtensor(x):
-            x_local = x.to_local()
-        else:
-            x_local = x
-        x_padded = self._pad_owned_to_local(x_local)
-        y_full = local_matrix.matvec(x_padded, exchange_halo=True)
-        y_owned = y_full[:local_matrix.num_owned]
-        if _is_dtensor(x):
-            from torch.distributed.tensor import DTensor as _DTensor, Shard
-            return _DTensor.from_local(
-                y_owned, self._spec.mesh, [Shard(0)])
-        return y_owned
 
     def _matmul_row_shard_via_sparse_tensor(self, x: Any) -> Any:
         """SparseTensor-backed matvec: backed by ``_local_tensor`` (SparseTensor) +
@@ -2649,24 +991,6 @@ class DSparseTensor:
             "DSparseMatrix is row-partitioned -- use SparseShard(axis=0)."
         )
 
-    def _pad_owned_to_local(self, x: torch.Tensor) -> torch.Tensor:
-        """Convert a Shard(0)-sized ``[num_owned]`` tensor into a full
-        ``[num_local]`` tensor with halo entries zero-padded (they get
-        overwritten by the next ``halo_exchange``). Pass-through when
-        ``x`` is already num_local-sized."""
-        local_matrix = self._local_matrix
-        nl = local_matrix.num_local
-        no = local_matrix.num_owned
-        if x.shape[0] == nl:
-            return x
-        if x.shape[0] == no:
-            padded = torch.zeros(nl, dtype=x.dtype, device=x.device)
-            padded[:no] = x
-            return padded
-        raise ValueError(
-            f"x has shape[0]={x.shape[0]}, expected num_owned={no} or "
-            f"num_local={nl}."
-        )
 
     # ====================================================================== #
     # Shard(0)-space distributed CG.
@@ -2809,48 +1133,33 @@ class DSparseTensor:
         return self._shard_dot(u, u).sqrt()
 
     def _num_owned(self) -> int:
-        """Owned-row count regardless of which local backing is set."""
-        if self._local_tensor is not None:
-            return int(self._spec.placement.partition.owned_nodes.numel())
-        return int(self._local_matrix.num_owned)
+        """Owned-row count for the Shard(0) layout."""
+        return int(self._spec.placement.partition.owned_nodes.numel())
 
     def _shard_matvec(self, x_owned: torch.Tensor) -> torch.Tensor:
-        """Apply ``A`` to a Shard(0) vector.
-
-        Routes through whichever backing is set on the spec'd
-        DSparseTensor:
-
-        * ``_local_tensor`` (plain :class:`SparseTensor`)
-          → pad → ``_halo_exchange_via_spec`` →
-          ``_local_tensor @ x`` → slice.
-        * ``_local_matrix`` (legacy :class:`DSparseMatrix`)
-          → ``local_matrix.matvec(..., exchange_halo=True)`` → slice.
+        """Apply ``A`` to a Shard(0) vector: pad owned→local, halo
+        exchange, local SpMV via ``_local_tensor @ x``, slice back to
+        the owned-row range.
 
         Used by every Shard(0)-space Krylov method (CG / BiCGStab /
         GMRES / FGMRES / MINRES) and the polynomial preconditioner.
         """
-        if self._local_tensor is not None:
-            partition = self._spec.placement.partition
-            num_owned = int(partition.owned_nodes.numel())
-            num_local = int(partition.local_to_global.numel())
-            if x_owned.shape[0] == num_owned:
-                x_padded = torch.zeros(num_local, dtype=x_owned.dtype,
-                                        device=x_owned.device)
-                x_padded[:num_owned] = x_owned
-            elif x_owned.shape[0] == num_local:
-                x_padded = x_owned
-            else:
-                raise ValueError(
-                    f"x shape[0]={x_owned.shape[0]}, expected "
-                    f"num_owned={num_owned} or num_local={num_local}")
-            self._halo_exchange_via_spec(x_padded, partition)
-            y_full = self._local_tensor @ x_padded
-            return y_full[:num_owned]
-
-        local_matrix = self._local_matrix
-        x_padded = self._pad_owned_to_local(x_owned)
-        y_full = local_matrix.matvec(x_padded, exchange_halo=True)
-        return y_full[:local_matrix.num_owned]
+        partition = self._spec.placement.partition
+        num_owned = int(partition.owned_nodes.numel())
+        num_local = int(partition.local_to_global.numel())
+        if x_owned.shape[0] == num_owned:
+            x_padded = torch.zeros(num_local, dtype=x_owned.dtype,
+                                    device=x_owned.device)
+            x_padded[:num_owned] = x_owned
+        elif x_owned.shape[0] == num_local:
+            x_padded = x_owned
+        else:
+            raise ValueError(
+                f"x shape[0]={x_owned.shape[0]}, expected "
+                f"num_owned={num_owned} or num_local={num_local}")
+        self._halo_exchange_via_spec(x_padded, partition)
+        y_full = self._local_tensor @ x_padded
+        return y_full[:num_owned]
 
     # ------------------------------------------------------------------ #
     # The preconditioner factory + four Krylov methods (CG / BiCGStab /
@@ -2859,78 +1168,8 @@ class DSparseTensor:
     # above dispatches to them.
     # ------------------------------------------------------------------ #
 
-    def _matmul_dtensor(self, x: "DTensor") -> "DTensor":
-        """
-        Matrix-vector multiplication with DTensor input.
-        
-        Handles DTensor layout conversion and result wrapping.
-        
-        Parameters
-        ----------
-        x : DTensor
-            Distributed tensor input
-            
-        Returns
-        -------
-        DTensor
-            Result as DTensor with same placement as input
-        """
-        if not DTENSOR_AVAILABLE:
-            raise RuntimeError("DTensor support requires PyTorch 2.0+")
-        
-        # Get DTensor metadata
-        device_mesh = x.device_mesh
-        placements = x.placements
-        
-        # Store original placement for output
-        original_placements = tuple(placements)
-        
-        # Check if input is replicated (easiest case)
-        is_replicated = all(isinstance(p, Replicate) for p in placements)
-        
-        if is_replicated:
-            # Input is replicated on all ranks - just extract and compute
-            x_local = x.to_local()
-            y_local = self._distributed_matvec(x_local)
-            # Wrap result as replicated DTensor
-            return DTensor.from_local(y_local, device_mesh, [Replicate()])
-        
-        # Input is sharded - need to handle redistribution
-        # For sparse matvec, we typically need the full vector on each rank
-        # (because sparse matrix rows may reference any column)
-        
-        # Redistribute to replicated
-        replicate_placements = [Replicate() for _ in placements]
-        x_replicated = x.redistribute(device_mesh, replicate_placements)
-        x_full = x_replicated.to_local()
-        
-        # Compute matvec with full vector
-        y_full = self._distributed_matvec(x_full)
-        
-        # Wrap as replicated DTensor first
-        y_replicated = DTensor.from_local(y_full, device_mesh, [Replicate()])
-        
-        # Redistribute back to original placement if it was sharded
-        if not is_replicated:
-            # For output, we shard along the row dimension (dim 0)
-            # which corresponds to the matrix row partitioning
-            output_placements = []
-            for p in original_placements:
-                if isinstance(p, Shard):
-                    # Preserve shard dimension for output
-                    output_placements.append(Shard(p.dim))
-                else:
-                    output_placements.append(Replicate())
-            
-            return y_replicated.redistribute(device_mesh, output_placements)
-        
-        return y_replicated
-    
-    # =========================================================================
-    # Representation
-    # =========================================================================
-    
     def __repr__(self) -> str:
-        return (f"DSparseTensor(shape={self._shape}, num_partitions={self._num_partitions}, "
-                f"nnz={self.nnz}, device={self._device})")
+        return (f"DSparseTensor(shape={tuple(self._shape)}, "
+                f"num_partitions={self._num_partitions}, "
+                f"local_nnz={self.nnz}, device={self._device})")
 
