@@ -1199,9 +1199,17 @@ class DSparseTensor:
                 csr = csr64
             self._local_csr_cache = csr
 
-        # ``torch.mv(csr, x)`` is the fused CSR · 1-D dense kernel.
-        y_full = torch.mv(csr, x_padded)
-        return y_full[:num_owned]
+        # Pre-allocate output buffer; required for CUDA Graphs capture
+        # (no allocations allowed inside graph). torch.mv on sparse CSR
+        # supports ``out=`` and is slightly faster than the no-out
+        # variant on torch 2.1.
+        yf = getattr(self, "_y_full_cache", None)
+        if (yf is None or yf.shape[0] != num_local
+                or yf.dtype != dtype or yf.device != device):
+            yf = torch.empty(num_local, dtype=dtype, device=device)
+            self._y_full_cache = yf
+        torch.mv(csr, x_padded, out=yf)
+        return yf[:num_owned]
 
     # ------------------------------------------------------------------ #
     # The preconditioner factory + four Krylov methods (CG / BiCGStab /
