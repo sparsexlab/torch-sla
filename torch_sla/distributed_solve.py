@@ -58,21 +58,46 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
     device = D._local_tensor.values.device
 
     def _owned_block() -> torch.Tensor:
-        """Materialise the owned-by-owned dense block on first use."""
+        """Materialise the owned-by-owned dense block on first use.
+
+        Filter the local SparseTensor's COO entries down to (row < no
+        AND col < no) and scatter into a ``(no, no)`` dense tensor.
+        **O(no²) memory** -- only call for preconditioners that genuinely
+        need the full block (block-Jacobi LU, SSOR sweep). Jacobi /
+        jacobi_l1 / polynomial all bypass this and stay O(nnz).
+        """
         if getattr(D, "_owned_block_cache", None) is not None:
             return D._owned_block_cache
-        csr = D._local_tensor.to_dense()
-        block = csr[:no, :no].contiguous()
+        st = D._local_tensor
+        rows = st.row_indices
+        cols = st.col_indices
+        mask = (rows < no) & (cols < no)
+        block = torch.zeros((no, no), dtype=st.values.dtype, device=device)
+        block.index_put_((rows[mask], cols[mask]), st.values[mask],
+                          accumulate=True)
         D._owned_block_cache = block
         return block
 
     kind_l = str(kind).lower()
     if kind_l in ("jacobi", "jacobi_l1"):
-        block = _owned_block()
-        if kind_l == "jacobi_l1":
-            scale = block.abs().sum(dim=1).clamp_min(1e-30)
-        else:
-            scale = block.diagonal().clamp_min(1e-30)
+        # Diagonal / row-l1 preconditioners only need O(no) memory.
+        # Materialising the full ``(no, no)`` block (a la _owned_block)
+        # explodes at scale -- a 1M-owned partition needs 8 TB of dense.
+        st = D._local_tensor
+        rows = st.row_indices
+        cols = st.col_indices
+        vals = st.values
+        if kind_l == "jacobi":
+            # Sum diagonal entries (handles COO duplicates).
+            mask = (rows == cols) & (rows < no)
+            diag = torch.zeros(no, dtype=vals.dtype, device=device)
+            diag.scatter_add_(0, rows[mask], vals[mask])
+            scale = diag.clamp_min(1e-30)
+        else:  # jacobi_l1: sum |A_ij| over each owned row.
+            mask = rows < no
+            row_l1 = torch.zeros(no, dtype=vals.dtype, device=device)
+            row_l1.scatter_add_(0, rows[mask], vals[mask].abs())
+            scale = row_l1.clamp_min(1e-30)
         inv_scale = 1.0 / scale
         return lambda r: inv_scale * r
 

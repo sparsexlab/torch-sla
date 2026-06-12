@@ -155,8 +155,20 @@ def benchmark_solve(
 
     # Residual via public ops -- ``D @ x_dt`` is the distributed matvec.
     r_dt = b_dt - D @ x_dt
-    residual = float(
-        (r_dt.full_tensor().norm() / b_dt.full_tensor().norm()).item())
+    # torch 2.3+ has DTensor.full_tensor(); older releases fall back to
+    # redistribute → to_local().
+    if hasattr(r_dt, "full_tensor"):
+        r_full = r_dt.full_tensor()
+        b_full = b_dt.full_tensor()
+    else:
+        try:
+            from torch.distributed.tensor import Replicate
+        except ImportError:
+            from torch.distributed._tensor import Replicate
+        mesh = r_dt.device_mesh
+        r_full = r_dt.redistribute(mesh, [Replicate()]).to_local()
+        b_full = b_dt.redistribute(mesh, [Replicate()]).to_local()
+    residual = float((r_full.norm() / b_full.norm()).item())
 
     return min(times) * 1000, memory_mb, residual
 
