@@ -105,7 +105,6 @@ from .backends import (
 )
 
 from .distributed import (
-    DSparseMatrix,
     DSparseTensor,
     Partition,
     partition_graph_metis,
@@ -123,13 +122,7 @@ from .distributed import (
 from .io import (
     save_sparse,
     load_sparse,
-    load_sparse_as_partition,
-    save_distributed,
-    load_partition,
     load_metadata,
-    load_distributed_as_sparse,
-    save_dsparse,
-    load_dsparse,
     # Matrix Market format
     save_mtx,
     load_mtx,
@@ -179,7 +172,6 @@ __all__ = [
     "BackendType",
     "MethodType",
     # Distributed
-    "DSparseMatrix",
     "DSparseTensor",
     "Partition",
     "partition_graph_metis",
@@ -188,13 +180,7 @@ __all__ = [
     # I/O
     "save_sparse",
     "load_sparse",
-    "load_sparse_as_partition",
-    "save_distributed",
-    "load_partition",
     "load_metadata",
-    "load_distributed_as_sparse",
-    "save_dsparse",
-    "load_dsparse",
     # Matrix Market format
     "save_mtx",
     "load_mtx",

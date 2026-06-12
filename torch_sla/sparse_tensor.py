@@ -1239,7 +1239,6 @@ class SparseTensor:
         Notes
         -----
         - Use `D.to_sparse_tensor()` to gather back to a SparseTensor
-        - For distributed training, use `partition_for_rank()` instead
         """
         from .distributed import DSparseTensor
         
@@ -1272,13 +1271,8 @@ class SparseTensor:
         x vector that matvec consumes can be the same num_local size
         used by the halo-exchange machinery).
 
-        This is the replacement for the
-        :class:`~torch_sla.distributed.DSparseMatrix`-construction half
-        of ``DSparseMatrix.from_global``: once the dissolution finishes,
-        ``DSparseTensor._local_tensor`` will be one of these plain
-        :class:`SparseTensor` instances and the distributed-aware
-        methods (``matvec``, ``halo_exchange``, ``solve``) will live on
-        :class:`DSparseTensor`, not on a separate Matrix class.
+        Used internally by :meth:`DSparseTensor.partition` to build the
+        local SparseTensor backing each rank holds.
 
         Parameters
         ----------
@@ -1324,70 +1318,6 @@ class SparseTensor:
         return SparseTensor(local_vals, local_rows, local_cols,
                              (num_local, num_local))
 
-    def partition_for_rank(
-        self,
-        rank: int,
-        world_size: int,
-        coords: Optional[torch.Tensor] = None,
-        partition_method: str = 'simple',
-        verbose: bool = False
-    ) -> "DSparseMatrix":
-        """
-        Get partition for a specific rank in distributed environment.
-        
-        This is the recommended API for multi-process distributed computing.
-        Each rank calls this method with its own rank ID to get its local
-        partition. The partitioning is deterministic and consistent across
-        all ranks.
-        
-        Parameters
-        ----------
-        rank : int
-            This process's rank (0 to world_size-1)
-        world_size : int
-            Total number of processes
-        coords : torch.Tensor, optional
-            Node coordinates for geometric partitioning
-        partition_method : str
-            Partitioning method ('simple', 'metis', 'rcb', 'slicing')
-        verbose : bool
-            Print partition info
-            
-        Returns
-        -------
-        DSparseMatrix
-            Local partition for this rank
-            
-        Example
-        -------
-        >>> # In multi-process code:
-        >>> A = SparseTensor(val, row, col, shape)
-        >>> partition = A.partition_for_rank(rank, world_size)
-        >>> y_local = partition.matvec(x_local)
-        
-        Notes
-        -----
-        - This uses `DSparseTensor.from_global_distributed()` internally,
-          which broadcasts partition IDs from rank 0 for consistency.
-        - Requires `torch.distributed` to be initialized.
-        """
-        from .distributed import DSparseTensor
-        
-        if self.is_batched:
-            raise ValueError("partition_for_rank() does not support batched SparseTensor.")
-        
-        return DSparseTensor.from_global_distributed(
-            self.values,
-            self.row_indices,
-            self.col_indices,
-            self.sparse_shape,
-            rank=rank,
-            world_size=world_size,
-            coords=coords,
-            partition_method=partition_method,
-            verbose=verbose
-        )
-    
     def detect_matrix_type(self) -> str:
         """Detect the most specialised cuDSS matrix-type label for ``self``.
 
@@ -4090,42 +4020,6 @@ class SparseTensor:
         """
         from .io import load_sparse
         return load_sparse(path, device)
-    
-    def save_distributed(
-        self,
-        directory: Union[str, "os.PathLike"],
-        num_partitions: int,
-        partition_method: str = "simple",
-        coords: Optional[torch.Tensor] = None,
-        verbose: bool = False
-    ) -> None:
-        """
-        Save as partitioned files for distributed loading.
-        
-        Creates a directory with metadata and per-partition files.
-        Each rank can then load only its own partition.
-        
-        Parameters
-        ----------
-        directory : str or PathLike
-            Output directory path.
-        num_partitions : int
-            Number of partitions to create.
-        partition_method : str
-            'simple', 'metis', or 'geometric'.
-        coords : torch.Tensor, optional
-            Node coordinates for geometric partitioning.
-        verbose : bool
-            Print progress.
-        
-        Example
-        -------
-        >>> A.save_distributed("matrix_dist", num_partitions=4)
-        # Each rank loads its partition:
-        >>> partition = DSparseMatrix.load("matrix_dist", rank)
-        """
-        from .io import save_distributed
-        save_distributed(self, directory, num_partitions, partition_method, coords, verbose)
 
 
 # =============================================================================

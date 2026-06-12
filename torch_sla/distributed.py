@@ -4896,63 +4896,6 @@ class DSparseTensor:
         return (f"DSparseTensor(shape={self._shape}, num_partitions={self._num_partitions}, "
                 f"nnz={self.nnz}, device={self._device})")
     
-    # =========================================================================
-    # Persistence (I/O)
-    # =========================================================================
-    
-    def save(
-        self,
-        directory: Union[str, "os.PathLike"],
-        verbose: bool = False
-    ) -> None:
-        """
-        Save DSparseTensor to disk.
-        
-        Creates a directory with metadata and per-partition files.
-        
-        Parameters
-        ----------
-        directory : str or PathLike
-            Output directory.
-        verbose : bool
-            Print progress.
-        
-        Example
-        -------
-        >>> D = A.partition(num_partitions=4)
-        >>> D.save("matrix_dist")
-        """
-        from .io import save_dsparse
-        save_dsparse(self, directory, verbose)
-    
-    @classmethod
-    def load(
-        cls,
-        directory: Union[str, "os.PathLike"],
-        device: Union[str, torch.device] = "cpu"
-    ) -> "DSparseTensor":
-        """
-        Load a complete DSparseTensor from disk.
-        
-        Parameters
-        ----------
-        directory : str or PathLike
-            Directory containing saved data.
-        device : str or torch.device
-            Device to load to.
-        
-        Returns
-        -------
-        DSparseTensor
-            The loaded distributed sparse tensor.
-        
-        Example
-        -------
-        >>> D = DSparseTensor.load("matrix_dist", device="cuda")
-        """
-        from .io import load_dsparse
-        return load_dsparse(directory, device)
-
 
 # =============================================================================
 # DSparseTensorList Class
