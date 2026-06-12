@@ -254,6 +254,94 @@ def _rcb_partition(
     _rcb_partition(coords, partition_ids, right_nodes, part_offset + left_parts, right_parts)
 
 
+def resolve_partition_ids(
+    row: torch.Tensor,
+    col: torch.Tensor,
+    num_nodes: int,
+    num_parts: int,
+    method: str,
+    coords: torch.Tensor = None,
+) -> torch.Tensor:
+    """Dispatch to the right partitioner by string name and return the
+    per-node partition-id tensor of shape ``(num_nodes,)``.
+
+    ``method`` may be ``"auto"`` (uses ``"rcb"`` if ``coords`` is given,
+    else ``"simple"`` -- deterministic for distributed setups) /
+    ``"simple"`` / ``"metis"`` / ``"rcb"`` / ``"slicing"`` /
+    ``"hilbert"``. Geometric methods need ``coords``.
+    """
+    if method == "auto":
+        method = "rcb" if coords is not None else "simple"
+
+    if method == "simple":
+        return partition_simple(num_nodes, num_parts)
+    if method == "metis":
+        return partition_graph_metis(row, col, num_nodes, num_parts)
+    if method in ("rcb", "slicing", "hilbert"):
+        if coords is None:
+            raise ValueError(f"partition method '{method}' requires coords")
+        return partition_coordinates(coords, num_parts, method=method)
+    raise ValueError(
+        f"Unknown partition method {method!r}; expected one of "
+        "auto / simple / metis / rcb / slicing / hilbert.")
+
+
+def build_partition(
+    row: torch.Tensor,
+    col: torch.Tensor,
+    num_nodes: int,
+    partition_ids: torch.Tensor,
+    my_partition: int,
+) -> Partition:
+    """Build a full :class:`Partition` struct for one rank from a
+    partition-id assignment over the global graph.
+
+    Discovers owned / halo nodes, computes the global↔local index map,
+    and lays out send / recv buffers for halo exchange. Used by
+    :meth:`DSparseTensor.partition` and :meth:`DSparseTensor.from_global_distributed`
+    to scatter a global graph across the mesh without ever
+    materialising the dense layout.
+    """
+    owned_mask = partition_ids == my_partition
+    owned_nodes = owned_mask.nonzero().squeeze(-1)
+    halo_nodes, send_map = find_halo_nodes(row, col, partition_ids, my_partition)
+
+    local_nodes = torch.cat([owned_nodes, halo_nodes])
+    num_local = len(local_nodes)
+
+    # Global → local index map (vectorised). ``-1`` marks "not on this rank".
+    global_to_local = torch.full((num_nodes,), -1, dtype=torch.int64)
+    global_to_local[local_nodes] = torch.arange(num_local, dtype=torch.int64)
+
+    # Map each neighbour's send back to local recv positions.
+    halo_offset = len(owned_nodes)
+    halo_to_local = torch.full((num_nodes,), -1, dtype=torch.int64)
+    halo_to_local[halo_nodes] = torch.arange(len(halo_nodes), dtype=torch.int64) + halo_offset
+
+    recv_indices: Dict[int, torch.Tensor] = {}
+    for neighbor_id in send_map.keys():
+        neighbor_owned = (partition_ids == neighbor_id).nonzero().squeeze(-1)
+        local_idx = halo_to_local[neighbor_owned]
+        recv_indices[neighbor_id] = local_idx[local_idx >= 0]
+
+    # send_map stores global node ids; halo_exchange wants local indices.
+    send_indices_local: Dict[int, torch.Tensor] = {}
+    for neighbor_id, global_nodes in send_map.items():
+        send_indices_local[neighbor_id] = global_to_local[global_nodes]
+
+    return Partition(
+        partition_id=my_partition,
+        local_nodes=local_nodes,
+        owned_nodes=owned_nodes,
+        halo_nodes=halo_nodes,
+        neighbor_partitions=list(send_map.keys()),
+        send_indices=send_indices_local,
+        recv_indices=recv_indices,
+        global_to_local=global_to_local,
+        local_to_global=local_nodes.clone(),
+    )
+
+
 def find_halo_nodes(
     row: torch.Tensor,
     col: torch.Tensor,

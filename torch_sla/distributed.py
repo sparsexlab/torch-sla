@@ -86,6 +86,8 @@ from .partition import (
     _hilbert_sort_indices,
     _rcb_partition,
     find_halo_nodes,
+    build_partition,
+    resolve_partition_ids,
 )
 
 
@@ -2451,15 +2453,20 @@ class DSparseTensor:
             rank = 0
         world_size = mesh.size() if mesh is not None else 1
 
-        local_matrix = A.partition_for_rank(
-            rank, world_size,
-            partition_method=partition_method,
-            coords=coords,
-            verbose=verbose,
+        # Skip DSparseMatrix: compute partition ids, build the Partition
+        # struct, extract the local SparseTensor, wrap. No legacy code.
+        partition_ids = resolve_partition_ids(
+            A.row_indices, A.col_indices,
+            int(A.shape[0]), world_size,
+            method=partition_method, coords=coords,
         )
-        return cls.from_local(
-            local_matrix, mesh,
-            placement=RowPartitioned(),
+        partition = build_partition(
+            A.row_indices, A.col_indices,
+            int(A.shape[0]), partition_ids, rank,
+        )
+        local_st = A.extract_partition(partition)
+        return cls.from_sparse_local(
+            local_st, mesh, partition,
             global_shape=tuple(A.shape),
         )
 
@@ -2750,11 +2757,12 @@ class DSparseTensor:
         shape: Tuple[int, int],
         rank: int,
         world_size: int,
+        mesh: Any = None,
         coords: Optional[torch.Tensor] = None,
         partition_method: str = 'auto',
         device: Optional[Union[str, torch.device]] = None,
         verbose: bool = True
-    ) -> "DSparseMatrix":
+    ) -> "DSparseTensor":
         """
         Create local partition in a distributed-safe manner.
         
@@ -2803,58 +2811,41 @@ class DSparseTensor:
         ... )
         """
         import torch.distributed as dist
-        
+
         if device is None:
             device = values.device
         if isinstance(device, str):
             device = torch.device(device)
-        
-        # Compute partition IDs on rank 0 and broadcast
+
+        # Compute partition IDs on rank 0 and broadcast for determinism.
         if rank == 0:
-            # Create temporary DSparseTensor to compute partitions
-            # Use 'simple' method if METIS might be non-deterministic
-            if partition_method == 'auto':
-                if coords is not None:
-                    actual_method = 'rcb'
-                else:
-                    # Use simple partitioning by default in distributed mode
-                    # to ensure determinism across ranks
-                    actual_method = 'simple'
-            else:
-                actual_method = partition_method
-            
-            num_nodes = shape[0]
-            if actual_method == 'simple':
-                partition_ids = partition_simple(num_nodes, world_size)
-            elif actual_method == 'metis':
-                partition_ids = partition_graph_metis(
-                    row_indices, col_indices, num_nodes, world_size
-                )
-            elif actual_method in ['rcb', 'slicing', 'hilbert']:
-                if coords is None:
-                    raise ValueError(f"Method '{actual_method}' requires coords")
-                partition_ids = partition_coordinates(coords, world_size, method=actual_method)
-            else:
-                raise ValueError(f"Unknown method: {actual_method}")
-            
-            partition_ids = partition_ids.to(device)
+            partition_ids = resolve_partition_ids(
+                row_indices, col_indices, int(shape[0]),
+                world_size, method=partition_method, coords=coords,
+            ).to(device)
         else:
-            # Create empty tensor to receive broadcast
-            partition_ids = torch.zeros(shape[0], dtype=torch.int64, device=device)
-        
-        # Broadcast partition IDs from rank 0 to all ranks
+            partition_ids = torch.zeros(shape[0], dtype=torch.int64,
+                                         device=device)
         dist.broadcast(partition_ids, src=0)
-        
-        # Now create local partition using the consistent partition IDs
-        local_matrix = DSparseMatrix._from_global_impl(
-            values, row_indices, col_indices, shape,
-            world_size, rank,
-            partition_ids=partition_ids,
-            device=device,
-            verbose=verbose and rank == 0  # Only print on rank 0
+
+        # Build Partition struct + extract local SparseTensor on this rank.
+        partition = build_partition(
+            row_indices, col_indices, int(shape[0]),
+            partition_ids.cpu(), rank,
         )
-        
-        return local_matrix
+        from .sparse_tensor import SparseTensor
+        A = SparseTensor(values, row_indices, col_indices, shape)
+        local_st = A.extract_partition(partition)
+
+        # If no mesh was passed, build a 1-D mesh from the process
+        # group so the result is still a real ``DSparseTensor[Shard(0)]``.
+        if mesh is None:
+            from torch.distributed.device_mesh import init_device_mesh
+            mesh = init_device_mesh(str(device.type), (world_size,))
+
+        return cls.from_sparse_local(
+            local_st, mesh, partition, global_shape=tuple(shape),
+        )
     
     @classmethod
     def from_device_mesh(
