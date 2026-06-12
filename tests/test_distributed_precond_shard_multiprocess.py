@@ -1,15 +1,19 @@
 #!/usr/bin/env python
-"""Multi-process tests for the Shard(0) preconditioner family.
+"""End-to-end preconditioner family via the unified ``solve`` API.
 
-Verifies that the Jacobi / block-Jacobi / SSOR / polynomial precond
-plug cleanly into PCG / PBiCGStab / GMRES on the standard catalogued
-benchmarks, both via the explicit ``preconditioner=`` kwarg and via
-``SolverConfig.preconditioner`` scope.
+Worker bodies read like example user code: ``A`` →
+``DSparseTensor.partition`` → ``D.scatter(b_global)`` → ``solve(D, b)``
+under a ``SolverConfig(preconditioner=...)`` scope → residual via
+``D @ x_dt``. No ``_shard_matvec`` / no raw ``dist.all_reduce`` /
+no partition-internal indexing.
 
 Quick correctness contract:
-* Identity precond -> reproduces the unpreconditioned baseline.
-* Jacobi / block-Jacobi / SSOR -> reduces iterations vs identity on a
-  diagonally-dominant SPD problem (Poisson 2D, n=64).
+
+* Every preconditioner (None / 'none' / 'jacobi' / 'jacobi_l1' /
+  'block_jacobi' / 'ssor' / 'polynomial') must keep PCG on the
+  SPD Poisson stencil converging.
+* Block-Jacobi / Jacobi must make BiCGStab converge on the
+  non-symmetric convdiff stencil.
 """
 from __future__ import annotations
 
@@ -35,35 +39,28 @@ def _precond_worker(rank: int, world_size: int,
                             rank=rank, world_size=world_size)
     try:
         from torch.distributed.device_mesh import init_device_mesh
-        from torch.distributed.tensor import DTensor, Shard
 
         from torch_sla import (DSparseTensor, SparseTensor, solve,
                                  SolverConfig)
         from torch_sla.datasets import Synthetic
 
         bench = Synthetic[bench_key]
-        N = bench.shape[0]
         A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
         mesh = init_device_mesh("cpu", (world_size,))
         D = DSparseTensor.partition(A, mesh, partition_method="simple")
-        local_matrix = D.to_local()
 
         torch.manual_seed(0)
-        b_owned = torch.randn(N, dtype=torch.float64)[
-            local_matrix.partition.owned_nodes]
-        b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
+        b_global = torch.randn(A.shape[0], dtype=torch.float64)
+        b_dt = D.scatter(b_global)
 
         with SolverConfig(method=method, preconditioner=precond,
                           atol=1e-10, rtol=1e-10,
                           maxiter=maxiter, restart=30):
             x_dt = solve(D, b_dt)
-        x_owned = x_dt.to_local()
-        r = b_owned - D._shard_matvec(x_owned)
-        rs = torch.dot(r, r)
-        dist.all_reduce(rs, op=dist.ReduceOp.SUM)
-        bs = torch.dot(b_owned, b_owned)
-        dist.all_reduce(bs, op=dist.ReduceOp.SUM)
-        rel_res = float(rs.sqrt().item()) / (float(bs.sqrt().item()) + 1e-30)
+
+        r_dt = b_dt - D @ x_dt
+        rel_res = float(
+            (r_dt.full_tensor().norm() / b_dt.full_tensor().norm()).item())
 
         out_queue.put({
             "rank": rank,
@@ -146,14 +143,13 @@ def test_precond_on_pbicgstab_converges_on_convdiff(precond, port):
 
 def _scope_precond_worker(rank, world_size, port, out_queue):
     """Worker for ``test_solverconfig_preconditioner_scope_reaches_shard_solve``.
-    Defined at module scope so the ``spawn`` start method can pickle it."""
+    Defined at module scope so ``spawn`` can pickle it."""
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group(backend="gloo",
                             rank=rank, world_size=world_size)
     try:
         from torch.distributed.device_mesh import init_device_mesh
-        from torch.distributed.tensor import DTensor, Shard
 
         from torch_sla import (DSparseTensor, SparseTensor,
                                 solve, SolverConfig)
@@ -163,23 +159,19 @@ def _scope_precond_worker(rank, world_size, port, out_queue):
         A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
         mesh = init_device_mesh("cpu", (world_size,))
         D = DSparseTensor.partition(A, mesh, partition_method="simple")
-        local = D.to_local()
 
         torch.manual_seed(0)
-        N = bench.shape[0]
-        b_owned = torch.randn(N, dtype=torch.float64)[
-            local.partition.owned_nodes]
-        b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
+        b_global = torch.randn(A.shape[0], dtype=torch.float64)
+        b_dt = D.scatter(b_global)
 
         with SolverConfig(method="bicgstab",
                           preconditioner="block_jacobi",
                           atol=1e-10, rtol=1e-10, maxiter=500):
             x_dt = solve(D, b_dt)
-        x = x_dt.to_local()
-        r = b_owned - D._shard_matvec(x)
-        rs = torch.dot(r, r); dist.all_reduce(rs)
-        bs = torch.dot(b_owned, b_owned); dist.all_reduce(bs)
-        rel = float(rs.sqrt().item()) / (float(bs.sqrt().item()) + 1e-30)
+
+        r_dt = b_dt - D @ x_dt
+        rel = float(
+            (r_dt.full_tensor().norm() / b_dt.full_tensor().norm()).item())
         out_queue.put({"rank": rank, "rel_residual": rel})
     finally:
         dist.destroy_process_group()
@@ -191,7 +183,7 @@ def _scope_precond_worker(rank, world_size, port, out_queue):
 )
 def test_solverconfig_preconditioner_scope_reaches_shard_solve():
     """``SolverConfig(preconditioner='block_jacobi')`` scope must be
-    picked up by ``solve_distributed_shard``."""
+    picked up by the unified ``solve(D, b)`` entry."""
     world_size = 2
     port = 29561
     ctx = mp.get_context("spawn")

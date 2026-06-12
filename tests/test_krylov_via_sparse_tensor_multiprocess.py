@@ -1,13 +1,16 @@
 #!/usr/bin/env python
-"""Krylov methods on a SparseTensor-backed DSparseTensor.
+"""Krylov methods on the SparseTensor-backed DSparseTensor path.
 
-Verifies that ``solve_distributed_shard`` (and every Krylov method it
-dispatches to) runs end-to-end on a SparseTensor-backed DSparseTensor,
-with the same correctness as the legacy DSparseMatrix-backed path.
+Same end-to-end style as the other distributed Krylov tests: build
+``A``, build ``D`` (this time through the SparseTensor /
+``DSparseTensor.from_sparse_local`` route rather than
+``.partition``), build the RHS via ``D.scatter``, hand both to
+``solve``, verify with ``D @ x_dt``.
 
-If this test passes, ``_distributed_*_shard`` no longer needs
-``DSparseMatrix`` -- they go through ``_shard_matvec`` and
-``_make_preconditioner``, both of which now read from either backing.
+If this test passes, the unified solver stack works just as well on a
+``DSparseTensor`` that was constructed through the SparseTensor
+backing -- proving the Krylov methods no longer depend on the legacy
+``DSparseMatrix`` backing.
 """
 from __future__ import annotations
 
@@ -24,49 +27,48 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _krylov_worker(rank: int, world_size: int, port: int,
-               method: str, precond, out_queue: mp.Queue) -> None:
+                   method: str, precond, out_queue: mp.Queue) -> None:
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group(backend="gloo",
                             rank=rank, world_size=world_size)
     try:
         from torch.distributed.device_mesh import init_device_mesh
-        from torch.distributed.tensor import DTensor, Shard
 
         from torch_sla import DSparseTensor, SparseTensor, solve, SolverConfig
         from torch_sla.datasets import Synthetic
 
+        # ---- user-side setup: SparseTensor-only path ---------------- #
         bench = Synthetic["poisson_2d_16"]
-        N = bench.shape[0]
-        A_global = SparseTensor(bench.val, bench.row, bench.col,
-                                 bench.shape)
+        A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
 
-        # Build partition + local SparseTensor → DSparseTensor.
-        local_mat = A_global.partition_for_rank(
+        # Build the local SparseTensor + partition; wrap as DSparseTensor.
+        local_meta = A.partition_for_rank(
             rank, world_size, partition_method="simple")
-        partition = local_mat.partition
-        local_st = A_global.extract_partition(partition)
+        partition = local_meta.partition
+        local_st = A.extract_partition(partition)
+
         mesh = init_device_mesh("cpu", (world_size,))
         D = DSparseTensor.from_sparse_local(
             local_st, mesh, partition,
-            global_shape=A_global.shape,
+            global_shape=A.shape,
         )
+        # Sanity: we really took the SparseTensor path, not the legacy
+        # DSparseMatrix backing.
         assert D._local_tensor is not None
         assert D._local_matrix is None
 
         torch.manual_seed(0)
-        b_owned = torch.randn(N, dtype=torch.float64)[partition.owned_nodes]
-        b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
+        b_global = torch.randn(A.shape[0], dtype=torch.float64)
+        b_dt = D.scatter(b_global)
 
         with SolverConfig(method=method, preconditioner=precond,
                           atol=1e-10, rtol=1e-10, maxiter=2000):
             x_dt = solve(D, b_dt)
-        x = x_dt.to_local()
 
-        r = b_owned - D._shard_matvec(x)
-        rs = torch.dot(r, r); dist.all_reduce(rs)
-        bs = torch.dot(b_owned, b_owned); dist.all_reduce(bs)
-        rel = float(rs.sqrt().item()) / (float(bs.sqrt().item()) + 1e-30)
+        r_dt = b_dt - D @ x_dt
+        rel = float(
+            (r_dt.full_tensor().norm() / b_dt.full_tensor().norm()).item())
         out_queue.put({"rank": rank, "rel_residual": rel})
     finally:
         dist.destroy_process_group()
@@ -86,7 +88,7 @@ def _krylov_worker(rank: int, world_size: int, port: int,
 def test_krylov_on_sparse_tensor_backed_dsparse(method, precond, port):
     """Each Krylov method, run on a DSparseTensor built via the
     SparseTensor path, must drive ``||r||/||b|| < 1e-5`` on the
-    SPD Poisson stencil. Proves the Krylov stack no longer depends
+    SPD Poisson stencil. Proves the unified solver no longer depends
     on DSparseMatrix."""
     world_size = 2
     ctx = mp.get_context("spawn")

@@ -2737,6 +2737,45 @@ class DSparseTensor:
         legacy single-process simulator constructor."""
         return self._spec
 
+    def scatter(self, global_vec: torch.Tensor) -> "DTensor":
+        """Convenience: extract this rank's owned slice from a global
+        vector and wrap as a ``DTensor[Shard(0)]``.
+
+        Common usage::
+
+            b_dt = D.scatter(b_global)        # build distributed RHS
+            x_dt = solve(D, b_dt)             # distributed solve
+            r_dt = b_dt - D @ x_dt            # distributed residual
+
+        ``global_vec`` is a 1-D ``torch.Tensor`` of size
+        ``global_shape[0]``. Every rank should hold the same copy
+        (typical in tests; in production the caller loads on rank 0
+        and broadcasts).
+        """
+        partition = self._partition_for_dispatch()
+        if partition is None:
+            raise RuntimeError(
+                "scatter() requires a partition map -- build this "
+                "DSparseTensor via .partition(...) or .from_local(...)")
+        owned = partition.owned_nodes.to(device=global_vec.device,
+                                          dtype=torch.int64)
+        local_slice = global_vec[owned].contiguous()
+        from torch.distributed.tensor import DTensor as _DTensor, Shard
+        return _DTensor.from_local(local_slice, self._spec.mesh,
+                                    [Shard(0)])
+
+    def _partition_for_dispatch(self) -> Optional["Partition"]:
+        """Return the active :class:`Partition` regardless of which
+        local backing is set. ``None`` for the legacy simulator
+        constructor (no real spec)."""
+        if self._spec is not None and isinstance(
+                self._spec.placement, SparseShard) \
+                and self._spec.placement.partition is not None:
+            return self._spec.placement.partition
+        if self._local_matrix is not None:
+            return self._local_matrix.partition
+        return None
+
     def to_local(self) -> "DSparseMatrix":
         """Return this rank's local :class:`DSparseMatrix` chunk.
 

@@ -42,7 +42,6 @@ def _unified_worker(rank: int, world_size: int,
                             rank=rank, world_size=world_size)
     try:
         from torch.distributed.device_mesh import init_device_mesh
-        from torch.distributed.tensor import DTensor, Shard
 
         from torch_sla import (DSparseTensor, SparseTensor, solve,
                                 SolverConfig)
@@ -51,16 +50,13 @@ def _unified_worker(rank: int, world_size: int,
         # SPD Poisson works with every path (cg/bicgstab/gmres);
         # convdiff would also work but BiCGStab is fine on Poisson too.
         bench = Synthetic["poisson_2d_16"]
-        N = bench.shape[0]
         A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
         mesh = init_device_mesh("cpu", (world_size,))
         D = DSparseTensor.partition(A, mesh, partition_method="simple")
-        local = D.to_local()
 
         torch.manual_seed(0)
-        b_owned = torch.randn(N, dtype=torch.float64)[
-            local.partition.owned_nodes]
-        b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
+        b_global = torch.randn(A.shape[0], dtype=torch.float64)
+        b_dt = D.scatter(b_global)
 
         if kind == "explicit":
             x_dt = solve(D, b_dt,
@@ -82,15 +78,12 @@ def _unified_worker(rank: int, world_size: int,
         # ecosystem can compose with it).
         assert hasattr(x_dt, "to_local"), \
             f"{kind}: solve(D, b) didn't return a DTensor"
-        x_owned = x_dt.to_local()
-        assert x_owned.shape[0] == local.num_owned, \
-            f"{kind}: result size {x_owned.shape[0]} != num_owned {local.num_owned}"
 
-        # Residual check.
-        r = b_owned - D._shard_matvec(x_owned)
-        rs = torch.dot(r, r); dist.all_reduce(rs)
-        bs = torch.dot(b_owned, b_owned); dist.all_reduce(bs)
-        rel_res = float(rs.sqrt().item()) / (float(bs.sqrt().item()) + 1e-30)
+        # Residual via public ops only -- no _shard_matvec, no raw
+        # dist.all_reduce.
+        r_dt = b_dt - D @ x_dt
+        rel_res = float(
+            (r_dt.full_tensor().norm() / b_dt.full_tensor().norm()).item())
 
         out_queue.put({"rank": rank, "kind": kind,
                         "rel_residual": rel_res})
