@@ -236,7 +236,7 @@ def benchmark_distributed(args):
             })
             
             # Clean up
-            del A, val_dev, row_dev, col_dev, x_owned, b_owned
+            del A, D, val_dev, row_dev, col_dev, x_dt, b_dt, b_global, r_dt
             if args.device == 'cuda':
                 torch.cuda.empty_cache()
             
