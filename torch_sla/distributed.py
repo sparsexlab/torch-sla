@@ -358,14 +358,41 @@ def find_halo_nodes(
 
 class DSparseMatrix:
     """
+    .. deprecated:: 0.3
+       ``DSparseMatrix`` has been folded into the
+       :class:`SparseTensor` + :class:`DSparseTensor` stack:
+
+       * Local per-rank data lives in a plain :class:`SparseTensor`
+         (produced by :meth:`SparseTensor.extract_partition`).
+       * Distributed-aware methods (``matvec`` / ``halo_exchange`` /
+         ``solve_distributed_shard``) live on :class:`DSparseTensor`
+         and read the partition map from
+         ``DSparseTensor.spec.placement.partition``.
+
+       New code should use::
+
+           D = DSparseTensor.from_sparse_local(
+               local_tensor, mesh, partition,
+               global_shape=A.shape,
+           )
+
+       or the one-shot::
+
+           D = DSparseTensor.partition(A, mesh, partition_method="...")
+
+       ``DSparseMatrix`` is preserved as a working class so existing
+       call sites and Krylov solvers don't break in this release; the
+       internal Krylov code paths transparently route through whichever
+       backing is set on ``DSparseTensor``.
+
     Distributed Sparse Matrix with halo exchange support.
-    
+
     Designed for large-scale CFD/FEM computations following industrial
     practices from Ansys, OpenFOAM, etc.
-    
+
     The matrix is partitioned across multiple processes/GPUs, with automatic
     halo (ghost) node management for parallel iterative solvers.
-    
+
     Supports both CPU and CUDA devices.
     
     Attributes
@@ -508,10 +535,16 @@ class DSparseMatrix:
         partition_ids: Optional[torch.Tensor] = None,
         coords: Optional[torch.Tensor] = None,
         device: Union[str, torch.device] = 'cpu',
-        verbose: bool = True
+        verbose: bool = True,
     ) -> "DSparseMatrix":
         """
         Create distributed matrix from global COO data.
+
+        .. deprecated:: 0.3
+           Use :meth:`SparseTensor.extract_partition` +
+           :meth:`DSparseTensor.from_sparse_local`, or the one-shot
+           :meth:`DSparseTensor.partition` helper. See
+           :class:`DSparseMatrix` for the migration recipe.
         
         Parameters
         ----------
@@ -537,8 +570,41 @@ class DSparseMatrix:
         DSparseMatrix
             Local portion of the distributed matrix
         """
+        warnings.warn(
+            "DSparseMatrix.from_global is deprecated; use "
+            "SparseTensor.extract_partition(partition) + "
+            "DSparseTensor.from_sparse_local(...) or the one-shot "
+            "DSparseTensor.partition(A, mesh, ...). DSparseMatrix will "
+            "be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return cls._from_global_impl(
+            values, row, col, shape,
+            num_partitions, my_partition,
+            partition_ids=partition_ids, coords=coords,
+            device=device, verbose=verbose,
+        )
+
+    @classmethod
+    def _from_global_impl(
+        cls,
+        values: torch.Tensor,
+        row: torch.Tensor,
+        col: torch.Tensor,
+        shape: Tuple[int, int],
+        num_partitions: int,
+        my_partition: int,
+        partition_ids: Optional[torch.Tensor] = None,
+        coords: Optional[torch.Tensor] = None,
+        device: Union[str, torch.device] = 'cpu',
+        verbose: bool = True,
+    ) -> "DSparseMatrix":
+        """Internal implementation that doesn't emit the deprecation
+        warning. Used by torch-sla's own legacy code paths that haven't
+        finished migrating to the B3 SparseTensor path."""
         num_nodes = shape[0]
-        
+
         # Compute partitioning if not provided
         if partition_ids is None:
             if coords is not None:
@@ -2163,7 +2229,7 @@ def create_distributed_matrices(
         partition_ids = partition_graph_metis(row, col, shape[0], num_partitions)
     
     for i in range(num_partitions):
-        mat = DSparseMatrix.from_global(
+        mat = DSparseMatrix._from_global_impl(
             values, row, col, shape, num_partitions, i,
             partition_ids=partition_ids, device=device
         )
@@ -2424,7 +2490,7 @@ class DSparseTensor:
     def _create_partitions(self):
         """Create all partition matrices."""
         for i in range(self._num_partitions):
-            mat = DSparseMatrix.from_global(
+            mat = DSparseMatrix._from_global_impl(
                 self._values, self._row_indices, self._col_indices,
                 self._shape, self._num_partitions, i,
                 partition_ids=self._partition_ids,
@@ -2759,7 +2825,7 @@ class DSparseTensor:
             # ``DSparseMatrix.from_global`` is a static helper that
             # builds a single-partition local chunk -- pass ``num_part=1``
             # so the whole matrix is owned by this rank.
-            full_local = DSparseMatrix.from_global(
+            full_local = DSparseMatrix._from_global_impl(
                 SparseTensor(full.val, full.row, full.col,
                              self._spec.global_shape),
                 num_partitions=1,
@@ -3008,7 +3074,7 @@ class DSparseTensor:
         dist.broadcast(partition_ids, src=0)
         
         # Now create local partition using the consistent partition IDs
-        local_matrix = DSparseMatrix.from_global(
+        local_matrix = DSparseMatrix._from_global_impl(
             values, row_indices, col_indices, shape,
             world_size, rank,
             partition_ids=partition_ids,
@@ -5794,7 +5860,7 @@ class DSparseTensorList:
             tensor = sparse_list[graph_id]
             
             # Create DSparseMatrix for whole graph (single partition)
-            mat = DSparseMatrix.from_global(
+            mat = DSparseMatrix._from_global_impl(
                 tensor.values, tensor.row_indices, tensor.col_indices,
                 tensor.sparse_shape,
                 num_partitions=1, my_partition=0,
@@ -5810,7 +5876,7 @@ class DSparseTensorList:
             
             # Create partitioned matrix
             for part_id in range(num_partitions):
-                mat = DSparseMatrix.from_global(
+                mat = DSparseMatrix._from_global_impl(
                     tensor.values, tensor.row_indices, tensor.col_indices,
                     tensor.sparse_shape,
                     num_partitions=num_partitions, my_partition=part_id,
