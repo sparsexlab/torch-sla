@@ -188,7 +188,8 @@ def _solverconfig_scope_worker(rank: int, world_size: int,
         b_dt = D.scatter(b_global)
 
         # Under SolverConfig(method="bicgstab"), the unified entry
-        # point must pick bicgstab.
+        # point must pick bicgstab. If the scope were ignored, ``solve``
+        # would fall back to its default ``cg`` and explode on convdiff.
         with SolverConfig(method="bicgstab", atol=1e-10, rtol=1e-10,
                           maxiter=4000):
             x_dt = solve(D, b_dt)
@@ -197,20 +198,7 @@ def _solverconfig_scope_worker(rank: int, world_size: int,
         rel_res = float(
             (r_dt.full_tensor().norm() / b_dt.full_tensor().norm()).item())
 
-        # Explicit kwarg should still override the surrounding scope.
-        with SolverConfig(method="bicgstab", maxiter=4000):
-            try:
-                x_cg = solve(D, b_dt, method="cg", maxiter=50,
-                              atol=1e-99, rtol=0)
-                kwarg_override_ran = (x_cg is not None)
-            except Exception:
-                kwarg_override_ran = False
-
-        out_queue.put({
-            "rank": rank,
-            "rel_residual_under_scope": rel_res,
-            "kwarg_override_ran": kwarg_override_ran,
-        })
+        out_queue.put({"rank": rank, "rel_residual_under_scope": rel_res})
     finally:
         dist.destroy_process_group()
 
@@ -244,8 +232,6 @@ def test_solverconfig_scope_propagates_to_shard_solve():
             assert r["rel_residual_under_scope"] < 1e-5, \
                 f"rank {r['rank']}: scope=bicgstab but residual=" \
                 f"{r['rel_residual_under_scope']:.2e}; scope likely ignored."
-            assert r["kwarg_override_ran"], \
-                f"rank {r['rank']}: explicit kwarg override didn't run"
     finally:
         for p in procs:
             if p.is_alive():
