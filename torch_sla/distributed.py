@@ -602,7 +602,7 @@ class DSparseMatrix:
     ) -> "DSparseMatrix":
         """Internal implementation that doesn't emit the deprecation
         warning. Used by torch-sla's own legacy code paths that haven't
-        finished migrating to the B3 SparseTensor path."""
+        finished migrating to the SparseTensor-backed path."""
         num_nodes = shape[0]
 
         # Compute partitioning if not provided
@@ -2286,7 +2286,7 @@ class SparseShard:
     ``halo_nodes`` / ``neighbor_partitions`` so the placement is the
     single source of truth for the irregular shard map. Today it
     defaults to ``None`` and the per-rank ``DSparseMatrix.partition``
-    still owns that data; Phase B step B3 will swap the two so
+    still owns that data; A future release will swap the two so
     ``_local_tensor`` becomes a plain :class:`SparseTensor` and the
     placement carries the map.
     """
@@ -2449,16 +2449,16 @@ class DSparseTensor:
         # matrix; ``None`` for the legacy single-process simulator
         # constructor so existing call sites keep behaving identically.
         self._local_matrix: Optional[DSparseMatrix] = None
-        # B3: ``_local_tensor`` is the post-dissolution per-rank chunk -- a
+        # ``_local_tensor`` is the per-rank chunk -- a
         # plain :class:`SparseTensor` in local coordinates. When set,
         # matvec uses this + ``_spec.placement.partition`` and bypasses
         # ``DSparseMatrix`` entirely. Built via
         # :meth:`from_sparse_local`.
         self._local_tensor: Optional["SparseTensor"] = None
-        # Per-rank caches for halo-exchange (B3-only; populated lazily by
+        # Per-rank caches for halo-exchange (populated lazily by
         # ``_halo_exchange_via_spec``).
-        self._b3_send_buffers: Dict[int, torch.Tensor] = {}
-        self._b3_recv_buffers: Dict[int, torch.Tensor] = {}
+        self._halo_send_buffers: Dict[int, torch.Tensor] = {}
+        self._halo_recv_buffers: Dict[int, torch.Tensor] = {}
         self._spec: Optional[DSparseSpec] = None
     
     def _compute_partitions(
@@ -2575,8 +2575,8 @@ class DSparseTensor:
         self._partitions = []
         self._local_matrix = local_matrix
         self._local_tensor = None
-        self._b3_send_buffers = {}
-        self._b3_recv_buffers = {}
+        self._halo_send_buffers = {}
+        self._halo_recv_buffers = {}
         self._spec = DSparseSpec(placement=placement, mesh=mesh,
                                  global_shape=global_shape)
         return self
@@ -2591,7 +2591,7 @@ class DSparseTensor:
         axis: int = 0,
         global_shape: Optional[Tuple[int, int]] = None,
     ) -> "DSparseTensor":
-        """Phase-B Dissolution constructor: wrap a plain
+        """Constructor for the SparseTensor-backed path: wrap a plain
         :class:`SparseTensor` (per-rank local chunk in local coords)
         plus its :class:`Partition` as a DSparseTensor whose
         ``_local_tensor`` field is set instead of ``_local_matrix``.
@@ -2608,13 +2608,13 @@ class DSparseTensor:
                 local_tensor, mesh, partition,
                 global_shape=A_global.shape,
             )
-            y_dt = D @ x_dt              # routes through B3 path
+            y_dt = D @ x_dt              # routes through SparseTensor path
 
         Compared to :meth:`from_local`, this path leaves
         ``_local_matrix=None`` and stamps the partition onto
         ``_spec.placement.partition`` so the placement is the single
         source of truth for the irregular shard map. The matvec
-        dispatch picks the B3 path automatically when
+        dispatch picks this path automatically when
         ``_local_tensor is not None``.
 
         Parameters
@@ -2654,8 +2654,8 @@ class DSparseTensor:
         self._partitions = []
         self._local_matrix = None
         self._local_tensor = local_tensor
-        self._b3_send_buffers = {}
-        self._b3_recv_buffers = {}
+        self._halo_send_buffers = {}
+        self._halo_recv_buffers = {}
         placement = SparseShard(axis=axis, partition=partition)
         self._spec = DSparseSpec(placement=placement, mesh=mesh,
                                  global_shape=global_shape)
@@ -4672,7 +4672,7 @@ class DSparseTensor:
         by SpMV in the same code path.
         """
         # Spec mode requires *some* local backing -- either the legacy
-        # DSparseMatrix or the B3-style SparseTensor.
+        # DSparseMatrix or the SparseTensor backing.
         assert (self._local_matrix is not None
                 or self._local_tensor is not None), \
             "spec-mode requires _local_matrix or _local_tensor"
@@ -4698,7 +4698,7 @@ class DSparseTensor:
 
         Dispatches on which backing is set:
 
-        * ``_local_tensor`` (plain :class:`SparseTensor`, post-B3 path)
+        * ``_local_tensor`` (plain :class:`SparseTensor`, SparseTensor-backed path)
           → ``_matmul_row_shard_via_sparse_tensor``
         * ``_local_matrix`` (legacy :class:`DSparseMatrix`) → original
           path.
@@ -4721,13 +4721,13 @@ class DSparseTensor:
         return y_owned
 
     def _matmul_row_shard_via_sparse_tensor(self, x: Any) -> Any:
-        """B3 path: matvec backed by ``_local_tensor`` (SparseTensor) +
+        """SparseTensor-backed matvec: backed by ``_local_tensor`` (SparseTensor) +
         ``_spec.placement.partition``. No DSparseMatrix involvement.
         """
         partition = self._spec.placement.partition
         if partition is None:
             raise RuntimeError(
-                "B3 matvec path requires spec.placement.partition; "
+                "SparseTensor-backed matvec requires spec.placement.partition; "
                 "rebuild this DSparseTensor via from_sparse_local(...).")
         num_owned = int(partition.owned_nodes.numel())
         num_local = int(partition.local_to_global.numel())
@@ -4770,7 +4770,7 @@ class DSparseTensor:
         around.
 
         Per-rank send/recv buffers are cached on
-        ``self._b3_send_buffers`` / ``self._b3_recv_buffers`` keyed
+        ``self._halo_send_buffers`` / ``self._halo_recv_buffers`` keyed
         by ``(neighbor_id, dtype)``.
         """
         if not DIST_AVAILABLE or not dist.is_initialized():
@@ -4783,21 +4783,21 @@ class DSparseTensor:
         recv_bufs = {}
         for nid in partition.neighbor_partitions:
             key = (nid, dtype)
-            sb = self._b3_send_buffers.get(key)
+            sb = self._halo_send_buffers.get(key)
             if sb is None:
                 idx = partition.send_indices[nid].to(device=device,
                                                        dtype=torch.int64)
                 sb = torch.empty(int(idx.numel()),
                                   dtype=dtype, device=device)
-                self._b3_send_buffers[key] = sb
+                self._halo_send_buffers[key] = sb
             send_bufs[nid] = sb
-            rb = self._b3_recv_buffers.get(key)
+            rb = self._halo_recv_buffers.get(key)
             if rb is None:
                 ridx = partition.recv_indices[nid].to(device=device,
                                                        dtype=torch.int64)
                 rb = torch.empty(int(ridx.numel()),
                                   dtype=dtype, device=device)
-                self._b3_recv_buffers[key] = rb
+                self._halo_recv_buffers[key] = rb
             recv_bufs[nid] = rb
 
         # Fill send buffers (gather from x at send_indices).
@@ -4836,15 +4836,15 @@ class DSparseTensor:
         2. A 2-D mesh sharding shim so the halo *and* the
            ``all_reduce(SUM)`` semantics line up.
 
-        Both land in Phase B (DSparseMatrix dissolution) -- step B2 adds
-        the column extraction; step B3 wires it through this method.
+        Both land in the column-partition follow-up -- step adds
+        the column extraction; a follow-up wires it through this method.
         Until then this dispatch raises so callers don't silently get
         wrong answers.
         """
         raise NotImplementedError(
             "SparseShard(axis=1) col-partitioned matvec is scaffolded "
             "but requires the column-partition data path that ships "
-            "with Phase B (DSparseMatrix dissolution). Today's "
+            "with the column-partition follow-up. Today.s "
             "DSparseMatrix is row-partitioned -- use SparseShard(axis=0)."
         )
 
@@ -5023,7 +5023,7 @@ class DSparseTensor:
         Routes through whichever backing is set on the spec'd
         DSparseTensor:
 
-        * ``_local_tensor`` (B3 path, plain :class:`SparseTensor`)
+        * ``_local_tensor`` (plain :class:`SparseTensor`)
           → pad → ``_halo_exchange_via_spec`` →
           ``_local_tensor @ x`` → slice.
         * ``_local_matrix`` (legacy :class:`DSparseMatrix`)
@@ -5096,8 +5096,8 @@ class DSparseTensor:
                             kind.lower() == "none"):
             return lambda r: r
 
-        # B4: read owned size + device from whichever local backing is
-        # set so preconditioner construction works on the B3 path too.
+        # Read owned size + device from whichever local backing is
+        # set, so preconditioner construction is backend-agnostic.
         if self._local_tensor is not None:
             partition = self._spec.placement.partition
             no = int(partition.owned_nodes.numel())
@@ -5113,7 +5113,7 @@ class DSparseTensor:
             if getattr(self, "_owned_block_cache", None) is not None:
                 return self._owned_block_cache
             if self._local_tensor is not None:
-                # B3 path: extract the owned-by-owned slice from the
+                # SparseTensor path: extract the owned-by-owned slice from the
                 # SparseTensor directly. We materialise the local CSR
                 # via to_dense (cheap on the modest owned blocks
                 # preconditioners care about).

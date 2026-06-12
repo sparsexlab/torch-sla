@@ -1,4 +1,4 @@
-"""B5: DSparseMatrix.from_global emits DeprecationWarning.
+"""DSparseMatrix.from_global emits DeprecationWarning.
 
 Single-process unit test -- just exercises the public entry point and
 confirms the warning fires."""

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""B3 path: DSparseTensor matvec backed by SparseTensor + spec.partition.
+"""DSparseTensor matvec backed by SparseTensor + spec.partition.
 
 Verifies the new ``DSparseTensor.from_sparse_local`` constructor + the
 ``_matmul_row_shard_via_sparse_tensor`` code path produce numerically
@@ -22,7 +22,7 @@ import torch.multiprocessing as mp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _b3_worker(rank: int, world_size: int, port: int,
+def _matvec_worker(rank: int, world_size: int, port: int,
                out_queue: mp.Queue) -> None:
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ["MASTER_PORT"] = str(port)
@@ -47,14 +47,14 @@ def _b3_worker(rank: int, world_size: int, port: int,
         D_old = DSparseTensor.from_local(local_mat, mesh)
         partition = local_mat.partition
 
-        # B3 path: extract_partition (SparseTensor) → from_sparse_local.
+        # SparseTensor-backed path: extract_partition + from_sparse_local.
         local_st = A_global.extract_partition(partition)
         D_new = DSparseTensor.from_sparse_local(
             local_st, mesh, partition,
             global_shape=A_global.shape,
         )
 
-        # Verify the B3 instance uses the new backing.
+        # Verify the instance uses the SparseTensor backing.
         assert D_new._local_tensor is not None
         assert D_new._local_matrix is None
         assert D_old._local_tensor is None
@@ -100,8 +100,8 @@ def _b3_worker(rank: int, world_size: int, port: int,
     not hasattr(dist, "is_available") or not dist.is_available(),
     reason="torch.distributed not available",
 )
-def test_b3_via_sparse_tensor_matches_dsparse_matrix_path():
-    """B3 matvec must agree with the legacy DSparseMatrix path to
+def test_sparse_tensor_backed_matvec_matches_dsparse_matrix():
+    """SparseTensor-backed matvec must agree with the legacy DSparseMatrix path to
     machine precision *and* with the global reference up to numerical
     error."""
     world_size = 2
@@ -111,7 +111,7 @@ def test_b3_via_sparse_tensor_matches_dsparse_matrix_path():
     procs = []
     try:
         for rank in range(world_size):
-            p = ctx.Process(target=_b3_worker,
+            p = ctx.Process(target=_matvec_worker,
                             args=(rank, world_size, port, out_queue))
             p.start()
             procs.append(p)
@@ -122,11 +122,11 @@ def test_b3_via_sparse_tensor_matches_dsparse_matrix_path():
                 f"rank {procs.index(p)} exited with {p.exitcode}"
         for r in results:
             assert r["rel_old_vs_new"] < 1e-12, \
-                f"rank {r['rank']}: B3 vs DSparseMatrix mismatch " \
-                f"rel-diff {r['rel_old_vs_new']:.2e}"
+                f"rank {r['rank']}: SparseTensor-backed vs " \
+                f"DSparseMatrix mismatch rel-diff {r['rel_old_vs_new']:.2e}"
             assert r["rel_new_vs_ref"] < 1e-10, \
-                f"rank {r['rank']}: B3 vs global ref mismatch " \
-                f"rel-err {r['rel_new_vs_ref']:.2e}"
+                f"rank {r['rank']}: SparseTensor-backed vs global ref " \
+                f"mismatch rel-err {r['rel_new_vs_ref']:.2e}"
     finally:
         for p in procs:
             if p.is_alive():
@@ -135,6 +135,6 @@ def test_b3_via_sparse_tensor_matches_dsparse_matrix_path():
 
 
 if __name__ == "__main__":
-    test_b3_via_sparse_tensor_matches_dsparse_matrix_path()
-    print("OK: B3 SparseTensor-backed matvec matches DSparseMatrix path "
+    test_sparse_tensor_backed_matvec_matches_dsparse_matrix()
+    print("OK: SparseTensor-backed matvec matches DSparseMatrix path "
           "and global reference")

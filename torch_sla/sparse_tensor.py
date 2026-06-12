@@ -1272,9 +1272,9 @@ class SparseTensor:
         x vector that matvec consumes can be the same num_local size
         used by the halo-exchange machinery).
 
-        This is the Phase B replacement for the
+        This is the replacement for the
         :class:`~torch_sla.distributed.DSparseMatrix`-construction half
-        of ``DSparseMatrix.from_global`` -- once Phase B finishes,
+        of ``DSparseMatrix.from_global``: once the dissolution finishes,
         ``DSparseTensor._local_tensor`` will be one of these plain
         :class:`SparseTensor` instances and the distributed-aware
         methods (``matvec``, ``halo_exchange``, ``solve``) will live on

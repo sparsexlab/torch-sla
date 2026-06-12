@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""B4: Krylov methods on a B3-backed DSparseTensor.
+"""Krylov methods on a SparseTensor-backed DSparseTensor.
 
 Verifies that ``solve_distributed_shard`` (and every Krylov method it
 dispatches to) runs end-to-end on a SparseTensor-backed DSparseTensor,
@@ -23,7 +23,7 @@ import torch.multiprocessing as mp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _b4_worker(rank: int, world_size: int, port: int,
+def _krylov_worker(rank: int, world_size: int, port: int,
                method: str, precond, out_queue: mp.Queue) -> None:
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ["MASTER_PORT"] = str(port)
@@ -41,7 +41,7 @@ def _b4_worker(rank: int, world_size: int, port: int,
         A_global = SparseTensor(bench.val, bench.row, bench.col,
                                  bench.shape)
 
-        # Build partition + local SparseTensor → B3 DSparseTensor.
+        # Build partition + local SparseTensor → DSparseTensor.
         local_mat = A_global.partition_for_rank(
             rank, world_size, partition_method="simple")
         partition = local_mat.partition
@@ -83,8 +83,8 @@ def _b4_worker(rank: int, world_size: int, port: int,
     not hasattr(dist, "is_available") or not dist.is_available(),
     reason="torch.distributed not available",
 )
-def test_b4_krylov_on_b3_backed_dsparse(method, precond, port):
-    """Each Krylov method, run on a DSparseTensor built via the B3
+def test_krylov_on_sparse_tensor_backed_dsparse(method, precond, port):
+    """Each Krylov method, run on a DSparseTensor built via the
     SparseTensor path, must drive ``||r||/||b|| < 1e-5`` on the
     SPD Poisson stencil. Proves the Krylov stack no longer depends
     on DSparseMatrix."""
@@ -94,7 +94,7 @@ def test_b4_krylov_on_b3_backed_dsparse(method, precond, port):
     procs = []
     try:
         for rank in range(world_size):
-            p = ctx.Process(target=_b4_worker,
+            p = ctx.Process(target=_krylov_worker,
                             args=(rank, world_size, port, method, precond,
                                   out_queue))
             p.start()
