@@ -131,14 +131,12 @@ class SparseShard:
     partition map (METIS / hypergraph / RCB) via the optional
     ``partition`` field.
 
-    The ``partition`` field is the **target** state of the DSparseMatrix
-    dissolution: it eventually carries ``owned_nodes`` /
+    The ``partition`` field carries the per-rank ``owned_nodes`` /
     ``halo_nodes`` / ``neighbor_partitions`` so the placement is the
-    single source of truth for the irregular shard map. Today it
-    defaults to ``None`` and the per-rank ``DSparseMatrix.partition``
-    still owns that data; A future release will swap the two so
-    ``_local_tensor`` becomes a plain :class:`SparseTensor` and the
-    placement carries the map.
+    single source of truth for the irregular shard map. It is set by
+    :meth:`DSparseTensor.from_sparse_local` / :meth:`partition` /
+    :meth:`from_global_distributed`; ``None`` only when an empty
+    placement object is being passed around as a type tag.
     """
     axis: int = 0
     partition: Optional["Partition"] = None
@@ -291,12 +289,6 @@ class DSparseTensor:
     # device mesh, and the global shape. Vectors crossing the API stay
     # as ``DTensor[Shard(0)]`` so the rest of the PyTorch distributed
     # ecosystem (FSDP, TP, DCP) composes for free.
-    #
-    # The legacy single-process simulator entry points
-    # (``DSparseTensor(values, row, col, shape, num_partitions=...)``,
-    # ``from_sparse_tensor``) leave ``_local_matrix`` / ``_spec`` as
-    # ``None`` -- callers that don't want the DTensor mirror keep
-    # working byte-for-byte.
     # ====================================================================== #
 
     @classmethod
@@ -309,14 +301,10 @@ class DSparseTensor:
         axis: int = 0,
         global_shape: Optional[Tuple[int, int]] = None,
     ) -> "DSparseTensor":
-        """Constructor for the SparseTensor-backed path: wrap a plain
-        :class:`SparseTensor` (per-rank local chunk in local coords)
-        plus its :class:`Partition` as a DSparseTensor whose
-        ``_local_tensor`` field is set instead of ``_local_matrix``.
+        """Wrap a per-rank :class:`SparseTensor` chunk (already in
+        local coords) plus its :class:`Partition` as a DSparseTensor.
 
-        Use this together with :meth:`SparseTensor.extract_partition` to
-        build a distributed tensor without going through
-        :class:`DSparseMatrix`:
+        Use together with :meth:`SparseTensor.extract_partition`:
 
         .. code-block:: python
 
@@ -326,14 +314,11 @@ class DSparseTensor:
                 local_tensor, mesh, partition,
                 global_shape=A_global.shape,
             )
-            y_dt = D @ x_dt              # routes through SparseTensor path
+            y_dt = D @ x_dt              # halo exchange + local SpMV
 
-        Compared to :meth:`from_local`, this path leaves
-        ``_local_matrix=None`` and stamps the partition onto
-        ``_spec.placement.partition`` so the placement is the single
-        source of truth for the irregular shard map. The matvec
-        dispatch picks this path automatically when
-        ``_local_tensor is not None``.
+        The partition is stamped onto ``_spec.placement.partition`` so
+        the placement is the single source of truth for the irregular
+        shard map.
 
         Parameters
         ----------
@@ -433,8 +418,8 @@ class DSparseTensor:
             rank = 0
         world_size = mesh.size() if mesh is not None else 1
 
-        # Skip DSparseMatrix: compute partition ids, build the Partition
-        # struct, extract the local SparseTensor, wrap. No legacy code.
+        # Compute partition ids, build the Partition struct, extract
+        # this rank's local SparseTensor, wrap.
         partition_ids = resolve_partition_ids(
             A.row_indices, A.col_indices,
             int(A.shape[0]), world_size,
@@ -622,8 +607,8 @@ class DSparseTensor:
             
         Returns
         -------
-        DSparseMatrix
-            Local partition matrix for this rank
+        DSparseTensor
+            This rank's row-sharded distributed tensor.
             
         Example
         -------
@@ -864,13 +849,13 @@ class DSparseTensor:
 
 
     def _matmul_row_shard_via_sparse_tensor(self, x: Any) -> Any:
-        """SparseTensor-backed matvec: backed by ``_local_tensor`` (SparseTensor) +
-        ``_spec.placement.partition``. No DSparseMatrix involvement.
+        """Row-sharded matvec: pad owned→local, halo exchange, local
+        SpMV via ``_local_tensor @ x``, slice back to the owned-row range.
         """
         partition = self._spec.placement.partition
         if partition is None:
             raise RuntimeError(
-                "SparseTensor-backed matvec requires spec.placement.partition; "
+                "row-shard matvec requires spec.placement.partition; "
                 "rebuild this DSparseTensor via from_sparse_local(...).")
         num_owned = int(partition.owned_nodes.numel())
         num_local = int(partition.local_to_global.numel())
@@ -906,11 +891,8 @@ class DSparseTensor:
     def _halo_exchange_via_spec(self,
                                   x: torch.Tensor,
                                   partition: "Partition") -> torch.Tensor:
-        """Halo-exchange port that reads ``partition`` (from spec) and
-        operates on ``x`` in-place. Functionally identical to
-        :meth:`DSparseMatrix.halo_exchange` but lives on DSparseTensor
-        so the dissolution doesn't require keeping a DSparseMatrix
-        around.
+        """Halo exchange: read ``partition`` (from spec), exchange the
+        ghost-node values with neighbour ranks in-place on ``x``.
 
         Per-rank send/recv buffers are cached on
         ``self._halo_send_buffers`` / ``self._halo_recv_buffers`` keyed
@@ -967,39 +949,24 @@ class DSparseTensor:
     def _matmul_col_shard(self, x: Any) -> Any:
         """Col-partitioned SpMV (``SparseShard(axis=1)``).
 
-        **Status**: scaffolded but not wired to a real col-partition data
-        layout. Today's ``DSparseMatrix`` (built by
-        ``partition_for_rank`` / ``DSparseTensor.partition``) is
-        **row-partitioned**; each rank owns a row slice plus a halo
-        of columns it reads from. Column partitioning requires:
-
-        1. A new ``SparseTensor.extract_column_partition(partition)``
-           that slices columns into a local ``(M, num_owned_cols)``
-           submatrix.
-        2. A 2-D mesh sharding shim so the halo *and* the
-           ``all_reduce(SUM)`` semantics line up.
-
-        Both land in the column-partition follow-up -- step adds
-        the column extraction; a follow-up wires it through this method.
-        Until then this dispatch raises so callers don't silently get
-        wrong answers.
+        **Status**: scaffolded but not yet implemented. Column
+        partitioning needs a new ``SparseTensor.extract_column_partition``
+        that slices columns into a local ``(M, num_owned_cols)``
+        submatrix plus a 2-D mesh sharding shim so the halo *and* the
+        ``all_reduce(SUM)`` semantics line up. Until then this dispatch
+        raises so callers don't silently get wrong answers.
         """
         raise NotImplementedError(
-            "SparseShard(axis=1) col-partitioned matvec is scaffolded "
-            "but requires the column-partition data path that ships "
-            "with the column-partition follow-up. Today.s "
-            "DSparseMatrix is row-partitioned -- use SparseShard(axis=0)."
+            "SparseShard(axis=1) col-partitioned matvec is not yet "
+            "implemented; use SparseShard(axis=0) (row-partitioned)."
         )
 
 
     # ====================================================================== #
-    # Shard(0)-space distributed CG.
+    # Shard(0)-space distributed solve dispatcher.
     #
-    # The classic ``_distributed_cg`` (single-process simulator path)
-    # operates on global N-sized vectors. That's only correct in the
-    # legacy single-process simulator -- on multiple ranks every CG
-    # iteration would Allgather the whole vector. The Shard(0)
-    # implementation below keeps every vector local (size ``num_owned``)
+    # Every Krylov method below keeps every vector local (size
+    # ``num_owned``)
     # and uses ``dist.all_reduce`` for the inner products that CG
     # needs. Matvec routes through ``_pad_owned_to_local`` so halo
     # entries are filled by ``halo_exchange`` per iteration.

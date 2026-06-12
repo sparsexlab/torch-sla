@@ -60,15 +60,14 @@
 - `benchmarks/benchmark_determinant.py`: Performance benchmark with CPU/CUDA comparison
 - `torch_sla/sparse_tensor.py`: DetAdjoint class and det() method
 - `torch_sla/backends/scipy_backend.py`: scipy_det() function using LU decomposition
-- `torch_sla/distributed.py`: det() for DSparseTensor (with gather) and DSparseMatrix (error handling)
+- `torch_sla/distributed.py`: det() for DSparseTensor (via `full_tensor()` gather)
 
 **Implementation Details:**
 - **Gradient formula**: ∂det(A)/∂A_ij = det(A) · (A⁻¹)_ji (Jacobi's formula)
 - **CPU backend**: LU decomposition via SciPy LU (~0.3-0.8ms for n=10-1000)
 - **CUDA backend**: torch.linalg.det for forward, torch.linalg.solve for gradient
 - **Memory efficiency**: O(1) graph nodes via adjoint method (no iteration history)
-- **Supported classes**: SparseTensor, DSparseTensor (with data gather warning)
-- **Error handling**: NotImplementedError for DSparseMatrix (single partition)
+- **Supported classes**: SparseTensor, DSparseTensor (via `full_tensor()` gather)
 - **Numerical considerations**: 
   - Determinant values overflow for large matrices (det → ±∞ for n > 1000)
   - Singular matrices cause LU decomposition to fail

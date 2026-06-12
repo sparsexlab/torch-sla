@@ -41,13 +41,6 @@ Key invariant: ``SparseTensor`` is **always** local data. ``DSparseTensor``
 is **always** a distributed wrapper holding one rank's ``SparseTensor`` plus
 a spec. No "hybrid" class.
 
-.. note::
-
-   ``DSparseMatrix`` is the historical per-rank chunk class from before
-   the DTensor-mirror refactor. It currently coexists with
-   ``SparseTensor`` inside ``DSparseTensor._local_tensor``; see
-   :ref:`arch-dsparse-dissolution` for the migration plan.
-
 ----
 
 .. _arch-shape-contract:
@@ -228,45 +221,6 @@ torch-sla's :meth:`~torch_sla.SparseTensor.partition_for_rank` exposes
 the partition through the ``partition_method`` kwarg. Today it
 supports ``simple``, ``metis``, ``rcb``, ``slicing``. ``hilbert`` and
 ``patoh`` are tracked follow-ups.
-
-----
-
-.. _arch-dsparse-dissolution:
-
-DSparseMatrix dissolution (Phase B)
------------------------------------
-
-Historical: ``DSparseMatrix`` predates the DTensor-mirror refactor and
-holds both **local data** (values, row, col, partition map, CSR cache)
-and **distributed-aware methods** (``matvec``, ``halo_exchange``,
-``solve``). After the refactor, ``DSparseTensor`` wraps a
-``DSparseMatrix`` plus a spec -- which means two classes carry
-overlapping responsibilities for "the local rank's chunk".
-
-The target architecture (Phase B):
-
-* The local chunk is a plain ``SparseTensor`` in **local coordinates**
-  (``num_local × num_local`` CSR, no awareness of being "distributed").
-* All partition metadata (``owned_nodes``, ``halo_nodes``,
-  ``neighbor_partitions``) moves into the ``SparseShard`` placement.
-* All distributed-aware methods (``matvec``, ``halo_exchange``,
-  ``solve``) move onto ``DSparseTensor`` and read from the spec.
-* ``DSparseMatrix`` becomes a deprecated alias that constructs a
-  ``DSparseTensor`` internally and delegates the old method names.
-
-Migration steps (one PR each, non-breaking):
-
-1. Lift ``Partition`` out of ``distributed.py``; let
-   ``SparseShard(axis, partition=)`` carry the metadata.
-2. Add ``SparseTensor.extract_partition(partition)`` -- builds the
-   local subdomain as a plain ``SparseTensor`` in local coordinates.
-3. Migrate ``DSparseTensor._matmul_spec`` to operate on ``SparseTensor``
-   directly. Move ``halo_exchange`` onto ``DSparseTensor``.
-4. Migrate the in-tree Krylov methods (``_distributed_*_shard``) to
-   call the new ``DSparseTensor``-native matvec. No-op behaviourally
-   if step 3 is correct.
-5. ``DSparseMatrix`` becomes a ``DeprecationWarning``-emitting alias.
-6. A future release removes ``DSparseMatrix`` entirely.
 
 ----
 

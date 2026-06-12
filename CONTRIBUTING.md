@@ -31,7 +31,7 @@ torch-sla/
 
 ### Naming Conventions
 
-- **Classes**: PascalCase (`SparseTensor`, `DSparseMatrix`)
+- **Classes**: PascalCase (`SparseTensor`, `DSparseTensor`)
 - **Functions**: snake_case (`sparse_solve()`, `det()`)
 - **Constants**: UPPER_SNAKE_CASE (`DEFAULT_TOL`, `MAX_ITER`)
 - **Private**: Leading underscore (`_validate()`, `_internal()`)

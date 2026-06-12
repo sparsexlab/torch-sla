@@ -53,28 +53,16 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
     if kind is None or (isinstance(kind, str) and kind.lower() == "none"):
         return lambda r: r
 
-    # Read owned size + device from whichever local backing is set.
-    if D._local_tensor is not None:
-        partition = D._spec.placement.partition
-        no = int(partition.owned_nodes.numel())
-        device = D._local_tensor.values.device
-    else:
-        local_matrix = D._local_matrix
-        no = local_matrix.num_owned
-        device = local_matrix.device
+    partition = D._spec.placement.partition
+    no = int(partition.owned_nodes.numel())
+    device = D._local_tensor.values.device
 
     def _owned_block() -> torch.Tensor:
         """Materialise the owned-by-owned dense block on first use."""
         if getattr(D, "_owned_block_cache", None) is not None:
             return D._owned_block_cache
-        if D._local_tensor is not None:
-            csr = D._local_tensor.to_dense()
-            block = csr[:no, :no].contiguous()
-        else:
-            csr = D._local_matrix._get_csr()
-            dense = csr.to_dense() if (csr.is_sparse_csr or csr.is_sparse) \
-                else csr
-            block = dense[:no, :no].contiguous()
+        csr = D._local_tensor.to_dense()
+        block = csr[:no, :no].contiguous()
         D._owned_block_cache = block
         return block
 

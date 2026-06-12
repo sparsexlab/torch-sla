@@ -1,10 +1,9 @@
-"""Unit tests for ``SparseTensor.extract_partition(p)`` (B2 of the
-DSparseMatrix dissolution).
+"""Unit tests for ``SparseTensor.extract_partition(p)``.
 
-These tests run on a single process (no torch.distributed required).
-They verify the local-subdomain build produces a SparseTensor whose
-matvec, when paired with halo-injected ``x``, reproduces the
-single-process global matvec for the owned-row slice.
+Single-process (no torch.distributed required). Verifies that the
+local-subdomain build produces a SparseTensor whose matvec, when
+paired with halo-injected ``x``, reproduces the single-process global
+matvec for the owned-row slice.
 """
 from __future__ import annotations
 

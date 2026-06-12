@@ -49,7 +49,7 @@ Based on extensive benchmarks on 2D Poisson equations (tested up to **169M DOF**
      - **Iterative only**, ~1e-6 precision
    * - Very Large (> 169M DOF)
      - N/A
-     - ``DSparseMatrix`` multi-GPU
+     - ``DSparseTensor`` multi-GPU
      - Multi-GPU domain decomposition
 
 Key Insights
@@ -561,7 +561,7 @@ Performance Tips
 3. **Use scipy+lu for CPU**: Best balance of speed and precision
 4. **Use cudss+cholesky for small CUDA problems**: Fastest direct solver (< 2M DOF)
 5. **Use pytorch+cg for large problems**: Memory efficient, scales to 169M+ DOF on single GPU
-6. **Use multi-GPU for very large problems**: DSparseMatrix supports domain decomposition, 3 GPUs can reach 500M+ DOF
+6. **Use multi-GPU for very large problems**: DSparseTensor supports domain decomposition, 3 GPUs can reach 500M+ DOF
 7. **Use cupy** for GPU iterative solvers (CG, GMRES) or as a direct solver fallback
 8. **Use LU factorization for repeated solves**: Cache with ``A.lu()``
 
