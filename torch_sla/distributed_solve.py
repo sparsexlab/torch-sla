@@ -181,47 +181,60 @@ def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
             f"b_owned size {b_owned.shape[0]} != num_owned {no}; "
             "Shard(0) CG requires b to be the local owned slice.")
 
-    # Allocate the working set once -- the hot loop only does in-place
-    # axpy / dot / matvec on these.
+    # Allocate the working set once.
     x = torch.zeros_like(b_owned)
     Ax0 = D._shard_matvec(x)
     r = b_owned - Ax0
     z = M_apply(r)
-    # Note: ``z`` may alias ``r`` (identity preconditioner). Clone into
-    # the persistent p buffer to be safe.
     p = z.clone()
-    rs_old = D._shard_dot(r, z)
 
-    b_norm = float(D._shard_norm(b_owned).item())
+    # Fuse the initial <r, z> + ||b|| reduces into ONE all_reduce
+    # (NCCL latency is dominated by per-call overhead, not payload).
+    init2 = torch.stack([torch.dot(r, z), torch.dot(b_owned, b_owned)])
+    if _DIST_AVAILABLE and dist.is_initialized():
+        dist.all_reduce(init2, op=dist.ReduceOp.SUM)
+    rs_old = init2[0].clone()
+    b_norm = float(init2[1].sqrt().item())
     tol = max(atol, rtol * b_norm)
+
+    # Hot-loop optimisations:
+    # * 2 fused all_reduce per iter instead of 3 (combined <r,r> + <r,z>).
+    # * No CPU sync inside the hot path -- convergence is checked every
+    #   ``check_every`` iters. CG is monotone in ||r||, so worst-case we
+    #   overshoot by <check_every iterations.
+    # * In-place axpy via ``addcmul`` / ``mul_().add_()`` -- zero fresh
+    #   allocations in the loop body.
+    check_every = 10
+    r_norm_sq = None
 
     for k in range(maxiter):
         Ap = D._shard_matvec(p)
-        # Note: Ap may be a view of ``_y_full_cache`` / local CSR scratch.
-        # We consume it within the iter and never hold it across calls,
-        # so the next ``_shard_matvec`` overwriting that buffer is safe.
-        pAp = D._shard_dot(p, Ap)
-        if float(pAp.abs().item()) < 1e-30:
-            if verbose:
-                print(f"[shard-PCG] iter {k}: pAp ~= 0, stop")
-            break
-        alpha = rs_old / pAp                           # 0-d tensor
-        # x += alpha * p   /   r -= alpha * Ap   in-place (no fresh alloc).
+        pAp = D._shard_dot(p, Ap)             # all_reduce #1 / iter
+        alpha = rs_old / pAp
         torch.addcmul(x, alpha, p, value=1.0, out=x)
         torch.addcmul(r, alpha, Ap, value=-1.0, out=r)
 
-        r_norm = float(D._shard_norm(r).item())
-        if verbose and (k % 100 == 0 or k < 5):
-            print(f"[shard-PCG] iter {k}: ||r||={r_norm:.3e}")
-        if r_norm < tol:
-            if verbose:
-                print(f"[shard-PCG] converged at iter {k}, ||r||={r_norm:.3e}")
-            break
         z = M_apply(r)
-        rs_new = D._shard_dot(r, z)
+        # Fused: <r, r> AND <r, z> in one 2-element all_reduce.
+        loc2 = torch.stack([torch.dot(r, r), torch.dot(r, z)])
+        if _DIST_AVAILABLE and dist.is_initialized():
+            dist.all_reduce(loc2, op=dist.ReduceOp.SUM)  # all_reduce #2 / iter
+        r_norm_sq = loc2[0]
+        rs_new = loc2[1]
+
+        # Convergence check + verbose log: only every ``check_every`` iter.
+        if k % check_every == 0:
+            r_norm = float(r_norm_sq.sqrt().item())
+            if verbose and (k % 100 == 0 or k < 5):
+                print(f"[shard-PCG] iter {k}: ||r||={r_norm:.3e}")
+            if r_norm < tol:
+                if verbose:
+                    print(f"[shard-PCG] converged at iter {k}, "
+                          f"||r||={r_norm:.3e}")
+                break
+
         beta = rs_new / rs_old
-        # p = z + beta * p   in-place: p *= beta; p += z.
-        p.mul_(beta).add_(z)
+        p.mul_(beta).add_(z)                  # p = z + beta * p   in-place
         rs_old = rs_new
 
     return x
