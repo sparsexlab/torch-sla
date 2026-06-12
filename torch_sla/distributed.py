@@ -1105,11 +1105,14 @@ class DSparseTensor:
 
     def _shard_matvec(self, x_owned: torch.Tensor) -> torch.Tensor:
         """Apply ``A`` to a Shard(0) vector: pad owned→local, halo
-        exchange, local SpMV via ``_local_tensor @ x``, slice back to
+        exchange, local SpMV via a cached CSR multiply, slice back to
         the owned-row range.
 
         Used by every Shard(0)-space Krylov method (CG / BiCGStab /
         GMRES / FGMRES / MINRES) and the polynomial preconditioner.
+        ``SparseTensor.__matmul__`` would fall back to a COO
+        gather+scatter_add SpMV (~2× slower than torch's CSR kernel
+        on CPU at 64k DOF), so we cache a single CSR per partition.
         """
         partition = self._spec.placement.partition
         num_owned = int(partition.owned_nodes.numel())
@@ -1125,7 +1128,21 @@ class DSparseTensor:
                 f"x shape[0]={x_owned.shape[0]}, expected "
                 f"num_owned={num_owned} or num_local={num_local}")
         self._halo_exchange_via_spec(x_padded, partition)
-        y_full = self._local_tensor @ x_padded
+
+        # Cache the local CSR on first matvec; subsequent iters re-use it.
+        csr = getattr(self, "_local_csr_cache", None)
+        if csr is None:
+            st = self._local_tensor
+            indices = torch.stack([st.row_indices.to(torch.int64),
+                                    st.col_indices.to(torch.int64)])
+            coo = torch.sparse_coo_tensor(indices, st.values,
+                                           tuple(st.shape)).coalesce()
+            csr = coo.to_sparse_csr()
+            self._local_csr_cache = csr
+
+        # ``torch.mv(csr, x)`` is the fused CSR · 1-D dense kernel and
+        # is materially faster than ``csr @ x.unsqueeze(-1)`` on CPU.
+        y_full = torch.mv(csr, x_padded)
         return y_full[:num_owned]
 
     # ------------------------------------------------------------------ #
