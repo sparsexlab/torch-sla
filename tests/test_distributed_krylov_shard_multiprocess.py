@@ -46,7 +46,8 @@ def _krylov_worker(rank: int, world_size: int,
         from torch.distributed.device_mesh import init_device_mesh
         from torch.distributed.tensor import DTensor, Shard
 
-        from torch_sla import (DSparseTensor, SparseTensor, RowPartitioned)
+        from torch_sla import (DSparseTensor, SparseTensor, solve,
+                                 SolverConfig)
         from torch_sla.datasets import Synthetic
 
         bench = Synthetic[bench_key]
@@ -63,9 +64,12 @@ def _krylov_worker(rank: int, world_size: int,
         b_owned = b_global[local_matrix.partition.owned_nodes]
         b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
 
-        x_dt = D.solve_distributed_shard(
-            b_dt, method=method,
-            atol=atol, rtol=rtol, maxiter=maxiter, restart=restart)
+        # Unified solve() entry + SolverConfig scope -- restart only
+        # matters for gmres / fgmres but the kwarg is harmless elsewhere.
+        with SolverConfig(method=method,
+                          atol=atol, rtol=rtol,
+                          maxiter=maxiter, restart=restart):
+            x_dt = solve(D, b_dt)
         x_owned = x_dt.to_local()
 
         # SciPy reference on the full global matrix.
@@ -197,8 +201,8 @@ def _solverconfig_scope_worker(rank: int, world_size: int,
         from torch.distributed.device_mesh import init_device_mesh
         from torch.distributed.tensor import DTensor, Shard
 
-        from torch_sla import (DSparseTensor, SparseTensor, RowPartitioned,
-                                SolverConfig)
+        from torch_sla import (DSparseTensor, SparseTensor, solve,
+                                 SolverConfig)
         from torch_sla.datasets import Synthetic
 
         bench = Synthetic["convdiff_2d_64_peclet_10"]
@@ -213,10 +217,11 @@ def _solverconfig_scope_worker(rank: int, world_size: int,
             local_matrix.partition.owned_nodes]
         b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
 
-        # Inside the scope: bicgstab + tight tols should be picked up.
+        # Inside the scope: bicgstab + tight tols should be picked up by
+        # the unified ``solve(D, b)`` entry point.
         with SolverConfig(method="bicgstab", atol=1e-10, rtol=1e-10,
                           maxiter=4000):
-            x_dt = D.solve_distributed_shard(b_dt)
+            x_dt = solve(D, b_dt)
 
         x_owned = x_dt.to_local()
         # Distributed residual.
@@ -232,8 +237,8 @@ def _solverconfig_scope_worker(rank: int, world_size: int,
         # (which won't converge -- we just check the kwarg overrode).
         with SolverConfig(method="bicgstab", maxiter=4000):
             try:
-                x_cg = D.solve_distributed_shard(
-                    b_dt, method="cg", maxiter=50, atol=1e-99, rtol=0)
+                x_cg = solve(D, b_dt, method="cg", maxiter=50,
+                              atol=1e-99, rtol=0)
                 # Don't assert convergence -- just that the call returned.
                 kwarg_override_ran = (x_cg is not None)
             except Exception:

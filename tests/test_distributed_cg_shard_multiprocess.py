@@ -36,7 +36,7 @@ def _shard_cg_worker(rank: int, world_size: int,
         from torch.distributed.device_mesh import init_device_mesh
         from torch.distributed.tensor import DTensor, Shard
 
-        from torch_sla import DSparseTensor, SparseTensor
+        from torch_sla import DSparseTensor, SparseTensor, solve, SolverConfig
         from torch_sla.datasets import Synthetic
 
         # Standard catalogued 2D Poisson stencil -- SPD, well-conditioned.
@@ -57,9 +57,10 @@ def _shard_cg_worker(rank: int, world_size: int,
         b_owned = b_global[local_matrix.partition.owned_nodes]
         b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
 
-        # Shard-space CG.
-        x_dt = D.solve_distributed_shard(
-            b_dt, atol=1e-12, rtol=1e-10, maxiter=2000)
+        # Shard-space CG via the unified solve() API + SolverConfig scope.
+        with SolverConfig(method="cg", atol=1e-12, rtol=1e-10,
+                          maxiter=2000):
+            x_dt = solve(D, b_dt)
         x_owned = x_dt.to_local()
 
         # Reference: scipy CG on the global matrix.

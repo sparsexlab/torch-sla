@@ -33,7 +33,7 @@ def _krylov_worker(rank: int, world_size: int, port: int,
         from torch.distributed.device_mesh import init_device_mesh
         from torch.distributed.tensor import DTensor, Shard
 
-        from torch_sla import DSparseTensor, SparseTensor
+        from torch_sla import DSparseTensor, SparseTensor, solve, SolverConfig
         from torch_sla.datasets import Synthetic
 
         bench = Synthetic["poisson_2d_16"]
@@ -58,9 +58,9 @@ def _krylov_worker(rank: int, world_size: int, port: int,
         b_owned = torch.randn(N, dtype=torch.float64)[partition.owned_nodes]
         b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
 
-        x_dt = D.solve_distributed_shard(
-            b_dt, method=method, preconditioner=precond,
-            atol=1e-10, rtol=1e-10, maxiter=2000)
+        with SolverConfig(method=method, preconditioner=precond,
+                          atol=1e-10, rtol=1e-10, maxiter=2000):
+            x_dt = solve(D, b_dt)
         x = x_dt.to_local()
 
         r = b_owned - D._shard_matvec(x)

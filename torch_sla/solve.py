@@ -209,6 +209,7 @@ class SolverConfig:
     atol: Optional[float] = None
     rtol: Optional[float] = None
     maxiter: Optional[int] = None
+    restart: Optional[int] = None     # GMRES / FGMRES restart length
     x0: Optional[Tensor] = None
     matrix_type: Optional[str] = None
     mixed_precision: Optional[bool] = None
@@ -373,6 +374,7 @@ def solve(
     mixed_precision: Any = _UNSET,
     return_info: Any = _UNSET,
     verbose: Any = _UNSET,
+    restart: Any = _UNSET,
 ) -> Union[Tensor, Tuple[Tensor, SolveInfo]]:
     """Solve ``A x = b`` with autograd support; the user-facing entry point.
 
@@ -439,6 +441,7 @@ def solve(
         "atol": atol, "rtol": rtol, "maxiter": maxiter, "x0": x0,
         "matrix_type": matrix_type, "mixed_precision": mixed_precision,
         "return_info": return_info, "verbose": verbose,
+        "restart": restart,
     }
     method         = _pick("method", "auto")
     backend        = _pick("backend", "auto")
@@ -451,6 +454,7 @@ def solve(
     mixed_precision = _pick("mixed_precision", False)
     return_info    = _pick("return_info", False)
     verbose        = _pick("verbose", False)
+    restart        = _pick("restart", 30)
 
     # Distributed dispatch: when ``A`` is a :class:`DSparseTensor` with a
     # real ``DSparseSpec`` (built via ``from_local`` / ``partition`` on a
@@ -469,6 +473,7 @@ def solve(
             method=shard_method,
             preconditioner=preconditioner,
             atol=atol, rtol=rtol, maxiter=maxiter,
+            restart=restart,
             verbose=verbose,
         )
         if not return_info:

@@ -37,7 +37,8 @@ def _precond_worker(rank: int, world_size: int,
         from torch.distributed.device_mesh import init_device_mesh
         from torch.distributed.tensor import DTensor, Shard
 
-        from torch_sla import (DSparseTensor, SparseTensor, RowPartitioned)
+        from torch_sla import (DSparseTensor, SparseTensor, solve,
+                                 SolverConfig)
         from torch_sla.datasets import Synthetic
 
         bench = Synthetic[bench_key]
@@ -52,9 +53,10 @@ def _precond_worker(rank: int, world_size: int,
             local_matrix.partition.owned_nodes]
         b_dt = DTensor.from_local(b_owned, mesh, [Shard(0)])
 
-        x_dt = D.solve_distributed_shard(
-            b_dt, method=method, preconditioner=precond,
-            atol=1e-10, rtol=1e-10, maxiter=maxiter, restart=30)
+        with SolverConfig(method=method, preconditioner=precond,
+                          atol=1e-10, rtol=1e-10,
+                          maxiter=maxiter, restart=30):
+            x_dt = solve(D, b_dt)
         x_owned = x_dt.to_local()
         r = b_owned - D._shard_matvec(x_owned)
         rs = torch.dot(r, r)
@@ -154,7 +156,7 @@ def _scope_precond_worker(rank, world_size, port, out_queue):
         from torch.distributed.tensor import DTensor, Shard
 
         from torch_sla import (DSparseTensor, SparseTensor,
-                                RowPartitioned, SolverConfig)
+                                solve, SolverConfig)
         from torch_sla.datasets import Synthetic
 
         bench = Synthetic["convdiff_2d_64_peclet_10"]
@@ -172,7 +174,7 @@ def _scope_precond_worker(rank, world_size, port, out_queue):
         with SolverConfig(method="bicgstab",
                           preconditioner="block_jacobi",
                           atol=1e-10, rtol=1e-10, maxiter=500):
-            x_dt = D.solve_distributed_shard(b_dt)
+            x_dt = solve(D, b_dt)
         x = x_dt.to_local()
         r = b_owned - D._shard_matvec(x)
         rs = torch.dot(r, r); dist.all_reduce(rs)
