@@ -1140,10 +1140,16 @@ class DSparseTensor:
         Buffers cached on the instance:
         * ``_local_csr_cache`` -- the local CSR.
         * ``_x_padded_cache``  -- the (num_local,) input scratch.
-        * ``_y_full_cache``    -- the (num_local,) output scratch.
 
-        With caches warm, the per-iter work is: index_copy_ + halo
-        exchange + ``torch.mv`` + slice -- no large allocations.
+        Per-iter work: ``index_copy_`` (small) + halo exchange +
+        ``torch.mv`` + slice -- no large allocations.
+
+        We tried an interior/boundary split with overlapped halo to
+        hide NCCL latency behind the interior SpMV; in practice it
+        degraded perf 5-15% (two SpMV launches + sparse pattern
+        duplication + PyTorch cross-stream sync ate the comm savings)
+        and was reverted. The CSR-cache + cached pad + async batched
+        NCCL P2P is the local optimum.
         """
         partition = self._spec.placement.partition
         num_owned = int(partition.owned_nodes.numel())
@@ -1152,9 +1158,6 @@ class DSparseTensor:
         device = x_owned.device
 
         if x_owned.shape[0] == num_owned:
-            # Reuse the padded scratch across iters; only owned rows
-            # actually need rewriting -- halo positions get
-            # overwritten by _halo_exchange_via_spec below.
             xp = getattr(self, "_x_padded_cache", None)
             if (xp is None or xp.shape[0] != num_local
                     or xp.dtype != dtype or xp.device != device):
@@ -1181,8 +1184,7 @@ class DSparseTensor:
             csr = coo.to_sparse_csr()
             self._local_csr_cache = csr
 
-        # ``torch.mv(csr, x)`` is the fused CSR · 1-D dense kernel and
-        # is materially faster than ``csr @ x.unsqueeze(-1)`` on CPU.
+        # ``torch.mv(csr, x)`` is the fused CSR · 1-D dense kernel.
         y_full = torch.mv(csr, x_padded)
         return y_full[:num_owned]
 
