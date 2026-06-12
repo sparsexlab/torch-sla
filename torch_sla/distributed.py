@@ -1174,6 +1174,9 @@ class DSparseTensor:
         self._halo_exchange_via_spec(x_padded, partition)
 
         # Cache the local CSR on first matvec; subsequent iters re-use it.
+        # int32 indices halve the col_indices storage (and improve cuSPARSE
+        # L1 cache hit rate) when num_local < 2^31. Fall back to int64 only
+        # if the matrix is genuinely too large to address with int32.
         csr = getattr(self, "_local_csr_cache", None)
         if csr is None:
             st = self._local_tensor
@@ -1181,7 +1184,19 @@ class DSparseTensor:
                                     st.col_indices.to(torch.int64)])
             coo = torch.sparse_coo_tensor(indices, st.values,
                                            tuple(st.shape)).coalesce()
-            csr = coo.to_sparse_csr()
+            csr64 = coo.to_sparse_csr()
+            idx_dtype = (torch.int32
+                          if num_local < 2_147_483_647
+                          else torch.int64)
+            if idx_dtype is torch.int32:
+                csr = torch.sparse_csr_tensor(
+                    csr64.crow_indices().to(idx_dtype),
+                    csr64.col_indices().to(idx_dtype),
+                    csr64.values(),
+                    csr64.size(),
+                )
+            else:
+                csr = csr64
             self._local_csr_cache = csr
 
         # ``torch.mv(csr, x)`` is the fused CSR · 1-D dense kernel.
