@@ -2383,6 +2383,16 @@ class DSparseTensor:
         # matrix; ``None`` for the legacy single-process simulator
         # constructor so existing call sites keep behaving identically.
         self._local_matrix: Optional[DSparseMatrix] = None
+        # B3: ``_local_tensor`` is the post-dissolution per-rank chunk -- a
+        # plain :class:`SparseTensor` in local coordinates. When set,
+        # matvec uses this + ``_spec.placement.partition`` and bypasses
+        # ``DSparseMatrix`` entirely. Built via
+        # :meth:`from_sparse_local`.
+        self._local_tensor: Optional["SparseTensor"] = None
+        # Per-rank caches for halo-exchange (B3-only; populated lazily by
+        # ``_halo_exchange_via_spec``).
+        self._b3_send_buffers: Dict[int, torch.Tensor] = {}
+        self._b3_recv_buffers: Dict[int, torch.Tensor] = {}
         self._spec: Optional[DSparseSpec] = None
     
     def _compute_partitions(
@@ -2498,6 +2508,89 @@ class DSparseTensor:
         self._partition_ids = None
         self._partitions = []
         self._local_matrix = local_matrix
+        self._local_tensor = None
+        self._b3_send_buffers = {}
+        self._b3_recv_buffers = {}
+        self._spec = DSparseSpec(placement=placement, mesh=mesh,
+                                 global_shape=global_shape)
+        return self
+
+    @classmethod
+    def from_sparse_local(
+        cls,
+        local_tensor: "SparseTensor",
+        mesh: Any,
+        partition: "Partition",
+        *,
+        axis: int = 0,
+        global_shape: Optional[Tuple[int, int]] = None,
+    ) -> "DSparseTensor":
+        """Phase-B Dissolution constructor: wrap a plain
+        :class:`SparseTensor` (per-rank local chunk in local coords)
+        plus its :class:`Partition` as a DSparseTensor whose
+        ``_local_tensor`` field is set instead of ``_local_matrix``.
+
+        Use this together with :meth:`SparseTensor.extract_partition` to
+        build a distributed tensor without going through
+        :class:`DSparseMatrix`:
+
+        .. code-block:: python
+
+            partition = compute_partition(...)
+            local_tensor = A_global.extract_partition(partition)
+            D = DSparseTensor.from_sparse_local(
+                local_tensor, mesh, partition,
+                global_shape=A_global.shape,
+            )
+            y_dt = D @ x_dt              # routes through B3 path
+
+        Compared to :meth:`from_local`, this path leaves
+        ``_local_matrix=None`` and stamps the partition onto
+        ``_spec.placement.partition`` so the placement is the single
+        source of truth for the irregular shard map. The matvec
+        dispatch picks the B3 path automatically when
+        ``_local_tensor is not None``.
+
+        Parameters
+        ----------
+        local_tensor : SparseTensor
+            This rank's local subdomain (size ``(num_local, num_local)``,
+            COO in local coordinates). Usually built by
+            :meth:`SparseTensor.extract_partition`.
+        mesh : DeviceMesh
+            The PyTorch device mesh.
+        partition : Partition
+            Irregular partition map for this rank
+            (``owned_nodes`` / ``halo_nodes`` / ``neighbor_partitions``
+            etc).
+        axis : int
+            Sparse axis being sharded (default 0 = rows).
+        global_shape : Tuple[int, int], optional
+            Global matrix shape. If omitted, inferred from
+            ``partition.local_to_global.numel()`` -- only valid for
+            square matrices.
+        """
+        if global_shape is None:
+            n = int(partition.local_to_global.numel() +
+                    0)  # placeholder; caller should pass it explicitly
+            global_shape = (n, n)
+        self = cls.__new__(cls)
+        self._values = None
+        self._row_indices = None
+        self._col_indices = None
+        self._shape = global_shape
+        self._num_partitions = mesh.size() if mesh is not None else 1
+        self._coords = None
+        self._partition_method = None
+        self._verbose = False
+        self._device = local_tensor.values.device
+        self._partition_ids = None
+        self._partitions = []
+        self._local_matrix = None
+        self._local_tensor = local_tensor
+        self._b3_send_buffers = {}
+        self._b3_recv_buffers = {}
+        placement = SparseShard(axis=axis, partition=partition)
         self._spec = DSparseSpec(placement=placement, mesh=mesh,
                                  global_shape=global_shape)
         return self
@@ -4512,8 +4605,11 @@ class DSparseTensor:
         Other axis values raise -- block-axis sharding isn't covered
         by SpMV in the same code path.
         """
-        local_matrix = self._local_matrix
-        assert local_matrix is not None, "spec-mode requires _local_matrix"
+        # Spec mode requires *some* local backing -- either the legacy
+        # DSparseMatrix or the B3-style SparseTensor.
+        assert (self._local_matrix is not None
+                or self._local_tensor is not None), \
+            "spec-mode requires _local_matrix or _local_tensor"
 
         placement = self._spec.placement
         if not isinstance(placement, SparseShard):
@@ -4532,7 +4628,18 @@ class DSparseTensor:
 
     def _matmul_row_shard(self, x: Any) -> Any:
         """Row-partitioned SpMV (``SparseShard(axis=0)``): halo exchange
-        + local SpMV → ``DTensor[Shard(0)]``."""
+        + local SpMV → ``DTensor[Shard(0)]``.
+
+        Dispatches on which backing is set:
+
+        * ``_local_tensor`` (plain :class:`SparseTensor`, post-B3 path)
+          → ``_matmul_row_shard_via_sparse_tensor``
+        * ``_local_matrix`` (legacy :class:`DSparseMatrix`) → original
+          path.
+        """
+        if self._local_tensor is not None:
+            return self._matmul_row_shard_via_sparse_tensor(x)
+
         local_matrix = self._local_matrix
         if _is_dtensor(x):
             x_local = x.to_local()
@@ -4546,6 +4653,107 @@ class DSparseTensor:
             return _DTensor.from_local(
                 y_owned, self._spec.mesh, [Shard(0)])
         return y_owned
+
+    def _matmul_row_shard_via_sparse_tensor(self, x: Any) -> Any:
+        """B3 path: matvec backed by ``_local_tensor`` (SparseTensor) +
+        ``_spec.placement.partition``. No DSparseMatrix involvement.
+        """
+        partition = self._spec.placement.partition
+        if partition is None:
+            raise RuntimeError(
+                "B3 matvec path requires spec.placement.partition; "
+                "rebuild this DSparseTensor via from_sparse_local(...).")
+        num_owned = int(partition.owned_nodes.numel())
+        num_local = int(partition.local_to_global.numel())
+
+        if _is_dtensor(x):
+            x_local = x.to_local()
+        else:
+            x_local = x
+
+        # Pad num_owned → num_local; halo will be filled by exchange.
+        if x_local.shape[0] == num_owned:
+            x_padded = torch.zeros(num_local, dtype=x_local.dtype,
+                                    device=x_local.device)
+            x_padded[:num_owned] = x_local
+        elif x_local.shape[0] == num_local:
+            x_padded = x_local
+        else:
+            raise ValueError(
+                f"x has shape[0]={x_local.shape[0]}, expected num_owned "
+                f"({num_owned}) or num_local ({num_local}).")
+
+        self._halo_exchange_via_spec(x_padded, partition)
+        # Local SpMV via SparseTensor's own __matmul__ (CSR-backed).
+        y_full = self._local_tensor @ x_padded
+        y_owned = y_full[:num_owned]
+
+        if _is_dtensor(x):
+            from torch.distributed.tensor import DTensor as _DTensor, Shard
+            return _DTensor.from_local(
+                y_owned, self._spec.mesh, [Shard(0)])
+        return y_owned
+
+    def _halo_exchange_via_spec(self,
+                                  x: torch.Tensor,
+                                  partition: "Partition") -> torch.Tensor:
+        """Halo-exchange port that reads ``partition`` (from spec) and
+        operates on ``x`` in-place. Functionally identical to
+        :meth:`DSparseMatrix.halo_exchange` but lives on DSparseTensor
+        so the dissolution doesn't require keeping a DSparseMatrix
+        around.
+
+        Per-rank send/recv buffers are cached on
+        ``self._b3_send_buffers`` / ``self._b3_recv_buffers`` keyed
+        by ``(neighbor_id, dtype)``.
+        """
+        if not DIST_AVAILABLE or not dist.is_initialized():
+            return x
+
+        device = x.device
+        dtype = x.dtype
+
+        send_bufs = {}
+        recv_bufs = {}
+        for nid in partition.neighbor_partitions:
+            key = (nid, dtype)
+            sb = self._b3_send_buffers.get(key)
+            if sb is None:
+                idx = partition.send_indices[nid].to(device=device,
+                                                       dtype=torch.int64)
+                sb = torch.empty(int(idx.numel()),
+                                  dtype=dtype, device=device)
+                self._b3_send_buffers[key] = sb
+            send_bufs[nid] = sb
+            rb = self._b3_recv_buffers.get(key)
+            if rb is None:
+                ridx = partition.recv_indices[nid].to(device=device,
+                                                       dtype=torch.int64)
+                rb = torch.empty(int(ridx.numel()),
+                                  dtype=dtype, device=device)
+                self._b3_recv_buffers[key] = rb
+            recv_bufs[nid] = rb
+
+        # Fill send buffers (gather from x at send_indices).
+        for nid in partition.neighbor_partitions:
+            send_idx = partition.send_indices[nid].to(device=device,
+                                                       dtype=torch.int64)
+            send_bufs[nid].copy_(x[send_idx])
+
+        # Exchange (gloo-friendly: isend/irecv pairs).
+        requests = []
+        for nid in partition.neighbor_partitions:
+            requests.append(dist.isend(send_bufs[nid], dst=int(nid)))
+            requests.append(dist.irecv(recv_bufs[nid], src=int(nid)))
+        for r in requests:
+            r.wait()
+
+        # Scatter recv buffers into x at recv_indices.
+        for nid in partition.neighbor_partitions:
+            recv_idx = partition.recv_indices[nid].to(device=device,
+                                                       dtype=torch.int64)
+            x[recv_idx] = recv_bufs[nid]
+        return x
 
     def _matmul_col_shard(self, x: Any) -> Any:
         """Col-partitioned SpMV (``SparseShard(axis=1)``).
