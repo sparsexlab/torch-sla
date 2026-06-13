@@ -1253,6 +1253,28 @@ class SparseTensor:
         return SparseTensor(local_vals, local_rows, local_cols,
                              (num_local, num_local))
 
+    def save_distributed(
+        self,
+        directory,
+        num_partitions: int,
+        partition_method: str = "simple",
+        coords: Optional[torch.Tensor] = None,
+        verbose: bool = False,
+    ) -> None:
+        """Partition this global matrix into ``num_partitions`` shards
+        and write them all to ``directory``. Single-process helper --
+        the output layout matches what every rank would produce by
+        calling :meth:`DSparseTensor.save` collectively, so the same
+        directory can be loaded back under torchrun via
+        :func:`load_dsparse`.
+        """
+        from .io import save_sparse_sharded
+        save_sparse_sharded(
+            self, directory, num_partitions=num_partitions,
+            partition_method=partition_method, coords=coords,
+            verbose=verbose,
+        )
+
     def partition_for_rank(
         self,
         rank: int,

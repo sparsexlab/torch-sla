@@ -381,17 +381,17 @@ def load_sparse(
 def load_metadata(directory: Union[str, Path]) -> Dict:
     """
     Load metadata from a distributed sparse tensor directory.
-    
+
     Parameters
     ----------
     directory : str or Path
         Directory containing partitioned data.
-    
+
     Returns
     -------
     dict
         Metadata including shape, dtype, num_partitions, etc.
-    
+
     Example
     -------
     >>> meta = load_metadata("matrix_dist")
@@ -400,3 +400,410 @@ def load_metadata(directory: Union[str, Path]) -> Dict:
     directory = Path(directory)
     with open(directory / "metadata.json", "r") as f:
         return json.load(f)
+
+
+# =============================================================================
+# DSparseTensor persistence (per-rank shard files)
+# =============================================================================
+#
+# File layout::
+#
+#     directory/
+#         metadata.json                 # global shape, dtype, num_partitions
+#         partition_<rank>.safetensors  # this rank's COO + Partition fields
+#
+# ``metadata.json`` is a sidecar so single-process inspection
+# (:func:`load_sparse_shard`) doesn't need to import the distributed
+# stack. ``partition_<rank>.safetensors`` carries every tensor field of
+# the :class:`Partition` plus the rank-local COO; per-neighbour halo
+# indices are stored as ``send_to_<j>`` / ``recv_from_<j>`` keys.
+
+_DSPARSE_FORMAT_VERSION = "2.0"
+
+
+def _partition_to_safetensors_dict(
+    local_tensor: "SparseTensor",
+    partition,
+) -> Dict[str, torch.Tensor]:
+    """Pack a (local SparseTensor, Partition) pair into the flat key/tensor
+    dict expected by ``safetensors.save_file``. CPU + contiguous."""
+    out: Dict[str, torch.Tensor] = {
+        "values":          local_tensor.values.contiguous().cpu(),
+        "row_indices":     local_tensor.row_indices.contiguous().cpu(),
+        "col_indices":     local_tensor.col_indices.contiguous().cpu(),
+        "owned_nodes":     partition.owned_nodes.contiguous().cpu(),
+        "halo_nodes":      partition.halo_nodes.contiguous().cpu(),
+        "local_nodes":     partition.local_nodes.contiguous().cpu(),
+        "global_to_local": partition.global_to_local.contiguous().cpu(),
+        "local_to_global": partition.local_to_global.contiguous().cpu(),
+    }
+    for nid in partition.neighbor_partitions:
+        if nid in partition.send_indices:
+            out[f"send_to_{nid}"] = (
+                partition.send_indices[nid].contiguous().cpu()
+            )
+        if nid in partition.recv_indices:
+            out[f"recv_from_{nid}"] = (
+                partition.recv_indices[nid].contiguous().cpu()
+            )
+    return out
+
+
+def _safetensors_dict_to_partition(
+    tensors: Dict[str, torch.Tensor],
+    neighbor_partitions,
+    partition_id: int,
+    device: Union[str, torch.device],
+):
+    """Inverse of :func:`_partition_to_safetensors_dict`. Reconstructs a
+    :class:`Partition` on ``device``."""
+    from .partition import Partition
+    send_indices = {}
+    recv_indices = {}
+    for nid in neighbor_partitions:
+        sk, rk = f"send_to_{nid}", f"recv_from_{nid}"
+        if sk in tensors:
+            send_indices[nid] = tensors[sk].to(device)
+        if rk in tensors:
+            recv_indices[nid] = tensors[rk].to(device)
+    return Partition(
+        partition_id=partition_id,
+        local_nodes=tensors["local_nodes"].to(device),
+        owned_nodes=tensors["owned_nodes"].to(device),
+        halo_nodes=tensors["halo_nodes"].to(device),
+        neighbor_partitions=list(neighbor_partitions),
+        send_indices=send_indices,
+        recv_indices=recv_indices,
+        global_to_local=tensors["global_to_local"].to(device),
+        local_to_global=tensors["local_to_global"].to(device),
+    )
+
+
+def save_dsparse(
+    tensor: "DSparseTensor",
+    directory: Union[str, Path],
+    rank: Optional[int] = None,
+    verbose: bool = False,
+) -> None:
+    """Save the calling rank's local shard of a :class:`DSparseTensor`.
+
+    Every rank in the process group calls this with the same
+    ``directory`` (typically on a shared filesystem); each writes its
+    own ``partition_<rank>.safetensors``. Rank 0 also writes
+    ``metadata.json`` so :func:`load_dsparse` / :func:`load_metadata`
+    can be called by a single inspector process later.
+
+    Parameters
+    ----------
+    tensor : DSparseTensor
+        This rank's distributed sparse matrix.
+    directory : str or Path
+        Output directory (created if missing).
+    rank : int, optional
+        Override the rank used in the filename. Defaults to
+        ``dist.get_rank()`` if a process group is initialised, else 0.
+    verbose : bool
+        Print progress on rank 0.
+
+    See also
+    --------
+    load_dsparse, save_sparse_sharded, DSparseTensor.save
+    """
+    _ensure_safetensors()
+    from .distributed import DSparseTensor
+
+    if not isinstance(tensor, DSparseTensor):
+        raise TypeError(f"Expected DSparseTensor, got {type(tensor).__name__}")
+
+    if rank is None:
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        except (RuntimeError, ImportError):
+            rank = 0
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    placement = tensor._spec.placement
+    partition = placement.partition
+    if partition is None:
+        raise ValueError(
+            "save_dsparse: tensor has no Partition. Cannot persist a "
+            "Replicated DSparseTensor -- call .to_local() and use "
+            "save_sparse() instead."
+        )
+
+    tensors_dict = _partition_to_safetensors_dict(
+        tensor._local_tensor, partition,
+    )
+    save_file(
+        tensors_dict,
+        str(directory / f"partition_{rank}.safetensors"),
+    )
+
+    # Rank 0 writes the global metadata sidecar.
+    if rank == 0:
+        metadata = {
+            "format":          "dsparse_tensor",
+            "version":         _DSPARSE_FORMAT_VERSION,
+            "shape":           list(tensor.shape),
+            "dtype":           str(tensor.dtype),
+            "num_partitions":  int(tensor.num_partitions),
+            "placement_axis":  int(placement.axis),
+            # Per-rank neighbor lists -- needed to know which
+            # send_to_<j> / recv_from_<j> keys to look for at load.
+            # Filled in opportunistically; missing entries mean
+            # those ranks never wrote their metadata (e.g. saved
+            # by a single inspector). load_dsparse handles the
+            # absence by scanning safetensors keys.
+            "partitions":      [{
+                "partition_id":  int(partition.partition_id),
+                "num_owned":     int(partition.owned_nodes.numel()),
+                "num_halo":      int(partition.halo_nodes.numel()),
+                "num_local":     int(partition.local_nodes.numel()),
+                "nnz":           int(tensor.nnz),
+                "neighbors":     list(partition.neighbor_partitions),
+            }],
+        }
+        with open(directory / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+        if verbose:
+            print(f"[save_dsparse] wrote partition_{rank}.safetensors "
+                  f"+ metadata.json to {directory}")
+    elif verbose:
+        print(f"[save_dsparse] rank {rank}: wrote "
+              f"partition_{rank}.safetensors")
+
+
+def load_dsparse(
+    directory: Union[str, Path],
+    mesh=None,
+    rank: Optional[int] = None,
+    device: Union[str, torch.device] = "cpu",
+) -> "DSparseTensor":
+    """Load this rank's shard back into a :class:`DSparseTensor`.
+
+    Inverse of :func:`save_dsparse`. Each rank reads its own
+    ``partition_<rank>.safetensors`` and reconstructs the local
+    ``SparseTensor`` + ``Partition`` pair, then wraps them via
+    :meth:`DSparseTensor.from_sparse_local`.
+
+    Parameters
+    ----------
+    directory : str or Path
+        Directory previously written by :func:`save_dsparse`.
+    mesh : DeviceMesh, optional
+        The mesh to attach. If ``None``, builds a 1-D mesh from the
+        active process group.
+    rank : int, optional
+        Override which shard to load. Defaults to ``dist.get_rank()``
+        if available, else 0.
+    device : str or torch.device
+        Device to load tensors onto.
+
+    Returns
+    -------
+    DSparseTensor
+        Loaded rank-local distributed sparse tensor.
+    """
+    _ensure_safetensors()
+    from .distributed import DSparseTensor, SparseShard, DSparseSpec
+    from .sparse_tensor import SparseTensor
+
+    directory = Path(directory)
+    metadata = load_metadata(directory)
+    if metadata.get("format") != "dsparse_tensor":
+        raise ValueError(
+            f"Not a DSparseTensor directory: {directory} "
+            f"(format={metadata.get('format')!r})"
+        )
+
+    global_shape = tuple(metadata["shape"])
+    num_partitions = int(metadata["num_partitions"])
+    placement_axis = int(metadata.get("placement_axis", 0))
+
+    if rank is None:
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        except (RuntimeError, ImportError):
+            rank = 0
+
+    shard_path = directory / f"partition_{rank}.safetensors"
+    if not shard_path.exists():
+        raise FileNotFoundError(
+            f"Missing shard for rank {rank}: {shard_path}"
+        )
+    tensors = load_file(str(shard_path), device=str(device))
+
+    # Reconstruct neighbor list from the safetensors keys themselves;
+    # this works even if metadata.partitions was only written by rank 0.
+    neighbors = sorted({
+        int(k.removeprefix("send_to_")) for k in tensors
+        if k.startswith("send_to_")
+    } | {
+        int(k.removeprefix("recv_from_")) for k in tensors
+        if k.startswith("recv_from_")
+    })
+    partition = _safetensors_dict_to_partition(
+        tensors, neighbors, partition_id=rank, device=device,
+    )
+
+    n_local = int(partition.local_nodes.numel())
+    local_st = SparseTensor(
+        tensors["values"],
+        tensors["row_indices"],
+        tensors["col_indices"],
+        shape=(n_local, n_local),
+    )
+
+    if mesh is None:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            try:
+                from torch.distributed.device_mesh import init_device_mesh
+            except ImportError:
+                from torch.distributed._tensor.device_mesh import (
+                    init_device_mesh,
+                )
+            mesh = init_device_mesh(
+                torch.device(device).type, (dist.get_world_size(),),
+            )
+        else:
+            mesh = None  # single-process: from_sparse_local accepts None
+
+    return DSparseTensor.from_sparse_local(
+        local_st, mesh, partition,
+        axis=placement_axis, global_shape=global_shape,
+    )
+
+
+def save_sparse_sharded(
+    tensor: "SparseTensor",
+    directory: Union[str, Path],
+    num_partitions: int,
+    partition_method: str = "simple",
+    coords: Optional[torch.Tensor] = None,
+    verbose: bool = False,
+) -> None:
+    """Single-process: partition a global :class:`SparseTensor` and
+    write **every** rank's shard to disk. The output directory is
+    structurally identical to one written by all ranks calling
+    :func:`save_dsparse`; you can ``load_dsparse`` it under torchrun.
+
+    Useful when you want to prepare data offline (no MPI) and then
+    consume it from a distributed launcher later.
+
+    Parameters
+    ----------
+    tensor : SparseTensor
+        The global sparse matrix.
+    directory : str or Path
+        Output directory.
+    num_partitions : int
+        Number of shards to produce.
+    partition_method : str
+        ``"simple"`` / ``"metis"`` / ``"rcb"`` / ``"slicing"`` /
+        ``"hilbert"``.
+    coords : torch.Tensor, optional
+        Node coordinates for geometric methods.
+    verbose : bool
+        Print progress.
+    """
+    _ensure_safetensors()
+    from .partition import resolve_partition_ids, build_partition
+
+    if tensor.is_batched:
+        raise ValueError(
+            "save_sparse_sharded does not support batched SparseTensor."
+        )
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    partition_ids = resolve_partition_ids(
+        tensor.row_indices, tensor.col_indices, int(tensor.shape[0]),
+        num_partitions, method=partition_method, coords=coords,
+    )
+
+    per_partition_meta = []
+    for pid in range(num_partitions):
+        partition = build_partition(
+            tensor.row_indices, tensor.col_indices, int(tensor.shape[0]),
+            partition_ids.cpu(), pid,
+        )
+        local_st = tensor.extract_partition(partition)
+        save_file(
+            _partition_to_safetensors_dict(local_st, partition),
+            str(directory / f"partition_{pid}.safetensors"),
+        )
+        per_partition_meta.append({
+            "partition_id":  int(partition.partition_id),
+            "num_owned":     int(partition.owned_nodes.numel()),
+            "num_halo":      int(partition.halo_nodes.numel()),
+            "num_local":     int(partition.local_nodes.numel()),
+            "nnz":           int(local_st.nnz),
+            "neighbors":     list(partition.neighbor_partitions),
+        })
+
+    metadata = {
+        "format":          "dsparse_tensor",
+        "version":         _DSPARSE_FORMAT_VERSION,
+        "shape":           list(tensor.sparse_shape),
+        "dtype":           str(tensor.dtype),
+        "num_partitions":  int(num_partitions),
+        "placement_axis":  0,
+        "partition_method": partition_method,
+        "partitions":      per_partition_meta,
+    }
+    with open(directory / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+    if verbose:
+        print(f"[save_sparse_sharded] wrote {num_partitions} partitions "
+              f"+ metadata.json to {directory}")
+
+
+def load_sparse_shard(
+    directory: Union[str, Path],
+    rank: int,
+    device: Union[str, torch.device] = "cpu",
+) -> Tuple["SparseTensor", "object"]:
+    """Single-process: load one partition's local SparseTensor +
+    Partition for inspection / debugging. Returns ``(local_tensor,
+    partition)``.
+
+    For distributed loading use :func:`load_dsparse`.
+    """
+    _ensure_safetensors()
+    from .sparse_tensor import SparseTensor
+
+    directory = Path(directory)
+    metadata = load_metadata(directory)
+    if metadata.get("format") != "dsparse_tensor":
+        raise ValueError(f"Not a DSparseTensor directory: {directory}")
+
+    shard_path = directory / f"partition_{rank}.safetensors"
+    if not shard_path.exists():
+        raise FileNotFoundError(
+            f"Missing shard for rank {rank}: {shard_path}"
+        )
+    tensors = load_file(str(shard_path), device=str(device))
+    neighbors = sorted({
+        int(k.removeprefix("send_to_")) for k in tensors
+        if k.startswith("send_to_")
+    } | {
+        int(k.removeprefix("recv_from_")) for k in tensors
+        if k.startswith("recv_from_")
+    })
+    partition = _safetensors_dict_to_partition(
+        tensors, neighbors, partition_id=rank, device=device,
+    )
+    n_local = int(partition.local_nodes.numel())
+    local_st = SparseTensor(
+        tensors["values"],
+        tensors["row_indices"],
+        tensors["col_indices"],
+        shape=(n_local, n_local),
+    )
+    return local_st, partition

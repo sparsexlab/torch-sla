@@ -667,12 +667,40 @@ class DSparseTensor:
         return cls.from_sparse_local(
             local_st, mesh, partition, global_shape=tuple(shape),
         )
-    
-    
+
+
+    def save(
+        self,
+        directory: Any,
+        rank: Optional[int] = None,
+        verbose: bool = False,
+    ) -> None:
+        """Persist this rank's shard to ``directory``. Convenience for
+        :func:`torch_sla.io.save_dsparse(self, directory)`."""
+        from .io import save_dsparse
+        save_dsparse(self, directory, rank=rank, verbose=verbose)
+
+    @classmethod
+    def load(
+        cls,
+        directory: Any,
+        mesh: Any = None,
+        rank: Optional[int] = None,
+        device: Union[str, torch.device] = "cpu",
+    ) -> "DSparseTensor":
+        """Reconstruct this rank's :class:`DSparseTensor` from a
+        directory previously written by :meth:`save` /
+        :func:`save_dsparse`. Convenience for
+        :func:`torch_sla.io.load_dsparse(directory, mesh, rank, device)`.
+        """
+        from .io import load_dsparse
+        return load_dsparse(directory, mesh=mesh, rank=rank, device=device)
+
+
     # =========================================================================
     # Properties
     # =========================================================================
-    
+
     @property
     def shape(self) -> Tuple[int, int]:
         """Global matrix shape."""

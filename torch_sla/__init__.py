@@ -127,6 +127,11 @@ from .io import (
     save_mtx,
     load_mtx,
     load_mtx_info,
+    # Distributed I/O
+    save_dsparse,
+    load_dsparse,
+    save_sparse_sharded,
+    load_sparse_shard,
 )
 
 from .nonlinear_solve import (
@@ -185,6 +190,11 @@ __all__ = [
     "save_mtx",
     "load_mtx",
     "load_mtx_info",
+    # Distributed I/O
+    "save_dsparse",
+    "load_dsparse",
+    "save_sparse_sharded",
+    "load_sparse_shard",
     # Nonlinear solve
     "nonlinear_solve",
     "adjoint_solve",
