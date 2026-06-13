@@ -900,6 +900,202 @@ class DSparseTensor:
         """Cast local values to float16."""
         return self.to(dtype=torch.float16)
 
+    # =========================================================================
+    # Reductions (cross-rank via all_reduce)
+    # =========================================================================
+    #
+    # Semantics mirror ``SparseTensor``: reductions cover only the
+    # explicitly stored non-zero values -- implicit zeros are ignored.
+    # Each rank's ``_local_tensor`` holds disjoint owned rows (no halo
+    # rows in the COO), so summing local results across ranks gives the
+    # global value with no double-counting.
+
+    def _all_reduce_scalar(
+        self,
+        value: torch.Tensor,
+        op: "dist.ReduceOp" = None,
+    ) -> torch.Tensor:
+        """In-place ``dist.all_reduce`` on a 0-d tensor (no-op when no
+        process group is initialised)."""
+        if op is None:
+            op = dist.ReduceOp.SUM if DIST_AVAILABLE else None
+        if DIST_AVAILABLE and dist.is_initialized():
+            dist.all_reduce(value, op=op)
+        return value
+
+    def sum(
+        self,
+        axis: Optional[Union[int, Tuple[int, ...]]] = None,
+        keepdim: bool = False,
+    ) -> torch.Tensor:
+        """Sum of stored values.
+
+        * ``axis=None`` -- scalar, single ``all_reduce(SUM)`` across ranks.
+        * ``axis=0`` -- length-N column sums (dense), per-rank
+          scatter-add into global col bins + ``all_reduce(SUM)``.
+        * ``axis=1`` -- length-M row sums (dense), same with row bins.
+
+        Implicit zeros are ignored, matching :meth:`SparseTensor.sum`.
+        """
+        local = self._local_tensor
+        if axis is None:
+            total = local.values.detach().clone() \
+                if not local.values.requires_grad else local.values.clone()
+            total = total.sum()
+            return self._all_reduce_scalar(total, dist.ReduceOp.SUM)
+
+        if axis in (0, -2):
+            # Column sums: scatter local values into the global N-vector
+            # by their global column index.
+            M, N = self._shape
+            partition = self._spec.placement.partition
+            local_col_global = partition.local_to_global[local.col_indices]
+            out = torch.zeros(N, dtype=local.values.dtype,
+                              device=local.values.device)
+            out.scatter_add_(0, local_col_global, local.values)
+            if DIST_AVAILABLE and dist.is_initialized():
+                dist.all_reduce(out, op=dist.ReduceOp.SUM)
+            return out.unsqueeze(0) if keepdim else out
+
+        if axis in (1, -1):
+            # Row sums: each rank's owned rows are disjoint, so the
+            # all_reduce just fills in zeros from non-owning ranks.
+            M, N = self._shape
+            partition = self._spec.placement.partition
+            local_row_global = partition.local_to_global[local.row_indices]
+            out = torch.zeros(M, dtype=local.values.dtype,
+                              device=local.values.device)
+            out.scatter_add_(0, local_row_global, local.values)
+            if DIST_AVAILABLE and dist.is_initialized():
+                dist.all_reduce(out, op=dist.ReduceOp.SUM)
+            return out.unsqueeze(1) if keepdim else out
+
+        raise ValueError(f"DSparseTensor.sum: axis {axis} out of range "
+                         f"(only None, 0, 1 supported on a 2-D tensor)")
+
+    def mean(
+        self,
+        axis: Optional[Union[int, Tuple[int, ...]]] = None,
+    ) -> torch.Tensor:
+        """Mean of stored non-zero values (matches ``SparseTensor`` --
+        implicit zeros excluded). For ``axis=None``, returns
+        ``sum / global_nnz``."""
+        total = self.sum(axis=axis)
+        if axis is None:
+            return total / max(1, self.global_nnz())
+        # Element-wise: divide each col/row sum by the global count of
+        # stored entries in that col/row. Requires a parallel reduction
+        # over indices.
+        local = self._local_tensor
+        partition = self._spec.placement.partition
+        M, N = self._shape
+        counts = torch.zeros(
+            N if axis in (0, -2) else M,
+            dtype=torch.long, device=local.values.device,
+        )
+        idx_global = (partition.local_to_global[local.col_indices]
+                      if axis in (0, -2)
+                      else partition.local_to_global[local.row_indices])
+        counts.scatter_add_(
+            0, idx_global, torch.ones_like(idx_global),
+        )
+        if DIST_AVAILABLE and dist.is_initialized():
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+        counts = counts.clamp_(min=1).to(total.dtype)
+        return total / counts
+
+    def prod(self) -> torch.Tensor:
+        """Product of all stored values across every rank.
+
+        ``ReduceOp.PROD`` is unsupported by the gloo backend, so we
+        ``all_gather`` per-rank scalars and multiply locally instead --
+        works on every backend.
+        """
+        local_p = self._local_tensor.values.prod()
+        if not (DIST_AVAILABLE and dist.is_initialized()):
+            return local_p
+        world = dist.get_world_size()
+        gathered = [torch.zeros_like(local_p) for _ in range(world)]
+        dist.all_gather(gathered, local_p)
+        return torch.stack(gathered).prod()
+
+    def max(self) -> torch.Tensor:
+        """Max of stored values (single ``all_reduce(MAX)``). Implicit
+        zeros ignored."""
+        local_m = self._local_tensor.values.max()
+        return self._all_reduce_scalar(local_m, dist.ReduceOp.MAX)
+
+    def min(self) -> torch.Tensor:
+        """Min of stored values (single ``all_reduce(MIN)``). Implicit
+        zeros ignored."""
+        local_m = self._local_tensor.values.min()
+        return self._all_reduce_scalar(local_m, dist.ReduceOp.MIN)
+
+    def norm(self, ord: Any = "fro") -> torch.Tensor:
+        """Matrix norm of the global matrix.
+
+        Supported orders:
+
+        * ``'fro'`` (default) -- Frobenius norm,
+          ``sqrt(sum(|v|^2))``.  One ``all_reduce(SUM)``.
+        * ``1`` -- max absolute column sum.  Two reductions: per-col
+          ``all_reduce(SUM)`` followed by a global ``max`` on rank-local
+          dense vector.
+        * ``float('inf')`` -- max absolute row sum.
+
+        ``ord=2`` (spectral norm) is not implemented for distributed
+        matrices in this PR -- call :meth:`full_tensor().norm(2)` for
+        a single-process fallback.
+        """
+        if ord == "fro":
+            v = self._local_tensor.values
+            if v.is_complex():
+                local_sq = (v.real ** 2 + v.imag ** 2).sum()
+            else:
+                local_sq = (v.float() ** 2).sum() \
+                    if v.dtype in (torch.float16, torch.bfloat16) \
+                    else (v ** 2).sum()
+            total = self._all_reduce_scalar(local_sq, dist.ReduceOp.SUM)
+            return total.sqrt()
+
+        if ord == 1:
+            col_sums = self._abs_axis_sum(axis=0)
+            return col_sums.max()
+
+        if ord == float("inf"):
+            row_sums = self._abs_axis_sum(axis=1)
+            return row_sums.max()
+
+        if ord == 2:
+            raise NotImplementedError(
+                "DSparseTensor.norm(2) (spectral norm) is not yet "
+                "implemented; call .full_tensor().norm(2) for a "
+                "single-process fallback."
+            )
+
+        raise ValueError(f"Unsupported norm order: {ord!r}")
+
+    def _abs_axis_sum(self, axis: int) -> torch.Tensor:
+        """Helper: ``|·|`` then ``sum(axis=axis)``. Returns dense
+        vector after global all_reduce."""
+        local = self._local_tensor
+        partition = self._spec.placement.partition
+        M, N = self._shape
+        abs_v = local.values.abs()
+        if axis in (0, -2):
+            out = torch.zeros(N, dtype=abs_v.dtype, device=abs_v.device)
+            idx = partition.local_to_global[local.col_indices]
+        elif axis in (1, -1):
+            out = torch.zeros(M, dtype=abs_v.dtype, device=abs_v.device)
+            idx = partition.local_to_global[local.row_indices]
+        else:
+            raise ValueError(f"axis must be 0 or 1, got {axis}")
+        out.scatter_add_(0, idx, abs_v)
+        if DIST_AVAILABLE and dist.is_initialized():
+            dist.all_reduce(out, op=dist.ReduceOp.SUM)
+        return out
+
+
     
     # =========================================================================
     # Distributed Operations
