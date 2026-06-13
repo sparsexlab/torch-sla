@@ -1076,78 +1076,14 @@ class DSparseTensor:
     def H(self) -> "DSparseTensor":
         return self.conj().T()
 
-    # Distributed LOBPCG: every rank holds the full N x m Ritz basis X;
-    # only matvec is distributed (column-by-column scatter + matmul +
-    # full_tensor). Rayleigh-Ritz runs identically on every rank.
-
-    def _column_matvec_global(self, x_col: torch.Tensor) -> torch.Tensor:
-        return (self @ self.scatter(x_col)).full_tensor()
-
-    def eigsh(
-        self,
-        k: int = 6,
-        which: str = "LM",
-        maxiter: int = 200,
-        tol: float = 1e-8,
-        return_eigenvectors: bool = True,
-        sigma: Optional[float] = None,
-        verbose: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Distributed LOBPCG. ``which`` ∈ ``{LM, LA, SM, SA}``."""
-        if not self.is_square:
-            raise ValueError("eigsh requires a square matrix")
-        if sigma is not None:
-            raise NotImplementedError("sigma (shift-invert) not supported")
-
-        N = int(self.shape[0])
-        dtype, device = self.dtype, self.device
-        largest = which in ("LM", "LA")
-        m = min(max(2 * k, k + 4), N)
-
-        # Same seed on every rank -> identical initial X.
-        gen_device = "cpu" if device.type == "mps" else device
-        g = torch.Generator(device=gen_device).manual_seed(0)
-        X = torch.randn(N, m, dtype=dtype, device=gen_device, generator=g).to(device)
-        X, _ = torch.linalg.qr(X)
-
-        def _batched_matvec(B):
-            out = torch.empty_like(B)
-            for j in range(B.shape[1]):
-                out[:, j] = self._column_matvec_global(B[:, j].contiguous())
-            return out
-
-        rank0 = not (DIST_AVAILABLE and dist.is_initialized()) or dist.get_rank() == 0
-        eig_prev: Optional[torch.Tensor] = None
-
-        for it in range(maxiter):
-            AX = _batched_matvec(X)
-            H = X.T @ AX
-            H = 0.5 * (H + H.T)
-            eigs, V = torch.linalg.eigh(H)
-            idx = eigs.argsort(descending=largest)
-            eigs, V = eigs[idx], V[:, idx]
-            X, AX = X @ V, AX @ V
-
-            if eig_prev is not None:
-                diff = (eigs[:k] - eig_prev[:k]).abs()
-                ref = eigs[:k].abs().clamp(min=1e-12)
-                if torch.all(diff < tol * ref):
-                    if verbose and rank0:
-                        print(f"[eigsh] converged iter {it}")
-                    break
-            eig_prev = eigs.clone()
-
-            R = AX[:, :k] - X[:, :k] * eigs[:k].unsqueeze(0)
-            X, _ = torch.linalg.qr(torch.cat([X[:, :k], R], dim=1))
-            if X.size(1) < m:
-                pad = torch.randn(N, m - X.size(1), dtype=dtype,
-                                  device=gen_device, generator=g).to(device)
-                X, _ = torch.linalg.qr(torch.cat([X, pad], dim=1))
-
-            if verbose and rank0 and it % 10 == 0:
-                print(f"[eigsh] iter {it} top {eigs[:min(k, 4)].tolist()}")
-
-        return eigs[:k], (X[:, :k] if return_eigenvectors else None)
+    def eigsh(self, k: int = 6, which: str = "LM", maxiter: int = 200,
+              tol: float = 1e-8, return_eigenvectors: bool = True,
+              sigma: Optional[float] = None, verbose: bool = False):
+        """Distributed LOBPCG. See :func:`distributed_eigsh.eigsh_shard`."""
+        from .distributed_eigsh import eigsh_shard
+        return eigsh_shard(self, k=k, which=which, maxiter=maxiter, tol=tol,
+                           return_eigenvectors=return_eigenvectors,
+                           sigma=sigma, verbose=verbose)
 
     
     
