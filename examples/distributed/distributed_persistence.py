@@ -27,15 +27,7 @@ def main():
     from torch_sla import DSparseTensor, SparseTensor, load_metadata
 
     n = 200
-    idx = torch.arange(n)
-    val = torch.cat([
-        torch.full((n,), 4.0, dtype=torch.float64),
-        torch.full((n - 1,), -1.0, dtype=torch.float64),
-        torch.full((n - 1,), -1.0, dtype=torch.float64),
-    ])
-    row = torch.cat([idx, idx[1:], idx[:-1]])
-    col = torch.cat([idx, idx[:-1], idx[1:]])
-    A = SparseTensor(val, row, col, shape=(n, n))
+    A = SparseTensor.tridiagonal(n, diag=4.0, off_diag=-1.0)
 
     mesh = init_device_mesh("cpu", (world_size,))
     D = DSparseTensor.partition(A, mesh, partition_method="simple")
@@ -47,19 +39,21 @@ def main():
         os.makedirs(out_dir)
     dist.barrier()
 
-    # ── Each rank persists its own shard. ──
+    # Each rank persists its own shard.
     D.save(out_dir)
     dist.barrier()
 
-    # ── Each rank reads its own shard back. ──
+    # Each rank reads its own shard back.
     D2 = DSparseTensor.load(out_dir, mesh=mesh)
 
-    # ── Verify zero matvec drift. ──
+    # Verify zero matvec drift -- collective work; every rank runs this.
     torch.manual_seed(0)
     x_global = torch.randn(n, dtype=torch.float64)
     y_ref = (D @ D.scatter(x_global)).full_tensor()
     y_back = (D2 @ D2.scatter(x_global)).full_tensor()
     err = (y_ref - y_back).abs().max().item()
+
+    print(f"[rank {rank}] round-trip err={err:.2e}")
 
     if rank == 0:
         meta = load_metadata(out_dir)

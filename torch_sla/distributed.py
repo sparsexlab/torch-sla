@@ -734,6 +734,11 @@ class DSparseTensor:
         Triggers a single ``dist.all_reduce(SUM)`` (cached after the
         first call). For a single-process ``DSparseTensor`` returns the
         same value as :attr:`nnz`.
+
+        .. warning::
+            Collective. Every rank in the process group must call this
+            -- gating it behind ``if rank == 0:`` will hang the other
+            ranks on the all-reduce.
         """
         cached = getattr(self, "_global_nnz_cache", None)
         if cached is not None:

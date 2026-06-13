@@ -10,7 +10,6 @@ Run::
     torchrun --standalone --nproc_per_node=4 distributed_solve.py
 """
 
-import os
 import torch
 import torch.distributed as dist
 
@@ -26,17 +25,9 @@ def main():
     from torch.distributed.device_mesh import init_device_mesh
     from torch_sla import DSparseTensor, SparseTensor, solve, SolverConfig
 
-    # ── SPD tridiagonal A, deterministic b. ──
+    # SPD tridiagonal A, deterministic b.
     n = 256
-    idx = torch.arange(n)
-    val = torch.cat([
-        torch.full((n,), 4.0, dtype=torch.float64),
-        torch.full((n - 1,), -1.0, dtype=torch.float64),
-        torch.full((n - 1,), -1.0, dtype=torch.float64),
-    ])
-    row = torch.cat([idx, idx[1:], idx[:-1]])
-    col = torch.cat([idx, idx[:-1], idx[1:]])
-    A = SparseTensor(val, row, col, shape=(n, n))
+    A = SparseTensor.tridiagonal(n, diag=4.0, off_diag=-1.0)
 
     mesh = init_device_mesh("cpu", (world_size,))
     D = DSparseTensor.partition(A, mesh, partition_method="simple")
@@ -45,7 +36,7 @@ def main():
     b_global = torch.randn(n, dtype=torch.float64)
     b_dt = D.scatter(b_global)
 
-    # ── Unified API: solve auto-routes on the DSparseTensor type. ──
+    # Unified API: solve auto-routes on the DSparseTensor type.
     with SolverConfig(method="cg", preconditioner="jacobi",
                        atol=1e-12, rtol=1e-10, maxiter=2000):
         x_dt = solve(D, b_dt)
