@@ -1298,6 +1298,156 @@ class DSparseTensor:
         :meth:`SparseTensor.H` -- regular method, not a property."""
         return self.conj().T()
 
+    # =========================================================================
+    # Distributed eigsh -- LOBPCG with global X, sharded matvec
+    # =========================================================================
+    #
+    # Algorithm: every rank holds the full ``N x m`` Ritz basis ``X``
+    # (memory O(N*m) per rank).  The only distributed step per iteration
+    # is the matvec: each basis column is scattered to a Shard(0)
+    # DTensor, multiplied through ``self @ x_dt``, and gathered back
+    # via ``full_tensor()``.  Rayleigh-Ritz (eigh on the small ``m x m``
+    # Gram matrix) runs identically on every rank so the same basis
+    # rotation is applied.  Convergence on the top-k eigenvalues.
+    #
+    # See :meth:`SparseTensor.eigsh` for the single-process algorithm
+    # this mirrors.
+
+    def _column_matvec_global(self, x_col: torch.Tensor) -> torch.Tensor:
+        """Distributed matvec on a single global N-vector.
+
+        ``scatter`` -> ``self @ x_dt`` -> ``full_tensor()``. Used by
+        eigsh; each call costs one halo exchange + one allgather.
+        """
+        x_dt = self.scatter(x_col)
+        y_dt = self @ x_dt
+        return y_dt.full_tensor()
+
+    def eigsh(
+        self,
+        k: int = 6,
+        which: str = "LM",
+        maxiter: int = 200,
+        tol: float = 1e-8,
+        return_eigenvectors: bool = True,
+        sigma: Optional[float] = None,
+        verbose: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Compute ``k`` eigenvalues / eigenvectors of a symmetric global
+        matrix via distributed LOBPCG.
+
+        Parameters
+        ----------
+        k : int
+            Number of eigenpairs.
+        which : {"LM", "LA", "SM", "SA"}
+            ``LM`` / ``LA`` -> largest magnitude / algebraic;
+            ``SM`` / ``SA`` -> smallest magnitude / algebraic.
+        maxiter : int
+            Max LOBPCG iterations.
+        tol : float
+            Relative convergence tol on the top-k eigenvalues.
+        return_eigenvectors : bool
+            If False, the second tuple element is ``None``.
+        sigma : float, optional
+            Shift-invert is not yet implemented; raises if set.
+        verbose : bool
+            Rank-0 progress printing.
+
+        Returns
+        -------
+        eigenvalues : torch.Tensor of shape (k,)
+        eigenvectors : torch.Tensor of shape (N, k) or None
+            Returned as full **global** vectors on every rank, matching
+            SparseTensor.eigsh -- call :meth:`scatter` if you need them
+            sharded.
+
+        Notes
+        -----
+        * Memory: O(N * m) per rank with ``m = min(3k, N)``. For very
+          large ``N`` consider eigs on a coarser representation, or a
+          column-sharded variant (future PR).
+        * Communication: one halo exchange + one allgather per Ritz
+          column per iteration, plus a small ``m x m`` eigh on every
+          rank (replicated, cheap).
+        """
+        if not self.is_square:
+            raise ValueError("eigsh requires a square global matrix.")
+        if sigma is not None:
+            raise NotImplementedError(
+                "sigma (shift-invert) is not yet supported for "
+                "distributed eigsh; use SparseTensor.eigsh on the "
+                "single-process matrix instead."
+            )
+
+        N = int(self.shape[0])
+        dtype = self.dtype
+        device = self.device
+        largest = which in ("LM", "LA")
+        m = min(max(2 * k, k + 4), N)
+
+        # Same generator state on every rank -> identical initial X.
+        gen_device = "cpu" if device.type == "mps" else device
+        g = torch.Generator(device=gen_device)
+        g.manual_seed(0)
+        X = torch.randn(N, m, dtype=dtype, device=gen_device,
+                        generator=g).to(device)
+        X, _ = torch.linalg.qr(X)
+
+        eig_prev: Optional[torch.Tensor] = None
+
+        def _batched_matvec(B: torch.Tensor) -> torch.Tensor:
+            """Apply self @ each column of B."""
+            out = torch.empty_like(B)
+            for j in range(B.shape[1]):
+                out[:, j] = self._column_matvec_global(B[:, j].contiguous())
+            return out
+
+        rank0 = (not (DIST_AVAILABLE and dist.is_initialized())) \
+            or dist.get_rank() == 0
+
+        for it in range(maxiter):
+            AX = _batched_matvec(X)
+            # Rayleigh-Ritz on the m x m projected operator.
+            H = X.T @ AX                          # symmetric, m x m
+            H = 0.5 * (H + H.T)                   # symmetrise numeric noise
+            eigs, V = torch.linalg.eigh(H)
+            idx = eigs.argsort(descending=largest)
+            eigs = eigs[idx]
+            V = V[:, idx]
+
+            X = X @ V
+            AX = AX @ V                           # rotate AX in same basis
+
+            if eig_prev is not None:
+                diff = (eigs[:k] - eig_prev[:k]).abs()
+                ref = eigs[:k].abs().clamp(min=1e-12)
+                if torch.all(diff < tol * ref):
+                    if verbose and rank0:
+                        print(f"[eigsh] converged at iter {it} "
+                              f"max rel diff {float((diff / ref).max()):.2e}")
+                    break
+            eig_prev = eigs.clone()
+
+            # Residual on top-k: r_j = A x_j - lambda_j x_j.
+            R = AX[:, :k] - X[:, :k] * eigs[:k].unsqueeze(0)
+            combined = torch.cat([X[:, :k], R], dim=1)
+            X, _ = torch.linalg.qr(combined)
+            if X.size(1) < m:
+                pad = torch.randn(N, m - X.size(1), dtype=dtype,
+                                  device=gen_device, generator=g).to(device)
+                X = torch.cat([X, pad], dim=1)
+                X, _ = torch.linalg.qr(X)
+
+            if verbose and rank0 and it % 10 == 0:
+                top = eigs[:min(k, 4)].tolist()
+                print(f"[eigsh] iter {it} top eigvals {top}")
+
+        evals = eigs[:k]
+        evecs = X[:, :k] if return_eigenvectors else None
+        return evals, evecs
+
+
 
     # =========================================================================
     # Distributed Operations
