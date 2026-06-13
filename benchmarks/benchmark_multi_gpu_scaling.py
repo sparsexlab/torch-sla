@@ -158,8 +158,8 @@ def main():
                                   maxiter=args.maxiter)
 
             # Warmup
-            for _ in range(args.warmup):
-                with scope:
+            with scope:
+                for _ in range(args.warmup):
                     _ = solve(D, b_dt)
             torch.cuda.synchronize(device)
             dist.barrier()
@@ -167,15 +167,15 @@ def main():
 
             times = []
             x_dt = None
-            for _ in range(args.num_runs):
-                torch.cuda.synchronize(device)
-                dist.barrier()
-                t0 = time.perf_counter()
-                with scope:
+            with scope:
+                for _ in range(args.num_runs):
+                    torch.cuda.synchronize(device)
+                    dist.barrier()
+                    t0 = time.perf_counter()
                     x_dt = solve(D, b_dt)
-                torch.cuda.synchronize(device)
-                dist.barrier()
-                times.append((time.perf_counter() - t0) * 1000)
+                    torch.cuda.synchronize(device)
+                    dist.barrier()
+                    times.append((time.perf_counter() - t0) * 1000)
 
             # Per-GPU peak memory and aggregate
             peak_local = torch.cuda.max_memory_allocated(device) / 1024 / 1024
