@@ -723,23 +723,11 @@ class DSparseTensor:
 
     @property
     def nnz(self) -> int:
-        """Number of non-zeros in this rank's local chunk (owned + halo
-        rows). For the global nnz across all ranks call
-        :meth:`global_nnz`."""
+        """Local nnz on this rank. Use :meth:`global_nnz` for the sum."""
         return int(self._local_tensor.values.numel())
 
     def global_nnz(self) -> int:
-        """Number of non-zeros summed across every rank.
-
-        Triggers a single ``dist.all_reduce(SUM)`` (cached after the
-        first call). For a single-process ``DSparseTensor`` returns the
-        same value as :attr:`nnz`.
-
-        .. warning::
-            Collective. Every rank in the process group must call this
-            -- gating it behind ``if rank == 0:`` will hang the other
-            ranks on the all-reduce.
-        """
+        """Sum of ``nnz`` across all ranks. Collective; cached."""
         cached = getattr(self, "_global_nnz_cache", None)
         if cached is not None:
             return cached
@@ -750,115 +738,74 @@ class DSparseTensor:
         self._global_nnz_cache = total
         return total
 
-    # ---- Tensor-mirror properties (parity with SparseTensor) ----
-
     @property
     def ndim(self) -> int:
-        """Number of dimensions. ``DSparseTensor`` is always 2-D."""
         return 2
 
     @property
     def sparse_shape(self) -> Tuple[int, int]:
-        """The ``(M, N)`` sparse matrix dimensions -- same as
-        :attr:`shape` for ``DSparseTensor`` (no batch / block axes)."""
         return self._shape
 
     @property
     def sparse_dim(self) -> Tuple[int, int]:
-        """The dimensions that are sparse, ``(0, 1)``."""
         return (0, 1)
 
     @property
     def batch_shape(self) -> Tuple[int, ...]:
-        """Batch dimensions. Always ``()`` for ``DSparseTensor``."""
         return ()
 
     @property
     def block_shape(self) -> Tuple[int, ...]:
-        """Block dimensions. Always ``()`` for ``DSparseTensor``."""
         return ()
 
     @property
     def batch_size(self) -> int:
-        """Total number of batch elements. Always ``1`` for
-        ``DSparseTensor``."""
         return 1
 
     @property
     def is_batched(self) -> bool:
-        """Always ``False`` for ``DSparseTensor``."""
         return False
 
     @property
     def is_block(self) -> bool:
-        """Always ``False`` for ``DSparseTensor``."""
         return False
 
     @property
     def is_cuda(self) -> bool:
-        """Whether this rank's local chunk lives on CUDA."""
         return self._device.type == "cuda"
 
     @property
     def is_square(self) -> bool:
-        """Whether the global sparse dimensions are square (M == N)."""
         M, N = self._shape
         return M == N
 
     @property
     def values(self) -> torch.Tensor:
-        """This rank's local non-zero values (owned + halo rows)."""
         return self._local_tensor.values
 
     @property
     def row_indices(self) -> torch.Tensor:
-        """This rank's local row indices (in local coords)."""
         return self._local_tensor.row_indices
 
     @property
     def col_indices(self) -> torch.Tensor:
-        """This rank's local col indices (in local coords)."""
         return self._local_tensor.col_indices
-
-    # =========================================================================
-    # Indexing and Iteration
-    # =========================================================================
-    
-    
-    
-    
-    # =========================================================================
-    # Device Management
-    # =========================================================================
 
     def to(
         self,
         device: Optional[Union[str, torch.device]] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> "DSparseTensor":
-        """Return a new :class:`DSparseTensor` with this rank's local
-        chunk (and its :class:`Partition` index tensors) moved to
-        ``device`` and/or cast to ``dtype``. Parity with
-        :meth:`SparseTensor.to`.
-
-        The :class:`DeviceMesh` is left untouched -- it represents the
-        process group, which is independent of per-rank tensor device.
-        Halo send/recv buffer caches are reset since they live on the
-        old device.
-        """
         if device is None and dtype is None:
             return self
         if isinstance(device, str):
             device = torch.device(device)
 
         new_local = self._local_tensor.to(device=device, dtype=dtype)
-
         placement = self._spec.placement
-        new_partition = (
-            placement.partition.to(device)
-            if device is not None and placement.partition is not None
-            else placement.partition
-        )
+        new_partition = (placement.partition.to(device)
+                         if device is not None and placement.partition is not None
+                         else placement.partition)
 
         out = type(self).__new__(type(self))
         out._values = None
@@ -873,216 +820,122 @@ class DSparseTensor:
         out._local_tensor = new_local
         out._halo_send_buffers = {}
         out._halo_recv_buffers = {}
-        new_placement = SparseShard(
-            axis=placement.axis, partition=new_partition,
-        )
         out._spec = DSparseSpec(
-            placement=new_placement, mesh=self._spec.mesh,
+            placement=SparseShard(axis=placement.axis, partition=new_partition),
+            mesh=self._spec.mesh,
             global_shape=self._spec.global_shape,
         )
         return out
 
     def cuda(self, device: Optional[int] = None) -> "DSparseTensor":
-        """Move this rank's local chunk to CUDA. ``device`` selects the
-        CUDA device index (default: current)."""
-        if device is None:
-            return self.to("cuda")
-        return self.to(f"cuda:{device}")
+        return self.to("cuda" if device is None else f"cuda:{device}")
 
     def cpu(self) -> "DSparseTensor":
-        """Move this rank's local chunk to CPU."""
         return self.to("cpu")
 
     def float(self) -> "DSparseTensor":
-        """Cast local values to float32."""
         return self.to(dtype=torch.float32)
 
     def double(self) -> "DSparseTensor":
-        """Cast local values to float64."""
         return self.to(dtype=torch.float64)
 
     def half(self) -> "DSparseTensor":
-        """Cast local values to float16."""
         return self.to(dtype=torch.float16)
 
-    # =========================================================================
-    # Reductions (cross-rank via all_reduce)
-    # =========================================================================
-    #
-    # Semantics mirror ``SparseTensor``: reductions cover only the
-    # explicitly stored non-zero values -- implicit zeros are ignored.
-    # Each rank's ``_local_tensor`` holds disjoint owned rows (no halo
-    # rows in the COO), so summing local results across ranks gives the
-    # global value with no double-counting.
+    # Reductions cover stored non-zero values only (matches SparseTensor).
+    # Each rank's _local_tensor holds disjoint owned rows, so summing
+    # local results gives the global value without double-counting.
 
-    def _all_reduce_scalar(
-        self,
-        value: torch.Tensor,
-        op: "dist.ReduceOp" = None,
-    ) -> torch.Tensor:
-        """In-place ``dist.all_reduce`` on a 0-d tensor (no-op when no
-        process group is initialised)."""
+    def _all_reduce_scalar(self, value: torch.Tensor,
+                           op: "dist.ReduceOp" = None) -> torch.Tensor:
         if op is None:
             op = dist.ReduceOp.SUM if DIST_AVAILABLE else None
         if DIST_AVAILABLE and dist.is_initialized():
             dist.all_reduce(value, op=op)
         return value
 
-    def sum(
-        self,
-        axis: Optional[Union[int, Tuple[int, ...]]] = None,
-        keepdim: bool = False,
-    ) -> torch.Tensor:
-        """Sum of stored values.
-
-        * ``axis=None`` -- scalar, single ``all_reduce(SUM)`` across ranks.
-        * ``axis=0`` -- length-N column sums (dense), per-rank
-          scatter-add into global col bins + ``all_reduce(SUM)``.
-        * ``axis=1`` -- length-M row sums (dense), same with row bins.
-
-        Implicit zeros are ignored, matching :meth:`SparseTensor.sum`.
-        """
+    def sum(self, axis: Optional[Union[int, Tuple[int, ...]]] = None,
+            keepdim: bool = False) -> torch.Tensor:
+        """Sum stored values. ``axis`` in ``{None, 0, 1}``."""
         local = self._local_tensor
         if axis is None:
-            total = local.values.detach().clone() \
-                if not local.values.requires_grad else local.values.clone()
-            total = total.sum()
+            total = (local.values.clone() if local.values.requires_grad
+                     else local.values.detach().clone()).sum()
             return self._all_reduce_scalar(total, dist.ReduceOp.SUM)
 
+        M, N = self._shape
+        partition = self._spec.placement.partition
         if axis in (0, -2):
-            # Column sums: scatter local values into the global N-vector
-            # by their global column index.
-            M, N = self._shape
-            partition = self._spec.placement.partition
-            local_col_global = partition.local_to_global[local.col_indices]
-            out = torch.zeros(N, dtype=local.values.dtype,
-                              device=local.values.device)
-            out.scatter_add_(0, local_col_global, local.values)
-            if DIST_AVAILABLE and dist.is_initialized():
-                dist.all_reduce(out, op=dist.ReduceOp.SUM)
-            return out.unsqueeze(0) if keepdim else out
+            idx = partition.local_to_global[local.col_indices]
+            length, keep_axis = N, 0
+        elif axis in (1, -1):
+            idx = partition.local_to_global[local.row_indices]
+            length, keep_axis = M, 1
+        else:
+            raise ValueError(f"axis {axis} out of range (None, 0, 1)")
 
-        if axis in (1, -1):
-            # Row sums: each rank's owned rows are disjoint, so the
-            # all_reduce just fills in zeros from non-owning ranks.
-            M, N = self._shape
-            partition = self._spec.placement.partition
-            local_row_global = partition.local_to_global[local.row_indices]
-            out = torch.zeros(M, dtype=local.values.dtype,
-                              device=local.values.device)
-            out.scatter_add_(0, local_row_global, local.values)
-            if DIST_AVAILABLE and dist.is_initialized():
-                dist.all_reduce(out, op=dist.ReduceOp.SUM)
-            return out.unsqueeze(1) if keepdim else out
+        out = torch.zeros(length, dtype=local.values.dtype, device=local.values.device)
+        out.scatter_add_(0, idx, local.values)
+        if DIST_AVAILABLE and dist.is_initialized():
+            dist.all_reduce(out, op=dist.ReduceOp.SUM)
+        return out.unsqueeze(keep_axis) if keepdim else out
 
-        raise ValueError(f"DSparseTensor.sum: axis {axis} out of range "
-                         f"(only None, 0, 1 supported on a 2-D tensor)")
-
-    def mean(
-        self,
-        axis: Optional[Union[int, Tuple[int, ...]]] = None,
-    ) -> torch.Tensor:
-        """Mean of stored non-zero values (matches ``SparseTensor`` --
-        implicit zeros excluded). For ``axis=None``, returns
-        ``sum / global_nnz``."""
+    def mean(self, axis: Optional[Union[int, Tuple[int, ...]]] = None) -> torch.Tensor:
+        """Mean over stored values (implicit zeros excluded)."""
         total = self.sum(axis=axis)
         if axis is None:
             return total / max(1, self.global_nnz())
-        # Element-wise: divide each col/row sum by the global count of
-        # stored entries in that col/row. Requires a parallel reduction
-        # over indices.
+
         local = self._local_tensor
         partition = self._spec.placement.partition
         M, N = self._shape
-        counts = torch.zeros(
-            N if axis in (0, -2) else M,
-            dtype=torch.long, device=local.values.device,
-        )
-        idx_global = (partition.local_to_global[local.col_indices]
-                      if axis in (0, -2)
-                      else partition.local_to_global[local.row_indices])
-        counts.scatter_add_(
-            0, idx_global, torch.ones_like(idx_global),
-        )
+        if axis in (0, -2):
+            idx = partition.local_to_global[local.col_indices]
+            length = N
+        else:
+            idx = partition.local_to_global[local.row_indices]
+            length = M
+        counts = torch.zeros(length, dtype=torch.long, device=local.values.device)
+        counts.scatter_add_(0, idx, torch.ones_like(idx))
         if DIST_AVAILABLE and dist.is_initialized():
             dist.all_reduce(counts, op=dist.ReduceOp.SUM)
-        counts = counts.clamp_(min=1).to(total.dtype)
-        return total / counts
+        return total / counts.clamp_(min=1).to(total.dtype)
 
     def prod(self) -> torch.Tensor:
-        """Product of all stored values across every rank.
-
-        ``ReduceOp.PROD`` is unsupported by the gloo backend, so we
-        ``all_gather`` per-rank scalars and multiply locally instead --
-        works on every backend.
-        """
+        # gloo lacks ReduceOp.PROD, so all_gather + local prod instead.
         local_p = self._local_tensor.values.prod()
         if not (DIST_AVAILABLE and dist.is_initialized()):
             return local_p
-        world = dist.get_world_size()
-        gathered = [torch.zeros_like(local_p) for _ in range(world)]
+        gathered = [torch.zeros_like(local_p) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered, local_p)
         return torch.stack(gathered).prod()
 
     def max(self) -> torch.Tensor:
-        """Max of stored values (single ``all_reduce(MAX)``). Implicit
-        zeros ignored."""
-        local_m = self._local_tensor.values.max()
-        return self._all_reduce_scalar(local_m, dist.ReduceOp.MAX)
+        return self._all_reduce_scalar(self._local_tensor.values.max(), dist.ReduceOp.MAX)
 
     def min(self) -> torch.Tensor:
-        """Min of stored values (single ``all_reduce(MIN)``). Implicit
-        zeros ignored."""
-        local_m = self._local_tensor.values.min()
-        return self._all_reduce_scalar(local_m, dist.ReduceOp.MIN)
+        return self._all_reduce_scalar(self._local_tensor.values.min(), dist.ReduceOp.MIN)
 
     def norm(self, ord: Any = "fro") -> torch.Tensor:
-        """Matrix norm of the global matrix.
-
-        Supported orders:
-
-        * ``'fro'`` (default) -- Frobenius norm,
-          ``sqrt(sum(|v|^2))``.  One ``all_reduce(SUM)``.
-        * ``1`` -- max absolute column sum.  Two reductions: per-col
-          ``all_reduce(SUM)`` followed by a global ``max`` on rank-local
-          dense vector.
-        * ``float('inf')`` -- max absolute row sum.
-
-        ``ord=2`` (spectral norm) is not implemented for distributed
-        matrices in this PR -- call :meth:`full_tensor().norm(2)` for
-        a single-process fallback.
-        """
+        """``'fro'`` / ``1`` / ``inf``. ``2`` requires ``full_tensor().norm(2)``."""
         if ord == "fro":
             v = self._local_tensor.values
             if v.is_complex():
                 local_sq = (v.real ** 2 + v.imag ** 2).sum()
+            elif v.dtype in (torch.float16, torch.bfloat16):
+                local_sq = (v.float() ** 2).sum()
             else:
-                local_sq = (v.float() ** 2).sum() \
-                    if v.dtype in (torch.float16, torch.bfloat16) \
-                    else (v ** 2).sum()
-            total = self._all_reduce_scalar(local_sq, dist.ReduceOp.SUM)
-            return total.sqrt()
-
+                local_sq = (v ** 2).sum()
+            return self._all_reduce_scalar(local_sq, dist.ReduceOp.SUM).sqrt()
         if ord == 1:
-            col_sums = self._abs_axis_sum(axis=0)
-            return col_sums.max()
-
+            return self._abs_axis_sum(axis=0).max()
         if ord == float("inf"):
-            row_sums = self._abs_axis_sum(axis=1)
-            return row_sums.max()
-
+            return self._abs_axis_sum(axis=1).max()
         if ord == 2:
-            raise NotImplementedError(
-                "DSparseTensor.norm(2) (spectral norm) is not yet "
-                "implemented; call .full_tensor().norm(2) for a "
-                "single-process fallback."
-            )
-
-        raise ValueError(f"Unsupported norm order: {ord!r}")
+            raise NotImplementedError("use full_tensor().norm(2)")
+        raise ValueError(f"unsupported norm order: {ord!r}")
 
     def _abs_axis_sum(self, axis: int) -> torch.Tensor:
-        """Helper: ``|·|`` then ``sum(axis=axis)``. Returns dense
-        vector after global all_reduce."""
         local = self._local_tensor
         partition = self._spec.placement.partition
         M, N = self._shape
@@ -1100,25 +953,11 @@ class DSparseTensor:
             dist.all_reduce(out, op=dist.ReduceOp.SUM)
         return out
 
-    # =========================================================================
-    # Element-wise math (parity with SparseTensor)
-    # =========================================================================
-    #
-    # Every op delegates to the underlying ``SparseTensor`` on each
-    # rank -- the result lives in the same partition / mesh / global
-    # shape, so we re-wrap it via :meth:`from_sparse_local` without any
-    # cross-rank communication.
-    #
-    # Same-spec ``DSparseTensor + DSparseTensor`` is supported (both
-    # tensors must have identical row/col index arrays on every rank --
-    # ``SparseTensor.__add__`` enforces that locally). Adding two
-    # ``DSparseTensor`` s with different partitions is an error.
+    # Element-wise math: delegate to per-rank SparseTensor, re-wrap with
+    # same spec. Same-spec DSparseTensor + DSparseTensor allowed when COO
+    # patterns match (SparseTensor.__add__ enforces locally).
 
-    def _wrap_local(
-        self, local: "SparseTensor",
-    ) -> "DSparseTensor":
-        """Internal: re-wrap a new local ``SparseTensor`` keeping the
-        same spec / mesh / partition. Used by every elementwise op."""
+    def _wrap_local(self, local: "SparseTensor") -> "DSparseTensor":
         out = type(self).__new__(type(self))
         out._values = None
         out._row_indices = None
@@ -1136,55 +975,35 @@ class DSparseTensor:
         return out
 
     def _coerce_other_local(self, other):
-        """Coerce ``other`` into something the per-rank ``SparseTensor``
-        op can consume: pass scalars / tensors through, unwrap
-        ``DSparseTensor`` to its local. Raises on mesh / partition
-        mismatch."""
-        from .sparse_tensor import SparseTensor
         if isinstance(other, DSparseTensor):
             if other._spec.mesh is not self._spec.mesh:
-                raise ValueError(
-                    "DSparseTensor element-wise op: operands must share "
-                    "the same DeviceMesh."
-                )
+                raise ValueError("element-wise op: operands must share DeviceMesh")
             if other._spec.global_shape != self._spec.global_shape:
                 raise ValueError(
-                    f"DSparseTensor element-wise op: shape mismatch "
-                    f"{self._spec.global_shape} vs {other._spec.global_shape}."
-                )
+                    f"shape mismatch {self._spec.global_shape} vs {other._spec.global_shape}")
             return other._local_tensor
         return other
 
     def __add__(self, other) -> "DSparseTensor":
-        return self._wrap_local(
-            self._local_tensor + self._coerce_other_local(other)
-        )
+        return self._wrap_local(self._local_tensor + self._coerce_other_local(other))
 
     def __radd__(self, other) -> "DSparseTensor":
         return self.__add__(other)
 
     def __sub__(self, other) -> "DSparseTensor":
-        return self._wrap_local(
-            self._local_tensor - self._coerce_other_local(other)
-        )
+        return self._wrap_local(self._local_tensor - self._coerce_other_local(other))
 
     def __rsub__(self, other) -> "DSparseTensor":
-        return self._wrap_local(
-            other - self._local_tensor
-        )
+        return self._wrap_local(other - self._local_tensor)
 
     def __mul__(self, other) -> "DSparseTensor":
-        return self._wrap_local(
-            self._local_tensor * self._coerce_other_local(other)
-        )
+        return self._wrap_local(self._local_tensor * self._coerce_other_local(other))
 
     def __rmul__(self, other) -> "DSparseTensor":
         return self.__mul__(other)
 
     def __truediv__(self, other) -> "DSparseTensor":
-        return self._wrap_local(
-            self._local_tensor / self._coerce_other_local(other)
-        )
+        return self._wrap_local(self._local_tensor / self._coerce_other_local(other))
 
     def __pow__(self, exponent) -> "DSparseTensor":
         return self._wrap_local(self._local_tensor ** exponent)
@@ -1199,45 +1018,26 @@ class DSparseTensor:
         return self.abs()
 
     def abs(self) -> "DSparseTensor":
-        """Element-wise absolute value."""
         return self._wrap_local(self._local_tensor.abs())
 
     def sqrt(self) -> "DSparseTensor":
-        """Element-wise square root."""
         return self._wrap_local(self._local_tensor.sqrt())
 
     def square(self) -> "DSparseTensor":
-        """Element-wise square."""
         return self._wrap_local(self._local_tensor.square())
 
     def exp(self) -> "DSparseTensor":
-        """Element-wise exponential."""
         return self._wrap_local(self._local_tensor.exp())
 
     def log(self) -> "DSparseTensor":
-        """Element-wise natural logarithm."""
         return self._wrap_local(self._local_tensor.log())
 
     def conj(self) -> "DSparseTensor":
-        """Element-wise complex conjugate (no-op for real dtypes)."""
         return self._wrap_local(self._local_tensor.conj())
 
-    # =========================================================================
-    # Topology / structural queries (collective via full_tensor)
-    # =========================================================================
-    #
-    # ``is_symmetric`` / ``is_hermitian`` / ``is_positive_definite`` /
-    # ``detect_matrix_type`` / ``.T`` / ``.H`` need cross-rank
-    # information (e.g. ``A[i, j]`` and ``A[j, i]`` may live on
-    # different ranks). We allgather to a single-process
-    # ``SparseTensor`` via :meth:`full_tensor`, run the
-    # well-tested ``SparseTensor`` implementation there, and return.
-    # Each call is O(global_nnz) bandwidth -- not a hot path. Cache the
-    # boolean results so repeated checks are free.
+    # Topology / structural queries -- collective via cached full_tensor.
 
     def _global_view(self) -> "SparseTensor":
-        """Materialise the full global matrix as a SparseTensor on
-        every rank via :meth:`full_tensor`. Cached after first call."""
         cached = getattr(self, "_full_tensor_cache", None)
         if cached is not None:
             return cached
@@ -1246,43 +1046,19 @@ class DSparseTensor:
         return full
 
     def is_symmetric(self, atol: float = 1e-8, rtol: float = 1e-5) -> bool:
-        """Whether ``A == A.T``.  Collective via :meth:`full_tensor`."""
         return bool(self._global_view().is_symmetric(atol=atol, rtol=rtol))
 
     def is_hermitian(self, atol: float = 1e-8, rtol: float = 1e-5) -> bool:
-        """Whether ``A == A.H`` (conjugate transpose). Collective."""
         return bool(self._global_view().is_hermitian(atol=atol, rtol=rtol))
 
     def is_positive_definite(self) -> bool:
-        """Conservative PD check (Gershgorin / Cholesky). Collective.
-
-        Returns ``True`` only when the global matrix is provably PD --
-        the test is sufficient, not necessary."""
         return bool(self._global_view().is_positive_definite())
 
     def detect_matrix_type(self) -> str:
-        """Most specialised cuDSS matrix-type label.
-
-        Returns one of ``"general"``, ``"symmetric"``, ``"spd"``,
-        ``"hermitian"``, ``"hpd"``. Collective via :meth:`full_tensor`.
-        Used by :func:`solve(D, b, matrix_type="auto")` on the cuDSS
-        backend.
-        """
         return self._global_view().detect_matrix_type()
 
     def T(self) -> "DSparseTensor":
-        """Transpose. Allgathers, transposes the global
-        :class:`SparseTensor`, and re-partitions onto the same mesh
-        with the same partition method.
-
-        Mirrors :meth:`SparseTensor.T` -- a regular method, not a
-        property, so call as ``D.T()``.
-
-        Cheaper paths (Shard(0) → Shard(1) view) would be possible but
-        require col-shard plumbing in every downstream solver -- the
-        gather-then-repartition route is correct today and lets callers
-        opt-in only when they care.
-        """
+        """Transpose. Allgathers, transposes, repartitions on same mesh."""
         full_T = self._global_view().T()
         if self._spec.mesh is None:
             return DSparseTensor.from_sparse_local(
@@ -1295,38 +1071,17 @@ class DSparseTensor:
             full_T, self._spec.mesh,
             partition_method=self._partition_method or "simple",
             coords=self._coords,
-            verbose=False,
         )
 
     def H(self) -> "DSparseTensor":
-        """Conjugate transpose ``= self.conj().T()``. Mirrors
-        :meth:`SparseTensor.H` -- regular method, not a property."""
         return self.conj().T()
 
-    # =========================================================================
-    # Distributed eigsh -- LOBPCG with global X, sharded matvec
-    # =========================================================================
-    #
-    # Algorithm: every rank holds the full ``N x m`` Ritz basis ``X``
-    # (memory O(N*m) per rank).  The only distributed step per iteration
-    # is the matvec: each basis column is scattered to a Shard(0)
-    # DTensor, multiplied through ``self @ x_dt``, and gathered back
-    # via ``full_tensor()``.  Rayleigh-Ritz (eigh on the small ``m x m``
-    # Gram matrix) runs identically on every rank so the same basis
-    # rotation is applied.  Convergence on the top-k eigenvalues.
-    #
-    # See :meth:`SparseTensor.eigsh` for the single-process algorithm
-    # this mirrors.
+    # Distributed LOBPCG: every rank holds the full N x m Ritz basis X;
+    # only matvec is distributed (column-by-column scatter + matmul +
+    # full_tensor). Rayleigh-Ritz runs identically on every rank.
 
     def _column_matvec_global(self, x_col: torch.Tensor) -> torch.Tensor:
-        """Distributed matvec on a single global N-vector.
-
-        ``scatter`` -> ``self @ x_dt`` -> ``full_tensor()``. Used by
-        eigsh; each call costs one halo exchange + one allgather.
-        """
-        x_dt = self.scatter(x_col)
-        y_dt = self @ x_dt
-        return y_dt.full_tensor()
+        return (self @ self.scatter(x_col)).full_tensor()
 
     def eigsh(
         self,
@@ -1338,125 +1093,62 @@ class DSparseTensor:
         sigma: Optional[float] = None,
         verbose: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Compute ``k`` eigenvalues / eigenvectors of a symmetric global
-        matrix via distributed LOBPCG.
-
-        Parameters
-        ----------
-        k : int
-            Number of eigenpairs.
-        which : {"LM", "LA", "SM", "SA"}
-            ``LM`` / ``LA`` -> largest magnitude / algebraic;
-            ``SM`` / ``SA`` -> smallest magnitude / algebraic.
-        maxiter : int
-            Max LOBPCG iterations.
-        tol : float
-            Relative convergence tol on the top-k eigenvalues.
-        return_eigenvectors : bool
-            If False, the second tuple element is ``None``.
-        sigma : float, optional
-            Shift-invert is not yet implemented; raises if set.
-        verbose : bool
-            Rank-0 progress printing.
-
-        Returns
-        -------
-        eigenvalues : torch.Tensor of shape (k,)
-        eigenvectors : torch.Tensor of shape (N, k) or None
-            Returned as full **global** vectors on every rank, matching
-            SparseTensor.eigsh -- call :meth:`scatter` if you need them
-            sharded.
-
-        Notes
-        -----
-        * Memory: O(N * m) per rank with ``m = min(3k, N)``. For very
-          large ``N`` consider eigs on a coarser representation, or a
-          column-sharded variant (future PR).
-        * Communication: one halo exchange + one allgather per Ritz
-          column per iteration, plus a small ``m x m`` eigh on every
-          rank (replicated, cheap).
-        """
+        """Distributed LOBPCG. ``which`` ∈ ``{LM, LA, SM, SA}``."""
         if not self.is_square:
-            raise ValueError("eigsh requires a square global matrix.")
+            raise ValueError("eigsh requires a square matrix")
         if sigma is not None:
-            raise NotImplementedError(
-                "sigma (shift-invert) is not yet supported for "
-                "distributed eigsh; use SparseTensor.eigsh on the "
-                "single-process matrix instead."
-            )
+            raise NotImplementedError("sigma (shift-invert) not supported")
 
         N = int(self.shape[0])
-        dtype = self.dtype
-        device = self.device
+        dtype, device = self.dtype, self.device
         largest = which in ("LM", "LA")
         m = min(max(2 * k, k + 4), N)
 
-        # Same generator state on every rank -> identical initial X.
+        # Same seed on every rank -> identical initial X.
         gen_device = "cpu" if device.type == "mps" else device
-        g = torch.Generator(device=gen_device)
-        g.manual_seed(0)
-        X = torch.randn(N, m, dtype=dtype, device=gen_device,
-                        generator=g).to(device)
+        g = torch.Generator(device=gen_device).manual_seed(0)
+        X = torch.randn(N, m, dtype=dtype, device=gen_device, generator=g).to(device)
         X, _ = torch.linalg.qr(X)
 
-        eig_prev: Optional[torch.Tensor] = None
-
-        def _batched_matvec(B: torch.Tensor) -> torch.Tensor:
-            """Apply self @ each column of B."""
+        def _batched_matvec(B):
             out = torch.empty_like(B)
             for j in range(B.shape[1]):
                 out[:, j] = self._column_matvec_global(B[:, j].contiguous())
             return out
 
-        rank0 = (not (DIST_AVAILABLE and dist.is_initialized())) \
-            or dist.get_rank() == 0
+        rank0 = not (DIST_AVAILABLE and dist.is_initialized()) or dist.get_rank() == 0
+        eig_prev: Optional[torch.Tensor] = None
 
         for it in range(maxiter):
             AX = _batched_matvec(X)
-            # Rayleigh-Ritz on the m x m projected operator.
-            H = X.T @ AX                          # symmetric, m x m
-            H = 0.5 * (H + H.T)                   # symmetrise numeric noise
+            H = X.T @ AX
+            H = 0.5 * (H + H.T)
             eigs, V = torch.linalg.eigh(H)
             idx = eigs.argsort(descending=largest)
-            eigs = eigs[idx]
-            V = V[:, idx]
-
-            X = X @ V
-            AX = AX @ V                           # rotate AX in same basis
+            eigs, V = eigs[idx], V[:, idx]
+            X, AX = X @ V, AX @ V
 
             if eig_prev is not None:
                 diff = (eigs[:k] - eig_prev[:k]).abs()
                 ref = eigs[:k].abs().clamp(min=1e-12)
                 if torch.all(diff < tol * ref):
                     if verbose and rank0:
-                        print(f"[eigsh] converged at iter {it} "
-                              f"max rel diff {float((diff / ref).max()):.2e}")
+                        print(f"[eigsh] converged iter {it}")
                     break
             eig_prev = eigs.clone()
 
-            # Residual on top-k: r_j = A x_j - lambda_j x_j.
             R = AX[:, :k] - X[:, :k] * eigs[:k].unsqueeze(0)
-            combined = torch.cat([X[:, :k], R], dim=1)
-            X, _ = torch.linalg.qr(combined)
+            X, _ = torch.linalg.qr(torch.cat([X[:, :k], R], dim=1))
             if X.size(1) < m:
                 pad = torch.randn(N, m - X.size(1), dtype=dtype,
                                   device=gen_device, generator=g).to(device)
-                X = torch.cat([X, pad], dim=1)
-                X, _ = torch.linalg.qr(X)
+                X, _ = torch.linalg.qr(torch.cat([X, pad], dim=1))
 
             if verbose and rank0 and it % 10 == 0:
-                top = eigs[:min(k, 4)].tolist()
-                print(f"[eigsh] iter {it} top eigvals {top}")
+                print(f"[eigsh] iter {it} top {eigs[:min(k, 4)].tolist()}")
 
-        evals = eigs[:k]
-        evecs = X[:, :k] if return_eigenvectors else None
-        return evals, evecs
+        return eigs[:k], (X[:, :k] if return_eigenvectors else None)
 
-
-
-    # =========================================================================
-    # Distributed Operations
-    # =========================================================================
     
     
     

@@ -97,11 +97,10 @@ def test_tridiagonal_tensor_inputs():
 def test_tridiagonal_rejects_wrong_shape():
     from torch_sla import SparseTensor
 
-    with pytest.raises(ValueError, match=r"diag tensor must have shape"):
+    with pytest.raises(ValueError, match=r"diag must have shape"):
         SparseTensor.tridiagonal(5, diag=torch.zeros(4), off_diag=-1.0)
-    with pytest.raises(ValueError, match=r"off_diag tensor must have shape"):
-        SparseTensor.tridiagonal(5, diag=2.0,
-                                  off_diag=torch.zeros(10))
+    with pytest.raises(ValueError, match=r"off_diag must have shape"):
+        SparseTensor.tridiagonal(5, diag=2.0, off_diag=torch.zeros(10))
 
 
 def test_tridiagonal_dtype_propagates():

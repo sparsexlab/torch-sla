@@ -958,103 +958,43 @@ class SparseTensor:
         return cls(values, indices[0], indices[1], tuple(A.shape))
 
     @classmethod
-    def eye(
-        cls,
-        n: int,
-        dtype: torch.dtype = torch.float64,
-        device: Union[str, torch.device] = "cpu",
-    ) -> "SparseTensor":
-        """Sparse identity matrix of size ``n x n``.
-
-        Examples
-        --------
-        >>> I = SparseTensor.eye(100)
-        >>> (I @ x == x).all()
-        """
+    def eye(cls, n: int, dtype: torch.dtype = torch.float64,
+            device: Union[str, torch.device] = "cpu") -> "SparseTensor":
+        """Sparse identity ``n x n``."""
         idx = torch.arange(n, dtype=torch.int64, device=device)
-        vals = torch.ones(n, dtype=dtype, device=device)
-        return cls(vals, idx, idx, shape=(n, n))
+        return cls(torch.ones(n, dtype=dtype, device=device), idx, idx, shape=(n, n))
 
     @classmethod
-    def diag(
-        cls,
-        values: torch.Tensor,
-        device: Optional[Union[str, torch.device]] = None,
-    ) -> "SparseTensor":
-        """Sparse diagonal matrix built from a 1-D vector.
-
-        Parameters
-        ----------
-        values : torch.Tensor of shape (n,)
-            Diagonal entries.
-        device : str or torch.device, optional
-            Override device. Defaults to ``values.device``.
-
-        Examples
-        --------
-        >>> D = SparseTensor.diag(torch.tensor([1.0, 2.0, 3.0]))
-        >>> D.shape == (3, 3) and D.nnz == 3
-        """
+    def diag(cls, values: torch.Tensor,
+             device: Optional[Union[str, torch.device]] = None) -> "SparseTensor":
+        """Sparse diagonal matrix from a 1-D vector."""
         if values.dim() != 1:
-            raise ValueError(f"diag(values) needs a 1-D tensor, got "
-                             f"shape {tuple(values.shape)}")
+            raise ValueError(f"diag needs a 1-D tensor, got shape {tuple(values.shape)}")
         n = int(values.numel())
-        target_device = device if device is not None else values.device
-        vals = values.to(target_device)
-        idx = torch.arange(n, dtype=torch.int64, device=target_device)
-        return cls(vals, idx, idx, shape=(n, n))
+        device = device if device is not None else values.device
+        idx = torch.arange(n, dtype=torch.int64, device=device)
+        return cls(values.to(device), idx, idx, shape=(n, n))
 
     @classmethod
-    def tridiagonal(
-        cls,
-        n: int,
-        diag: Union[float, torch.Tensor] = 2.0,
-        off_diag: Union[float, torch.Tensor] = -1.0,
-        dtype: torch.dtype = torch.float64,
-        device: Union[str, torch.device] = "cpu",
-    ) -> "SparseTensor":
-        """Sparse symmetric tridiagonal matrix ``n x n``.
-
-        The very common ``diag=2, off_diag=-1`` is the 1-D Poisson
-        Laplacian; ``diag=4, off_diag=-1`` is the small test matrix
-        used throughout the docs and examples.
-
-        Parameters
-        ----------
-        n : int
-            Matrix size.
-        diag : float or torch.Tensor of shape (n,)
-            Main-diagonal entries. Scalars are broadcast.
-        off_diag : float or torch.Tensor of shape (n-1,)
-            Sub- and super-diagonal entries (same on both sides ->
-            symmetric). Scalars are broadcast.
-        dtype : torch.dtype
-            Used when ``diag`` / ``off_diag`` are scalars.
-        device : str or torch.device
-            Used when ``diag`` / ``off_diag`` are scalars; tensor inputs
-            are moved to this device.
-
-        Examples
-        --------
-        >>> A = SparseTensor.tridiagonal(200, diag=4.0, off_diag=-1.0)
-        >>> A.shape == (200, 200) and bool(A.is_symmetric().item())
-        """
+    def tridiagonal(cls, n: int,
+                    diag: Union[float, torch.Tensor] = 2.0,
+                    off_diag: Union[float, torch.Tensor] = -1.0,
+                    dtype: torch.dtype = torch.float64,
+                    device: Union[str, torch.device] = "cpu") -> "SparseTensor":
+        """Sparse symmetric tridiagonal ``n x n``. ``diag=4, off=-1`` is the
+        canonical SPD test matrix; ``diag=2, off=-1`` is the 1-D Laplacian.
+        ``diag`` / ``off_diag`` accept scalars or matching-length tensors."""
         device = torch.device(device)
-        if isinstance(diag, torch.Tensor):
-            if diag.dim() != 1 or diag.numel() != n:
-                raise ValueError(f"diag tensor must have shape ({n},), "
-                                 f"got {tuple(diag.shape)}")
-            diag_v = diag.to(device=device, dtype=dtype)
-        else:
-            diag_v = torch.full((n,), float(diag), dtype=dtype, device=device)
-        if isinstance(off_diag, torch.Tensor):
-            if off_diag.dim() != 1 or off_diag.numel() != n - 1:
-                raise ValueError(f"off_diag tensor must have shape "
-                                 f"({n-1},), got {tuple(off_diag.shape)}")
-            off_v = off_diag.to(device=device, dtype=dtype)
-        else:
-            off_v = torch.full((n - 1,), float(off_diag),
-                               dtype=dtype, device=device)
+
+        def _vec(v, length, name):
+            if isinstance(v, torch.Tensor):
+                if v.dim() != 1 or v.numel() != length:
+                    raise ValueError(f"{name} must have shape ({length},), got {tuple(v.shape)}")
+                return v.to(device=device, dtype=dtype)
+            return torch.full((length,), float(v), dtype=dtype, device=device)
+
+        diag_v = _vec(diag, n, "diag")
+        off_v = _vec(off_diag, n - 1, "off_diag")
         idx = torch.arange(n, dtype=torch.int64, device=device)
         vals = torch.cat([diag_v, off_v, off_v])
         row = torch.cat([idx, idx[1:], idx[:-1]])
@@ -1357,55 +1297,26 @@ class SparseTensor:
         return SparseTensor(local_vals, local_rows, local_cols,
                              (num_local, num_local))
 
-    def save_distributed(
-        self,
-        directory,
-        num_partitions: int,
-        partition_method: str = "simple",
-        coords: Optional[torch.Tensor] = None,
-        verbose: bool = False,
-    ) -> None:
-        """Partition this global matrix into ``num_partitions`` shards
-        and write them all to ``directory``. Single-process helper --
-        the output layout matches what every rank would produce by
-        calling :meth:`DSparseTensor.save` collectively, so the same
-        directory can be loaded back under torchrun via
-        :func:`load_dsparse`.
-        """
+    def save_distributed(self, directory, num_partitions: int,
+                         partition_method: str = "simple",
+                         coords: Optional[torch.Tensor] = None,
+                         verbose: bool = False) -> None:
+        """Partition + write all shards to ``directory`` (single-process).
+        Output is identical to a collective ``DSparseTensor.save``."""
         from .io import save_sparse_sharded
-        save_sparse_sharded(
-            self, directory, num_partitions=num_partitions,
-            partition_method=partition_method, coords=coords,
-            verbose=verbose,
-        )
+        save_sparse_sharded(self, directory, num_partitions=num_partitions,
+                            partition_method=partition_method, coords=coords,
+                            verbose=verbose)
 
-    def partition_for_rank(
-        self,
-        rank: int,
-        world_size: int,
-        coords: Optional[torch.Tensor] = None,
-        partition_method: str = "simple",
-        verbose: bool = False,
-    ) -> "DSparseTensor":
-        """Per-rank convenience constructor.
-
-        Each rank calls this on the same global :class:`SparseTensor` to
-        receive its local :class:`DSparseTensor` shard. Internally
-        delegates to :meth:`DSparseTensor.from_global_distributed`, which
-        broadcasts partition ids from rank 0 so every rank sees the same
-        ownership map.
-
-        Returns
-        -------
-        DSparseTensor
-            Row-sharded local partition for ``rank``.
-        """
+    def partition_for_rank(self, rank: int, world_size: int,
+                           coords: Optional[torch.Tensor] = None,
+                           partition_method: str = "simple",
+                           verbose: bool = False) -> "DSparseTensor":
+        """Build this rank's :class:`DSparseTensor` shard. Collective:
+        every rank must call with the same global matrix."""
         from .distributed import DSparseTensor
-
         if self.is_batched:
-            raise ValueError(
-                "partition_for_rank() does not support batched SparseTensor."
-            )
+            raise ValueError("partition_for_rank does not support batched SparseTensor")
         return DSparseTensor.from_global_distributed(
             self.values,
             self.row_indices,
