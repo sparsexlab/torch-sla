@@ -93,7 +93,7 @@ def matmul_row_shard(D, x: Any) -> Any:
     """Row-sharded ``D @ x``. Pad owned -> local, halo exchange, local
     SpMV, slice back to owned-row range. Returns ``DTensor[Shard(0)]``
     if ``x`` is a DTensor, else a plain owned-row tensor."""
-    from .distributed import _is_dtensor, DTensor, Shard
+    from .core import _is_dtensor, DTensor, Shard
 
     partition = D._spec.placement.partition
     if partition is None:
@@ -131,7 +131,7 @@ def matmul_col_shard(D, x: Any) -> Any:
 
 def matmul_spec(D, x: Any) -> Any:
     """``D @ x`` dispatcher. Routes on ``spec.placement.axis``."""
-    from .distributed import SparseShard
+    from .core import SparseShard
 
     if D._local_tensor is None:
         raise RuntimeError(

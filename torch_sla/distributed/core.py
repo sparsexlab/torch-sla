@@ -32,7 +32,7 @@ from typing import Any, Tuple, List, Dict, Optional, Union, Literal
 from dataclasses import dataclass
 import warnings
 
-from .backends import (
+from ..backends import (
     is_scipy_available,
     is_eigen_available,
     is_cupy_available,
@@ -83,7 +83,7 @@ def _is_dtensor(x) -> bool:
 # slicing / Hilbert) + halo discovery live in :mod:`torch_sla.partition`
 # now. Re-exported here so existing ``from torch_sla.distributed import
 # Partition, partition_simple, ...`` call sites keep working.
-from .partition import (
+from ..partition import (
     Partition,
     partition_graph_metis,
     partition_simple,
@@ -492,7 +492,7 @@ class DSparseTensor:
         rows count), translate local indices back to global, and
         all-gather the (val, row, col) triples across the mesh.
         """
-        from .sparse_tensor import SparseTensor
+        from ..sparse_tensor import SparseTensor
 
         if self._spec is None:
             raise RuntimeError(
@@ -651,7 +651,7 @@ class DSparseTensor:
             row_indices, col_indices, int(shape[0]),
             partition_ids.cpu(), rank,
         )
-        from .sparse_tensor import SparseTensor
+        from ..sparse_tensor import SparseTensor
         A = SparseTensor(values, row_indices, col_indices, shape)
         local_st = A.extract_partition(partition)
 
@@ -677,7 +677,7 @@ class DSparseTensor:
     ) -> None:
         """Persist this rank's shard to ``directory``. Convenience for
         :func:`torch_sla.io.save_dsparse(self, directory)`."""
-        from .io import save_dsparse
+        from ..io import save_dsparse
         save_dsparse(self, directory, rank=rank, verbose=verbose)
 
     @classmethod
@@ -693,7 +693,7 @@ class DSparseTensor:
         :func:`save_dsparse`. Convenience for
         :func:`torch_sla.io.load_dsparse(directory, mesh, rank, device)`.
         """
-        from .io import load_dsparse
+        from ..io import load_dsparse
         return load_dsparse(directory, mesh=mesh, rank=rank, device=device)
 
 
@@ -1080,7 +1080,7 @@ class DSparseTensor:
               tol: float = 1e-8, return_eigenvectors: bool = True,
               sigma: Optional[float] = None, verbose: bool = False):
         """Distributed LOBPCG. See :func:`distributed_eigsh.eigsh_shard`."""
-        from .distributed_eigsh import eigsh_shard
+        from .eigsh import eigsh_shard
         return eigsh_shard(self, k=k, which=which, maxiter=maxiter, tol=tol,
                            return_eigenvectors=return_eigenvectors,
                            sigma=sigma, verbose=verbose)
@@ -1134,7 +1134,7 @@ class DSparseTensor:
     
     def __matmul__(self, x: Union[torch.Tensor, "DTensor"]) -> Union[torch.Tensor, "DTensor"]:
         """``D @ x``. See :func:`distributed_matvec.matmul_spec`."""
-        from .distributed_matvec import matmul_spec
+        from .matvec import matmul_spec
         if self._spec is not None and isinstance(self._spec.placement, SparseShard):
             return matmul_spec(self, x)
         raise RuntimeError(
@@ -1211,7 +1211,7 @@ class DSparseTensor:
         # Merge with active SolverConfig scope. Explicit kwargs (non-
         # ``None``) win; otherwise we walk the scope stack via
         # ``solve._active_defaults`` and fall back to hard-coded.
-        from .solve import _active_defaults
+        from ..solve import _active_defaults
         defaults = _active_defaults()
         def _pick(value, name, hardcoded):
             if value is not None:
@@ -1231,7 +1231,7 @@ class DSparseTensor:
         # that here: explicit ``None`` means identity precond.
         if preconditioner is None and "preconditioner" in defaults:
             preconditioner = defaults["preconditioner"]
-        from . import distributed_solve as _ds
+        from . import solve as _ds
         M_apply = _ds.make_preconditioner(self, preconditioner)
 
         if _is_dtensor(b):
@@ -1286,7 +1286,7 @@ class DSparseTensor:
     def _shard_matvec(self, x_owned: torch.Tensor) -> torch.Tensor:
         """Hot-path matvec used by Krylov solvers. See
         :func:`distributed_matvec.shard_matvec`."""
-        from .distributed_matvec import shard_matvec
+        from .matvec import shard_matvec
         return shard_matvec(self, x_owned)
 
     # ------------------------------------------------------------------ #
