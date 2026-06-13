@@ -59,6 +59,27 @@ class Partition:
     global_to_local: torch.Tensor
     local_to_global: torch.Tensor
 
+    def to(self, device: "torch.device | str") -> "Partition":
+        """Return a copy with every tensor field moved to ``device``.
+
+        Index dtypes (``int64``) are preserved. Used by
+        :meth:`DSparseTensor.to` so halo exchange tensors live alongside
+        the local matrix data.
+        """
+        return Partition(
+            partition_id=self.partition_id,
+            local_nodes=self.local_nodes.to(device),
+            owned_nodes=self.owned_nodes.to(device),
+            halo_nodes=self.halo_nodes.to(device),
+            neighbor_partitions=list(self.neighbor_partitions),
+            send_indices={k: v.to(device)
+                          for k, v in self.send_indices.items()},
+            recv_indices={k: v.to(device)
+                          for k, v in self.recv_indices.items()},
+            global_to_local=self.global_to_local.to(device),
+            local_to_global=self.local_to_global.to(device),
+        )
+
 
 def partition_graph_metis(
     row: torch.Tensor,

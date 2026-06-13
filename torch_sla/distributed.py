@@ -797,9 +797,81 @@ class DSparseTensor:
     # =========================================================================
     # Device Management
     # =========================================================================
-    
-    
-    
+
+    def to(
+        self,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> "DSparseTensor":
+        """Return a new :class:`DSparseTensor` with this rank's local
+        chunk (and its :class:`Partition` index tensors) moved to
+        ``device`` and/or cast to ``dtype``. Parity with
+        :meth:`SparseTensor.to`.
+
+        The :class:`DeviceMesh` is left untouched -- it represents the
+        process group, which is independent of per-rank tensor device.
+        Halo send/recv buffer caches are reset since they live on the
+        old device.
+        """
+        if device is None and dtype is None:
+            return self
+        if isinstance(device, str):
+            device = torch.device(device)
+
+        new_local = self._local_tensor.to(device=device, dtype=dtype)
+
+        placement = self._spec.placement
+        new_partition = (
+            placement.partition.to(device)
+            if device is not None and placement.partition is not None
+            else placement.partition
+        )
+
+        out = type(self).__new__(type(self))
+        out._values = None
+        out._row_indices = None
+        out._col_indices = None
+        out._shape = self._shape
+        out._num_partitions = self._num_partitions
+        out._coords = self._coords
+        out._partition_method = self._partition_method
+        out._verbose = self._verbose
+        out._device = new_local.values.device
+        out._local_tensor = new_local
+        out._halo_send_buffers = {}
+        out._halo_recv_buffers = {}
+        new_placement = SparseShard(
+            axis=placement.axis, partition=new_partition,
+        )
+        out._spec = DSparseSpec(
+            placement=new_placement, mesh=self._spec.mesh,
+            global_shape=self._spec.global_shape,
+        )
+        return out
+
+    def cuda(self, device: Optional[int] = None) -> "DSparseTensor":
+        """Move this rank's local chunk to CUDA. ``device`` selects the
+        CUDA device index (default: current)."""
+        if device is None:
+            return self.to("cuda")
+        return self.to(f"cuda:{device}")
+
+    def cpu(self) -> "DSparseTensor":
+        """Move this rank's local chunk to CPU."""
+        return self.to("cpu")
+
+    def float(self) -> "DSparseTensor":
+        """Cast local values to float32."""
+        return self.to(dtype=torch.float32)
+
+    def double(self) -> "DSparseTensor":
+        """Cast local values to float64."""
+        return self.to(dtype=torch.float64)
+
+    def half(self) -> "DSparseTensor":
+        """Cast local values to float16."""
+        return self.to(dtype=torch.float16)
+
     
     # =========================================================================
     # Distributed Operations
