@@ -1253,6 +1253,45 @@ class SparseTensor:
         return SparseTensor(local_vals, local_rows, local_cols,
                              (num_local, num_local))
 
+    def partition_for_rank(
+        self,
+        rank: int,
+        world_size: int,
+        coords: Optional[torch.Tensor] = None,
+        partition_method: str = "simple",
+        verbose: bool = False,
+    ) -> "DSparseTensor":
+        """Per-rank convenience constructor.
+
+        Each rank calls this on the same global :class:`SparseTensor` to
+        receive its local :class:`DSparseTensor` shard. Internally
+        delegates to :meth:`DSparseTensor.from_global_distributed`, which
+        broadcasts partition ids from rank 0 so every rank sees the same
+        ownership map.
+
+        Returns
+        -------
+        DSparseTensor
+            Row-sharded local partition for ``rank``.
+        """
+        from .distributed import DSparseTensor
+
+        if self.is_batched:
+            raise ValueError(
+                "partition_for_rank() does not support batched SparseTensor."
+            )
+        return DSparseTensor.from_global_distributed(
+            self.values,
+            self.row_indices,
+            self.col_indices,
+            self.sparse_shape,
+            rank=rank,
+            world_size=world_size,
+            coords=coords,
+            partition_method=partition_method,
+            verbose=verbose,
+        )
+
     def detect_matrix_type(self) -> str:
         """Detect the most specialised cuDSS matrix-type label for ``self``.
 

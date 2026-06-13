@@ -696,11 +696,97 @@ class DSparseTensor:
     @property
     def nnz(self) -> int:
         """Number of non-zeros in this rank's local chunk (owned + halo
-        rows). For the global nnz call :meth:`full_tensor` first."""
+        rows). For the global nnz across all ranks call
+        :meth:`global_nnz`."""
         return int(self._local_tensor.values.numel())
-    
-    
-    
+
+    def global_nnz(self) -> int:
+        """Number of non-zeros summed across every rank.
+
+        Triggers a single ``dist.all_reduce(SUM)`` (cached after the
+        first call). For a single-process ``DSparseTensor`` returns the
+        same value as :attr:`nnz`.
+        """
+        cached = getattr(self, "_global_nnz_cache", None)
+        if cached is not None:
+            return cached
+        local = torch.tensor([self.nnz], dtype=torch.long, device=self._device)
+        if DIST_AVAILABLE and dist.is_initialized():
+            dist.all_reduce(local, op=dist.ReduceOp.SUM)
+        total = int(local.item())
+        self._global_nnz_cache = total
+        return total
+
+    # ---- Tensor-mirror properties (parity with SparseTensor) ----
+
+    @property
+    def ndim(self) -> int:
+        """Number of dimensions. ``DSparseTensor`` is always 2-D."""
+        return 2
+
+    @property
+    def sparse_shape(self) -> Tuple[int, int]:
+        """The ``(M, N)`` sparse matrix dimensions -- same as
+        :attr:`shape` for ``DSparseTensor`` (no batch / block axes)."""
+        return self._shape
+
+    @property
+    def sparse_dim(self) -> Tuple[int, int]:
+        """The dimensions that are sparse, ``(0, 1)``."""
+        return (0, 1)
+
+    @property
+    def batch_shape(self) -> Tuple[int, ...]:
+        """Batch dimensions. Always ``()`` for ``DSparseTensor``."""
+        return ()
+
+    @property
+    def block_shape(self) -> Tuple[int, ...]:
+        """Block dimensions. Always ``()`` for ``DSparseTensor``."""
+        return ()
+
+    @property
+    def batch_size(self) -> int:
+        """Total number of batch elements. Always ``1`` for
+        ``DSparseTensor``."""
+        return 1
+
+    @property
+    def is_batched(self) -> bool:
+        """Always ``False`` for ``DSparseTensor``."""
+        return False
+
+    @property
+    def is_block(self) -> bool:
+        """Always ``False`` for ``DSparseTensor``."""
+        return False
+
+    @property
+    def is_cuda(self) -> bool:
+        """Whether this rank's local chunk lives on CUDA."""
+        return self._device.type == "cuda"
+
+    @property
+    def is_square(self) -> bool:
+        """Whether the global sparse dimensions are square (M == N)."""
+        M, N = self._shape
+        return M == N
+
+    @property
+    def values(self) -> torch.Tensor:
+        """This rank's local non-zero values (owned + halo rows)."""
+        return self._local_tensor.values
+
+    @property
+    def row_indices(self) -> torch.Tensor:
+        """This rank's local row indices (in local coords)."""
+        return self._local_tensor.row_indices
+
+    @property
+    def col_indices(self) -> torch.Tensor:
+        """This rank's local col indices (in local coords)."""
+        return self._local_tensor.col_indices
+
     # =========================================================================
     # Indexing and Iteration
     # =========================================================================
