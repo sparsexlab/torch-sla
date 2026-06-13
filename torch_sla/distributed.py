@@ -1217,6 +1217,86 @@ class DSparseTensor:
         """Element-wise complex conjugate (no-op for real dtypes)."""
         return self._wrap_local(self._local_tensor.conj())
 
+    # =========================================================================
+    # Topology / structural queries (collective via full_tensor)
+    # =========================================================================
+    #
+    # ``is_symmetric`` / ``is_hermitian`` / ``is_positive_definite`` /
+    # ``detect_matrix_type`` / ``.T`` / ``.H`` need cross-rank
+    # information (e.g. ``A[i, j]`` and ``A[j, i]`` may live on
+    # different ranks). We allgather to a single-process
+    # ``SparseTensor`` via :meth:`full_tensor`, run the
+    # well-tested ``SparseTensor`` implementation there, and return.
+    # Each call is O(global_nnz) bandwidth -- not a hot path. Cache the
+    # boolean results so repeated checks are free.
+
+    def _global_view(self) -> "SparseTensor":
+        """Materialise the full global matrix as a SparseTensor on
+        every rank via :meth:`full_tensor`. Cached after first call."""
+        cached = getattr(self, "_full_tensor_cache", None)
+        if cached is not None:
+            return cached
+        full = self.full_tensor()
+        self._full_tensor_cache = full
+        return full
+
+    def is_symmetric(self, atol: float = 1e-8, rtol: float = 1e-5) -> bool:
+        """Whether ``A == A.T``.  Collective via :meth:`full_tensor`."""
+        return bool(self._global_view().is_symmetric(atol=atol, rtol=rtol))
+
+    def is_hermitian(self, atol: float = 1e-8, rtol: float = 1e-5) -> bool:
+        """Whether ``A == A.H`` (conjugate transpose). Collective."""
+        return bool(self._global_view().is_hermitian(atol=atol, rtol=rtol))
+
+    def is_positive_definite(self) -> bool:
+        """Conservative PD check (Gershgorin / Cholesky). Collective.
+
+        Returns ``True`` only when the global matrix is provably PD --
+        the test is sufficient, not necessary."""
+        return bool(self._global_view().is_positive_definite())
+
+    def detect_matrix_type(self) -> str:
+        """Most specialised cuDSS matrix-type label.
+
+        Returns one of ``"general"``, ``"symmetric"``, ``"spd"``,
+        ``"hermitian"``, ``"hpd"``. Collective via :meth:`full_tensor`.
+        Used by :func:`solve(D, b, matrix_type="auto")` on the cuDSS
+        backend.
+        """
+        return self._global_view().detect_matrix_type()
+
+    def T(self) -> "DSparseTensor":
+        """Transpose. Allgathers, transposes the global
+        :class:`SparseTensor`, and re-partitions onto the same mesh
+        with the same partition method.
+
+        Mirrors :meth:`SparseTensor.T` -- a regular method, not a
+        property, so call as ``D.T()``.
+
+        Cheaper paths (Shard(0) → Shard(1) view) would be possible but
+        require col-shard plumbing in every downstream solver -- the
+        gather-then-repartition route is correct today and lets callers
+        opt-in only when they care.
+        """
+        full_T = self._global_view().T()
+        if self._spec.mesh is None:
+            return DSparseTensor.from_sparse_local(
+                full_T, mesh=None,
+                partition=self._spec.placement.partition,
+                axis=self._spec.placement.axis,
+                global_shape=tuple(full_T.shape),
+            )
+        return DSparseTensor.partition(
+            full_T, self._spec.mesh,
+            partition_method=self._partition_method or "simple",
+            coords=self._coords,
+            verbose=False,
+        )
+
+    def H(self) -> "DSparseTensor":
+        """Conjugate transpose ``= self.conj().T()``. Mirrors
+        :meth:`SparseTensor.H` -- regular method, not a property."""
+        return self.conj().T()
 
 
     # =========================================================================
