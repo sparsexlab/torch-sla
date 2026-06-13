@@ -147,8 +147,15 @@ def benchmark_distributed(args):
     
     results = []
     cumulative_time = 0.0
-    
+
     mesh = init_device_mesh(args.device, (world_size,))
+
+    # SolverConfig parameters are constant across DOFs -- build once,
+    # reuse the same scope object inside the loop.
+    warmup_scope = SolverConfig(method="cg", atol=1e-4, rtol=0.0,
+                                 maxiter=50)
+    main_scope = SolverConfig(method="cg", atol=args.atol, rtol=0.0,
+                               maxiter=args.maxiter)
 
     for idx, target_dof in enumerate(dofs):
         # Build the global SparseTensor on CPU, ship to device.
@@ -170,8 +177,7 @@ def benchmark_distributed(args):
             # Warmup
             dist.barrier()
             try:
-                with SolverConfig(method="cg", atol=1e-4, rtol=0.0,
-                                   maxiter=50):
+                with warmup_scope:
                     _ = solve(D, b_dt)
             except Exception:
                 pass
@@ -184,8 +190,7 @@ def benchmark_distributed(args):
             dist.barrier()
             start = time.perf_counter()
 
-            with SolverConfig(method="cg", atol=args.atol, rtol=0.0,
-                               maxiter=args.maxiter):
+            with main_scope:
                 x_dt = solve(D, b_dt)
 
             if args.device == 'cuda':
