@@ -158,10 +158,7 @@ def benchmark_distributed(args):
             if args.device == 'cuda':
                 torch.cuda.reset_peak_memory_stats()
 
-            val_dev = val.to(device)
-            row_dev = row.to(device)
-            col_dev = col.to(device)
-            A = SparseTensor(val_dev, row_dev, col_dev, shape)
+            A = SparseTensor(val, row, col, shape).to(device)
 
             # Row-shard across the mesh -- one Partition per rank.
             D = DSparseTensor.partition(A, mesh, partition_method="simple")
@@ -250,7 +247,7 @@ def benchmark_distributed(args):
             })
             
             # Clean up
-            del A, D, val_dev, row_dev, col_dev, x_dt, b_dt, b_global, r_dt
+            del A, D, x_dt, b_dt, b_global, r_dt
             if args.device == 'cuda':
                 torch.cuda.empty_cache()
             
