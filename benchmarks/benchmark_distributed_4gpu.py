@@ -123,8 +123,8 @@ def benchmark_solve(
                                  maxiter=min(50, maxiter))
 
     # Warmup
-    for _ in range(warmup):
-        with warmup_scope:
+    with warmup_scope:
+        for _ in range(warmup):
             _ = solve(D, b_dt)
 
     dist.barrier()
@@ -136,20 +136,20 @@ def benchmark_solve(
     # Benchmark
     times = []
     x_dt = None
-    for _ in range(repeat):
-        dist.barrier()
-        if device.type == 'cuda':
-            torch.cuda.synchronize(device)
+    with scope:
+        for _ in range(repeat):
+            dist.barrier()
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
 
-        t0 = time.perf_counter()
-        with scope:
+            t0 = time.perf_counter()
             x_dt = solve(D, b_dt)
 
-        if device.type == 'cuda':
-            torch.cuda.synchronize(device)
-        dist.barrier()
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+            dist.barrier()
 
-        times.append(time.perf_counter() - t0)
+            times.append(time.perf_counter() - t0)
 
     memory_mb = get_gpu_memory_mb(device)
 
