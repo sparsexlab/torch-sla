@@ -1095,8 +1095,130 @@ class DSparseTensor:
             dist.all_reduce(out, op=dist.ReduceOp.SUM)
         return out
 
+    # =========================================================================
+    # Element-wise math (parity with SparseTensor)
+    # =========================================================================
+    #
+    # Every op delegates to the underlying ``SparseTensor`` on each
+    # rank -- the result lives in the same partition / mesh / global
+    # shape, so we re-wrap it via :meth:`from_sparse_local` without any
+    # cross-rank communication.
+    #
+    # Same-spec ``DSparseTensor + DSparseTensor`` is supported (both
+    # tensors must have identical row/col index arrays on every rank --
+    # ``SparseTensor.__add__`` enforces that locally). Adding two
+    # ``DSparseTensor`` s with different partitions is an error.
 
-    
+    def _wrap_local(
+        self, local: "SparseTensor",
+    ) -> "DSparseTensor":
+        """Internal: re-wrap a new local ``SparseTensor`` keeping the
+        same spec / mesh / partition. Used by every elementwise op."""
+        out = type(self).__new__(type(self))
+        out._values = None
+        out._row_indices = None
+        out._col_indices = None
+        out._shape = self._shape
+        out._num_partitions = self._num_partitions
+        out._coords = self._coords
+        out._partition_method = self._partition_method
+        out._verbose = self._verbose
+        out._device = local.values.device
+        out._local_tensor = local
+        out._halo_send_buffers = {}
+        out._halo_recv_buffers = {}
+        out._spec = self._spec
+        return out
+
+    def _coerce_other_local(self, other):
+        """Coerce ``other`` into something the per-rank ``SparseTensor``
+        op can consume: pass scalars / tensors through, unwrap
+        ``DSparseTensor`` to its local. Raises on mesh / partition
+        mismatch."""
+        from .sparse_tensor import SparseTensor
+        if isinstance(other, DSparseTensor):
+            if other._spec.mesh is not self._spec.mesh:
+                raise ValueError(
+                    "DSparseTensor element-wise op: operands must share "
+                    "the same DeviceMesh."
+                )
+            if other._spec.global_shape != self._spec.global_shape:
+                raise ValueError(
+                    f"DSparseTensor element-wise op: shape mismatch "
+                    f"{self._spec.global_shape} vs {other._spec.global_shape}."
+                )
+            return other._local_tensor
+        return other
+
+    def __add__(self, other) -> "DSparseTensor":
+        return self._wrap_local(
+            self._local_tensor + self._coerce_other_local(other)
+        )
+
+    def __radd__(self, other) -> "DSparseTensor":
+        return self.__add__(other)
+
+    def __sub__(self, other) -> "DSparseTensor":
+        return self._wrap_local(
+            self._local_tensor - self._coerce_other_local(other)
+        )
+
+    def __rsub__(self, other) -> "DSparseTensor":
+        return self._wrap_local(
+            other - self._local_tensor
+        )
+
+    def __mul__(self, other) -> "DSparseTensor":
+        return self._wrap_local(
+            self._local_tensor * self._coerce_other_local(other)
+        )
+
+    def __rmul__(self, other) -> "DSparseTensor":
+        return self.__mul__(other)
+
+    def __truediv__(self, other) -> "DSparseTensor":
+        return self._wrap_local(
+            self._local_tensor / self._coerce_other_local(other)
+        )
+
+    def __pow__(self, exponent) -> "DSparseTensor":
+        return self._wrap_local(self._local_tensor ** exponent)
+
+    def __neg__(self) -> "DSparseTensor":
+        return self._wrap_local(-self._local_tensor)
+
+    def __pos__(self) -> "DSparseTensor":
+        return self
+
+    def __abs__(self) -> "DSparseTensor":
+        return self.abs()
+
+    def abs(self) -> "DSparseTensor":
+        """Element-wise absolute value."""
+        return self._wrap_local(self._local_tensor.abs())
+
+    def sqrt(self) -> "DSparseTensor":
+        """Element-wise square root."""
+        return self._wrap_local(self._local_tensor.sqrt())
+
+    def square(self) -> "DSparseTensor":
+        """Element-wise square."""
+        return self._wrap_local(self._local_tensor.square())
+
+    def exp(self) -> "DSparseTensor":
+        """Element-wise exponential."""
+        return self._wrap_local(self._local_tensor.exp())
+
+    def log(self) -> "DSparseTensor":
+        """Element-wise natural logarithm."""
+        return self._wrap_local(self._local_tensor.log())
+
+    def conj(self) -> "DSparseTensor":
+        """Element-wise complex conjugate (no-op for real dtypes)."""
+        return self._wrap_local(self._local_tensor.conj())
+
+
+
     # =========================================================================
     # Distributed Operations
     # =========================================================================
