@@ -102,7 +102,7 @@ def benchmark_distributed(args):
     except ImportError:
         from torch.distributed._tensor.device_mesh import init_device_mesh
 
-    from torch_sla import SparseTensor, DSparseTensor, solve, SolverConfig
+    from torch_sla import SparseTensor, DSparseTensor, solve
 
     # Choose backend based on device
     backend = 'nccl' if args.device == 'cuda' else 'gloo'
@@ -150,8 +150,8 @@ def benchmark_distributed(args):
 
     mesh = init_device_mesh(args.device, (world_size,))
 
-    warmup_cfg = SolverConfig(method="cg", atol=1e-4, rtol=0.0, maxiter=50)
-    main_cfg = SolverConfig(method="cg", atol=args.atol, rtol=0.0, maxiter=args.maxiter)
+    warmup_kw = dict(method="cg", atol=1e-4, rtol=0.0, maxiter=50)
+    main_kw = dict(method="cg", atol=args.atol, rtol=0.0, maxiter=args.maxiter)
 
     for idx, target_dof in enumerate(dofs):
         # Build the global SparseTensor on CPU, ship to device.
@@ -173,8 +173,7 @@ def benchmark_distributed(args):
             # Warmup
             dist.barrier()
             try:
-                with warmup_cfg:
-                    _ = solve(D, b_dt)
+                _ = solve(D, b_dt, **warmup_kw)
             except Exception:
                 pass
             dist.barrier()
@@ -186,8 +185,7 @@ def benchmark_distributed(args):
             dist.barrier()
             start = time.perf_counter()
 
-            with main_cfg:
-                x_dt = solve(D, b_dt)
+            x_dt = solve(D, b_dt, **main_kw)
 
             if args.device == 'cuda':
                 torch.cuda.synchronize()

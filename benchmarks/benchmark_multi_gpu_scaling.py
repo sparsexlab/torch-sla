@@ -33,7 +33,7 @@ try:
 except ImportError:
     from torch.distributed._tensor.device_mesh import init_device_mesh
 
-from torch_sla import SparseTensor, DSparseTensor, solve, SolverConfig
+from torch_sla import SparseTensor, DSparseTensor, solve
 
 
 def make_poisson_2d_global(n_grid, dtype):
@@ -153,29 +153,25 @@ def main():
             b_global = torch.ones(shape[0], dtype=dtype, device=device)
             b_dt = D.scatter(b_global)
 
-            scope = SolverConfig(method="cg", preconditioner=args.preconditioner,
-                                  atol=0.0, rtol=args.rtol,
-                                  maxiter=args.maxiter)
+            solve_kw = dict(method="cg", preconditioner=args.preconditioner,
+                            atol=0.0, rtol=args.rtol, maxiter=args.maxiter)
 
-            # Warmup
-            with scope:
-                for _ in range(args.warmup):
-                    _ = solve(D, b_dt)
+            for _ in range(args.warmup):
+                _ = solve(D, b_dt, **solve_kw)
             torch.cuda.synchronize(device)
             dist.barrier()
             torch.cuda.reset_peak_memory_stats(device)
 
             times = []
             x_dt = None
-            with scope:
-                for _ in range(args.num_runs):
-                    torch.cuda.synchronize(device)
-                    dist.barrier()
-                    t0 = time.perf_counter()
-                    x_dt = solve(D, b_dt)
-                    torch.cuda.synchronize(device)
-                    dist.barrier()
-                    times.append((time.perf_counter() - t0) * 1000)
+            for _ in range(args.num_runs):
+                torch.cuda.synchronize(device)
+                dist.barrier()
+                t0 = time.perf_counter()
+                x_dt = solve(D, b_dt, **solve_kw)
+                torch.cuda.synchronize(device)
+                dist.barrier()
+                times.append((time.perf_counter() - t0) * 1000)
 
             # Per-GPU peak memory and aggregate
             peak_local = torch.cuda.max_memory_allocated(device) / 1024 / 1024

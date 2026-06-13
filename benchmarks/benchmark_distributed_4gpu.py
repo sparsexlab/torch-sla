@@ -108,24 +108,17 @@ def benchmark_solve(
     world_size: int,
 ) -> tuple:
     """Benchmark a solve configuration."""
-    from torch_sla import solve, SolverConfig
+    from torch_sla import solve
 
     device = b_dt.to_local().device
+    precond = None if preconditioner == "none" else preconditioner
 
-    scope = SolverConfig(method="cg",
-                          preconditioner=(None if preconditioner == "none"
-                                          else preconditioner),
-                          rtol=rtol, atol=0.0, maxiter=maxiter)
-    warmup_scope = SolverConfig(method="cg",
-                                 preconditioner=(None if preconditioner == "none"
-                                                 else preconditioner),
-                                 rtol=rtol, atol=0.0,
-                                 maxiter=min(50, maxiter))
+    main_kw = dict(method="cg", preconditioner=precond,
+                   rtol=rtol, atol=0.0, maxiter=maxiter)
+    warmup_kw = dict(main_kw, maxiter=min(50, maxiter))
 
-    # Warmup
-    with warmup_scope:
-        for _ in range(warmup):
-            _ = solve(D, b_dt)
+    for _ in range(warmup):
+        _ = solve(D, b_dt, **warmup_kw)
 
     dist.barrier()
     if device.type == 'cuda':
@@ -133,23 +126,21 @@ def benchmark_solve(
 
     reset_memory(device)
 
-    # Benchmark
     times = []
     x_dt = None
-    with scope:
-        for _ in range(repeat):
-            dist.barrier()
-            if device.type == 'cuda':
-                torch.cuda.synchronize(device)
+    for _ in range(repeat):
+        dist.barrier()
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
 
-            t0 = time.perf_counter()
-            x_dt = solve(D, b_dt)
+        t0 = time.perf_counter()
+        x_dt = solve(D, b_dt, **main_kw)
 
-            if device.type == 'cuda':
-                torch.cuda.synchronize(device)
-            dist.barrier()
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        dist.barrier()
 
-            times.append(time.perf_counter() - t0)
+        times.append(time.perf_counter() - t0)
 
     memory_mb = get_gpu_memory_mb(device)
 
