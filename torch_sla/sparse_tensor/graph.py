@@ -4,6 +4,7 @@ from typing import Tuple, List
 import torch
 
 from .core import SparseTensor  # noqa: E402  # cross-module use
+from .list import SparseTensorList
 
 
 def connected_components(self) -> Tuple[torch.Tensor, int]:

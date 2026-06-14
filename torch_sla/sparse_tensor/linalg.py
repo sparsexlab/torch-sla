@@ -7,10 +7,10 @@ import warnings
 from typing import Optional, Tuple, Union, Literal
 import torch
 
-from .core import SparseTensor  # noqa: E402
+from .core import SparseTensor, LUFactorization  # noqa: E402
 from .autograd import DetAdjoint, EigshAdjoint, SparseSolveFunction
 from ..backends import is_scipy_available
-from ..backends.scipy_backend import scipy_svds
+from ..backends.scipy_backend import scipy_svds, scipy_lu
 from .utils import _power_iteration_svd
 
 
