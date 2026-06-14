@@ -91,6 +91,50 @@ def test_sparse_tensor_logdet_modes():
     assert abs(ld_h - ld_ref) / abs(ld_ref) < 0.05
 
 
+def test_det_block_per_block():
+    """``A.det()`` on a block-sparse SparseTensor returns one scalar
+    per stored block. Pattern unchanged, ``block_shape`` collapsed."""
+    from torch_sla import SparseTensor
+
+    nnz, K = 3, 3
+    torch.manual_seed(0)
+    block_vals = torch.randn(nnz, K, K, dtype=torch.float64) + 5 * torch.eye(K)
+    row = torch.tensor([0, 0, 1])
+    col = torch.tensor([0, 1, 1])
+    A = SparseTensor(block_vals, row, col, shape=(2, 2, K, K), sparse_dim=(0, 1))
+    assert A.block_shape == (K, K)
+
+    D = A.det()
+    assert D.shape == (2, 2)
+    assert D.sparse_shape == (2, 2)
+    assert D.block_shape == ()
+    assert D.values.shape == (nnz,)
+
+    ref = torch.stack([torch.linalg.det(b) for b in block_vals])
+    assert torch.allclose(D.values, ref)
+
+
+def test_det_block_batched():
+    """Batched block-sparse: ``[B, M_blk, N_blk, K, K]`` -> det values
+    have shape ``[B, nnz]``."""
+    from torch_sla import SparseTensor
+
+    nnz, K, B = 3, 3, 2
+    torch.manual_seed(1)
+    block_vals = torch.randn(B, nnz, K, K, dtype=torch.float64) + 5 * torch.eye(K)
+    row = torch.tensor([0, 0, 1])
+    col = torch.tensor([0, 1, 1])
+    A = SparseTensor(block_vals, row, col,
+                     shape=(B, 2, 2, K, K), sparse_dim=(1, 2))
+    D = A.det()
+    assert D.batch_shape == (B,)
+    assert D.sparse_shape == (2, 2)
+    assert D.values.shape == (B, nnz)
+    for b in range(B):
+        ref = torch.stack([torch.linalg.det(blk) for blk in block_vals[b]])
+        assert torch.allclose(D.values[b], ref)
+
+
 def test_det_components_disconnected():
     """Block-diagonal sparse matrix -> det = product of block dets."""
     from torch_sla import SparseTensor, DetConfig

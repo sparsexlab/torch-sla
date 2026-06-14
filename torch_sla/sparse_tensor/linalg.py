@@ -647,10 +647,26 @@ def det(self) -> torch.Tensor:
     >>> print(det_batch.shape)  # torch.Size([3])
     """
     M, N = self.sparse_shape
-    
+
     if M != N:
         raise ValueError(f"Matrix must be square for determinant, got shape ({M}, {N})")
-    
+
+    # Block-dim det: per-block scalar det of each K x K dense block.
+    # Sparse pattern stays the same; block_shape disappears; values
+    # collapse from ``[..., nnz, K, K]`` to ``[..., nnz]``. The full
+    # matrix's "sparse det" is not computed here -- this is the
+    # block-local det that's useful for FEM Jacobian determinants and
+    # other block-structured factors.
+    if self.is_block:
+        if self.block_shape[-2] != self.block_shape[-1]:
+            raise ValueError(
+                f"block-dim det requires square block, got {self.block_shape}")
+        new_values = torch.linalg.det(self.values)  # broadcasts leading dims
+        new_shape = (*self.batch_shape, *self.sparse_shape)
+        return SparseTensor(
+            new_values, self.row_indices, self.col_indices, new_shape,
+        )
+
     if self.is_batched:
         batch_shape = self.batch_shape
         det_list = []
@@ -663,8 +679,8 @@ def det(self) -> torch.Tensor:
 
         return torch.stack(det_list).reshape(*batch_shape)
 
-    # Use adjoint method for gradient support. Forward path routes
-    # through DetConfig dispatcher (see torch_sla/det.py).
+    # Sparse-dim det -- adjoint path; forward routes through DetConfig
+    # dispatcher (see torch_sla/det.py).
     return DetAdjoint.apply(
         self.values,
         self.row_indices,
