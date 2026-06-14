@@ -1225,6 +1225,34 @@ class DSparseTensor:
     def detect_matrix_type(self) -> str:
         return self._global_view().detect_matrix_type()
 
+    def _gather_warn(self, op_name: str) -> "SparseTensor":
+        """Emit ResourceWarning + allgather. Used by gather-then-compute
+        thin wrappers (det/lu/svd/condition_number) that we don't yet have
+        true distributed implementations for."""
+        warnings.warn(
+            f"DSparseTensor.{op_name}() falls back to full_tensor() "
+            f"allgather + single-process compute; cost is O(global nnz). "
+            f"Avoid in hot paths.",
+            ResourceWarning, stacklevel=3,
+        )
+        return self._global_view()
+
+    def det(self) -> torch.Tensor:
+        """Determinant via :meth:`full_tensor` + single-process LU. Warns."""
+        return self._gather_warn("det").det()
+
+    def lu(self):
+        """LU factorisation via :meth:`full_tensor` + single-process LU. Warns."""
+        return self._gather_warn("lu").lu()
+
+    def svd(self, k: int = 6):
+        """Truncated SVD via :meth:`full_tensor` + single-process. Warns."""
+        return self._gather_warn("svd").svd(k=k)
+
+    def condition_number(self, ord: int = 2) -> torch.Tensor:
+        """Condition number via :meth:`full_tensor` + single-process. Warns."""
+        return self._gather_warn("condition_number").condition_number(ord=ord)
+
     def T(self) -> "DSparseTensor":
         """Transpose. Allgathers, transposes, repartitions on same mesh."""
         full_T = self._global_view().T()

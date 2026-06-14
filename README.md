@@ -240,16 +240,36 @@ print(b.grad)    # Gradient w.r.t. RHS
 | `norm()`, `sum()`, `mean()` | ✓ | ✓ | Standard autograd |
 | `to_dense()` | ✓ | ✓ | Standard autograd |
 
-#### DSparseTensor (Multi-GPU)
+#### DSparseTensor (Multi-GPU, `VertexShard`)
 
 | Operation | CPU (Gloo) | CUDA (NCCL) | Notes |
 |-----------|------------|-------------|-------|
 | `D @ x_dt` | ✓ | ✓ | Halo exchange + local SpMV → `DTensor[Shard(0)]` |
 | `solve(D, b_dt)` | ✓ | ✓ | CG / BiCGStab / GMRES / FGMRES / MINRES |
-| `full_tensor()` | ✓ | ✓ | All-gather to a global `SparseTensor` |
+| `D.eigsh(k=)` | ✓ | ✓ | Distributed LOBPCG (sharded matvec, global RR) |
+| `D.sum / .mean / .max / .min / .prod` | ✓ | ✓ | Cross-rank `all_reduce` over stored values |
+| `D.norm('fro' / 1 / inf)` | ✓ | ✓ | Single `all_reduce`; `2` falls back to gather |
+| `D.is_symmetric / .is_hermitian / .is_positive_definite` | ✓ | ✓ | Cached `full_tensor` + single-process check |
+| `D.detect_matrix_type()` | ✓ | ✓ | Same; for `solve(..., matrix_type='auto')` |
+| `D.T() / .H()` | ✓ | ✓ | Allgather → transpose → repartition on same mesh |
+| `D + s`, `D * s`, `D.abs()`, etc. | ✓ | ✓ | Local elementwise, same `_spec` |
+| `D.save(dir) / DSparseTensor.load(dir, mesh)` | ✓ | ✓ | Per-rank `partition_<rank>.safetensors` + `metadata.json` |
+| `D.full_tensor()` | ✓ | ✓ | All-gather to a global `SparseTensor` |
+| `D.det() / .lu() / .svd() / .condition_number()` | ✓ | ✓ | Falls back to `full_tensor()` + single-proc; emits `ResourceWarning` |
 
-**Communication per Krylov iteration**: halo exchange + 1–2 `all_reduce`
-(method-dependent). All vectors stay sharded; no global gather.
+#### DSparseTensor (`BatchShard`, zero-comm matvec)
+
+| Operation | CPU (Gloo) | CUDA (NCCL) | Notes |
+|-----------|------------|-------------|-------|
+| `D @ x` | ✓ | ✓ | Embarrassingly parallel — each rank multiplies its own batch slice |
+| `D.eigsh(k=)` | ✓ | ✓ | Per-rank batched LOBPCG on the local slice (zero comm) |
+| `D.solve_batch_shard(b)` | ✓ | ✓ | Per-rank batched solve via `SparseTensor.solve_batch` (zero comm) |
+| `D.sum / .mean / .max / .min / .norm('fro')` | ✓ | ✓ | Single `all_reduce` across batch ranks |
+| `D.full_tensor()` | ✓ | ✓ | Allgather padded values along the sharded batch axis |
+
+**Communication per Krylov iteration** (`VertexShard`): halo exchange + 1–2
+`all_reduce` (method-dependent). All vectors stay sharded; no global
+gather. **BatchShard** has zero inter-rank comm in the inner loop.
 
 ## Persistence (I/O)
 

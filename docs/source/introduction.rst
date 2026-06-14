@@ -520,27 +520,55 @@ All operations support automatic differentiation via PyTorch autograd with **O(1
    * - ``D @ x``
      - ✓
      - ✓
-     - Distributed matvec with gradient
-   * - ``solve_distributed()``
+     - Distributed matvec (``VertexShard`` halo exchange / ``BatchShard`` zero-comm)
+   * - ``solve(D, b_dt)``
      - ✓
      - ✓
-     - Distributed CG with gradient
-   * - ``eigsh()`` / ``eigs()``
+     - Distributed CG / BiCGStab / GMRES / FGMRES / MINRES (``VertexShard``)
+   * - ``D.eigsh(k=)`` / ``eigs()``
      - ✓
      - ✓
-     - Distributed LOBPCG
-   * - ``svd()``
+     - Distributed LOBPCG (``VertexShard``); per-rank batched eigsh (``BatchShard``)
+   * - ``D.solve_batch_shard(b)``
      - ✓
      - ✓
-     - Distributed power iteration
+     - Per-rank batched solve (``BatchShard``, zero comm)
+   * - ``D.sum / .mean / .max / .min / .prod / .norm('fro' | 1 | inf)``
+     - ✓
+     - ✓
+     - Cross-rank ``all_reduce`` over stored values
+   * - ``D.is_symmetric / .is_hermitian / .is_positive_definite``
+     - ✓
+     - ✓
+     - Cached ``full_tensor()`` + single-process check
+   * - ``D.detect_matrix_type()``
+     - ✓
+     - ✓
+     - Used by ``solve(..., matrix_type='auto')``
+   * - ``D.T() / .H()``
+     - ✓
+     - ✓
+     - Allgather → transpose → repartition on same mesh
+   * - ``D + s``, ``D.abs()``, etc.
+     - ✓
+     - ✓
+     - Local elementwise, same spec
+   * - ``D.save / DSparseTensor.load``
+     - ✓
+     - ✓
+     - Per-rank ``partition_<rank>.safetensors`` + ``metadata.json``
+   * - ``D.full_tensor()``
+     - ✓
+     - ✓
+     - Allgather to a global ``SparseTensor``
+   * - ``D.det() / .lu() / .svd() / .condition_number()``
+     - ✓
+     - ✓
+     - Falls back to ``full_tensor()`` + single-process compute; emits ``ResourceWarning``
    * - ``nonlinear_solve()``
      - ✓
      - ✓
      - Distributed Newton-Krylov
-   * - ``norm('fro')``
-     - ✓
-     - ✓
-     - Distributed sum
    * - ``to_dense()``
      - ✓
      - ✓
