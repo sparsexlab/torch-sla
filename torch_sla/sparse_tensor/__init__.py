@@ -1,8 +1,7 @@
 """SparseTensor stack. Public surface re-exported from :mod:`.core`."""
-from .core import (
-    SparseTensor,
-    SparseTensorList,
-    LUFactorization,
+from .core import SparseTensor, LUFactorization
+from .list import SparseTensorList
+from .utils import (
     auto_select_method,
     estimate_direct_solver_memory,
     get_available_gpu_memory,
