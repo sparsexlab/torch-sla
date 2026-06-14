@@ -181,22 +181,34 @@ def shard_matvec(D, x_owned: torch.Tensor) -> torch.Tensor:
 
     # Cache local CSR. int32 indices when num_local < 2^31 to halve
     # col_indices storage + improve cuSPARSE L1 hit rate.
+    #
+    # On the int32 path we go COO -> bincount/cumsum -> CSR directly
+    # without materialising the int64 ``to_sparse_csr()`` intermediate.
+    # For an SpMV at 500M nnz this saves ~8 GB of temporary GPU memory
+    # plus the matching memcpy. Output is identical.
     csr = getattr(D, "_local_csr_cache", None)
     if csr is None:
         st = D._local_tensor
         indices = torch.stack([st.row_indices.to(torch.int64),
                                st.col_indices.to(torch.int64)])
         coo = torch.sparse_coo_tensor(indices, st.values, tuple(st.shape)).coalesce()
-        csr64 = coo.to_sparse_csr()
+        idx64 = coo.indices()          # [2, nnz] int64, row-major sorted
+        vals = coo.values()            # zero-copy view of values
         idx_dtype = torch.int32 if num_local < 2_147_483_647 else torch.int64
         if idx_dtype is torch.int32:
+            # Cast col to int32 once; rows go straight into bincount,
+            # then we cumsum to crow32 -- never materialise int64 col.
+            col32 = idx64[1].to(torch.int32)
+            counts = torch.bincount(idx64[0], minlength=num_local)
+            crow32 = torch.empty(num_local + 1, dtype=torch.int32,
+                                 device=device)
+            crow32[0] = 0
+            crow32[1:] = counts.cumsum(0).to(torch.int32)
             csr = torch.sparse_csr_tensor(
-                csr64.crow_indices().to(idx_dtype),
-                csr64.col_indices().to(idx_dtype),
-                csr64.values(), csr64.size(),
+                crow32, col32, vals, (num_local, num_local),
             )
         else:
-            csr = csr64
+            csr = coo.to_sparse_csr()
         D._local_csr_cache = csr
 
     # Pre-alloc output (required for any future CUDA Graphs capture).
