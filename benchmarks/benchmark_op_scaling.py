@@ -112,13 +112,10 @@ def benchmark_size(side: int, ops: list[str]) -> list[dict]:
         rows.append({"op": "A.logdet() Hutchinson", "n": n, "nnz": nnz, "time_s": t, "peak_mb": pm})
 
     if "eigsh" in ops:
-        # k=4 LM via the LOBPCG/dense adjoint path. n grows fast, gate.
-        if n <= 4096:
-            t = time_call(lambda: A.eigsh(k=4, which="LM"), reps=2)
-            pm = peak_mem_call(lambda: A.eigsh(k=4, which="LM"))
-            rows.append({"op": "A.eigsh(k=4) LM", "n": n, "nnz": nnz, "time_s": t, "peak_mb": pm})
-        else:
-            print(f"  [skip] eigsh on n={n} (dense fallback would OOM)")
+        # Now backed by ARPACK Lanczos for n > 1024 (CPU) -- truly O(nnz*k*iter).
+        t = time_call(lambda: A.eigsh(k=4, which="LM"), reps=2)
+        pm = peak_mem_call(lambda: A.eigsh(k=4, which="LM"))
+        rows.append({"op": "A.eigsh(k=4) LM", "n": n, "nnz": nnz, "time_s": t, "peak_mb": pm})
 
     if "norm" in ops:
         t = time_call(lambda: A.norm("fro"), reps=5)

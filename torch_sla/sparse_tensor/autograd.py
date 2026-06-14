@@ -123,6 +123,15 @@ class DetAdjoint(Function):
 # Adjoint Eigenvalue Solver
 # =============================================================================
 
+def _eigh_dense_topk(sparse_coo, k, largest):
+    """Small-n CPU fallback: dense eigh + slice top/bottom k."""
+    A_dense = sparse_coo.to_dense()
+    evals_all, evecs_all = torch.linalg.eigh(A_dense)
+    if largest:
+        return evals_all[-k:], evecs_all[:, -k:]
+    return evals_all[:k], evecs_all[:, :k]
+
+
 class EigshAdjoint(Function):
     """
     Adjoint-based differentiable eigenvalue solver.
@@ -163,20 +172,29 @@ class EigshAdjoint(Function):
                 matvec, n, k, val.dtype, device, largest=largest
             )
         else:
-            # CPU dense path. Drop the per-nnz Python loop -- vectorise
-            # COO -> dense via sparse_coo_tensor.to_dense() (a single C
-            # kernel) and dispatch to torch.linalg.eigh. For n=10k this
-            # was previously 800 MB *and* 100M-iter Python overhead;
-            # to_dense() is ~30x faster on the same n.
-            A_dense = sparse_coo.to_dense()
-            eigenvalues_all, eigenvectors_all = torch.linalg.eigh(A_dense)
-
-            if which in ('LM', 'LA'):
-                eigenvalues = eigenvalues_all[-k:]
-                eigenvectors = eigenvectors_all[:, -k:]
+            # CPU path. For n > 1024 dispatch to scipy.sparse.linalg.eigsh
+            # (ARPACK Lanczos) -- truly O(nnz*k*iter), no dense n*n alloc.
+            # For small n we still use torch.linalg.eigh on the dense
+            # tensor: LAPACK is faster than ARPACK's setup cost, and
+            # scipy isn't a hard dep at that scale.
+            largest = which in ('LM', 'LA')
+            if n > 1024:
+                from ..backends.scipy_backend import SCIPY_AVAILABLE, scipy_eigsh
+                if SCIPY_AVAILABLE:
+                    which_arpack = {'LM': 'LM', 'SM': 'SM', 'LA': 'LA', 'SA': 'SA'}[which]
+                    eigenvalues, eigenvectors = scipy_eigsh(
+                        val_detached, row, col, shape,
+                        k=k, which=which_arpack, sigma=None,
+                        return_eigenvectors=True,
+                    )
+                    eigenvalues = eigenvalues.to(device=device)
+                    eigenvectors = eigenvectors.to(device=device)
+                else:
+                    eigenvalues, eigenvectors = _eigh_dense_topk(
+                        sparse_coo, k, largest)
             else:
-                eigenvalues = eigenvalues_all[:k]
-                eigenvectors = eigenvectors_all[:, :k]
+                eigenvalues, eigenvectors = _eigh_dense_topk(
+                    sparse_coo, k, largest)
         
         # Save for backward
         ctx.save_for_backward(val, eigenvalues, eigenvectors)
