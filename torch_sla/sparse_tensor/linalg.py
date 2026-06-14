@@ -9,6 +9,9 @@ import torch
 
 from .core import SparseTensor  # noqa: E402
 from .autograd import DetAdjoint, EigshAdjoint, SparseSolveFunction
+from ..backends import is_scipy_available
+from ..backends.scipy_backend import scipy_svds
+from .utils import _power_iteration_svd
 
 
 def solve(
@@ -522,16 +525,43 @@ def svd(self, k: int = 6) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         Vt = torch.stack(Vt_list).reshape(*batch_shape, k, N)
         return U, S, Vt
     
+    from .autograd import SvdAdjoint
+
+    # Build the device-appropriate detached forward + sparse-pattern
+    # gather, then run through SvdAdjoint so the result is a
+    # differentiable tuple (single Function node, regardless of how
+    # many iterations the inner solver took).
     if self.is_cuda:
-        matvec = lambda x: self._spmv_coo(x)
-        matvec_T = lambda x: self.T()._spmv_coo(x)
-        U, S, Vt = _power_iteration_svd(matvec, matvec_T, M, N, k, self.dtype, self.device)
-        return U, S, Vt
-    
-    if not is_scipy_available():
+        def _svd_forward(val_det, row, col, shape, kk):
+            from .core import SparseTensor as _ST
+            A = _ST(val_det, row, col, shape)
+            matvec = lambda x: A._spmv_coo(x)
+            matvec_T = lambda x: A.T()._spmv_coo(x)
+            return _power_iteration_svd(
+                matvec, matvec_T, shape[0], shape[1], kk,
+                val_det.dtype, val_det.device,
+            )
+    elif is_scipy_available():
+        def _svd_forward(val_det, row, col, shape, kk):
+            U, S, Vt = scipy_svds(val_det, row, col, shape, k=kk)
+            return U.to(val_det.device), S.to(val_det.device), Vt.to(val_det.device)
+    else:
         raise RuntimeError("SciPy is required for SVD on CPU")
-    
-    return scipy_svds(self.values, self.row_indices, self.col_indices, (M, N), k=k)
+
+    row_i64 = self.row_indices.to(torch.int64)
+    col_i64 = self.col_indices.to(torch.int64)
+
+    def _gather_sv_grad(U, S, Vt, grad_S):
+        # grad_val[k] = Σ_i grad_S[i] * U[row[k], i] * Vt[i, col[k]]
+        U_at_row = U[row_i64]              # (nnz, k)
+        Vt_at_col = Vt.t()[col_i64]        # (nnz, k)  -- Vt^T is V
+        return (U_at_row * Vt_at_col * grad_S.unsqueeze(0)).sum(dim=1)
+
+    U, S, Vt = SvdAdjoint.apply(
+        self.values, self.row_indices, self.col_indices,
+        (M, N), k, _svd_forward, _gather_sv_grad,
+    )
+    return U, S, Vt
 
 def condition_number(self, ord: int = 2) -> torch.Tensor:
     """
