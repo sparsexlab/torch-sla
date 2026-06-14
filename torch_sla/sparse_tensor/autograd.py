@@ -20,6 +20,75 @@ from torch.autograd.function import Function
 # Adjoint Determinant Solver
 # =============================================================================
 
+def _det_backward_cuda_cudss(val, row, col, shape, det_val, grad_output):
+    """CUDA chunked det backward via cuDSS multi-RHS solve.
+
+    Same chunking strategy as the CPU path (factor-once, solve in
+    ~64 MB chunks, gather at A's nnz positions). Raises if cuDSS /
+    nvmath-python is missing -- caller falls back to dense.
+
+    Returns
+    -------
+    grad_val : torch.Tensor
+        Shape ``[nnz]``, on the same device/dtype as ``val``.
+    """
+    from ..backends.nvmath_backend import nvmath_factor_solve_many
+
+    device = val.device
+    N = int(shape[0])
+    unique_cols, col_inv = torch.unique(col, return_inverse=True)
+    n_uc = int(unique_cols.numel())
+
+    # Same 64 MB target as CPU; bytes_per_col = N * 16 (E + Y both live).
+    CHUNK_BYTES = 64 * 1024 * 1024
+    bytes_per_col = N * 8 * 2
+    chunk_cols = max(1, min(n_uc, CHUNK_BYTES // max(1, bytes_per_col)))
+
+    # Sort nnz by col_inv so chunks map to contiguous slices.
+    order = torch.argsort(col_inv, stable=True)
+    col_inv_sorted = col_inv[order]
+    row_sorted = row[order].to(torch.int64)
+
+    nnz_starts = torch.searchsorted(
+        col_inv_sorted, torch.arange(n_uc, device=device, dtype=col_inv_sorted.dtype),
+    )
+    nnz_starts = torch.cat([
+        nnz_starts,
+        torch.tensor([row.numel()], device=device, dtype=nnz_starts.dtype),
+    ])
+
+    gathered = torch.empty(row.numel(), dtype=val.dtype, device=device)
+    unique_cols_i64 = unique_cols.to(torch.int64)
+
+    n_chunks = (n_uc + chunk_cols - 1) // chunk_cols
+
+    def build_rhs(i):
+        c0 = i * chunk_cols
+        c1 = min(c0 + chunk_cols, n_uc)
+        width = c1 - c0
+        E = torch.zeros(N, width, dtype=val.dtype, device=device)
+        rows_i = unique_cols_i64[c0:c1]
+        cols_i = torch.arange(width, device=device, dtype=torch.int64)
+        E[rows_i, cols_i] = 1.0
+        return E, (c0, c1)
+
+    def gather_chunk(X, meta):
+        c0, c1 = meta
+        lo = int(nnz_starts[c0].item())
+        hi = int(nnz_starts[c1].item())
+        sub_inv = col_inv_sorted[lo:hi] - c0
+        sub_row = row_sorted[lo:hi]
+        gathered[order[lo:hi]] = X[sub_row, sub_inv.to(torch.int64)]
+
+    # Solve A^T y = e_c by swapping (row, col) -> A^T's COO triple.
+    nvmath_factor_solve_many(
+        val, col, row, shape, build_rhs, n_chunks, gather_chunk,
+        matrix_type="general",
+    )
+
+    return det_val * gathered * grad_output
+
+
 class DetAdjoint(Function):
     """
     Adjoint-based differentiable determinant computation.
@@ -88,17 +157,32 @@ class DetAdjoint(Function):
         # and replaces N LU solves with one batched solve (SuperLU shares
         # the factorisation).
 
-        # On CUDA we fall back to dense for now -- a sparse batched solve
-        # path on CUDA would need cuDSS-style multi-RHS support.
+        # On CUDA: prefer cuDSS multi-RHS chunked solve (mirrors the CPU
+        # SuperLU path, factor-once / solve-many). Falls back to dense
+        # inverse if cuDSS / nvmath-python is unavailable.
         if is_cuda:
-            indices = torch.stack([row, col], dim=0).to(device)
-            sparse_coo = torch.sparse_coo_tensor(
-                indices, val, shape, device=device)
-            dense = sparse_coo.to_dense()
-            A_inv = torch.linalg.inv(dense)
-            grad_val = det_val * A_inv[col.to(torch.int64),
-                                         row.to(torch.int64)] * grad_output
-            return grad_val, None, None, None, None, None
+            try:
+                grad_val = _det_backward_cuda_cudss(
+                    val, row, col, shape, det_val, grad_output)
+                return grad_val, None, None, None, None, None
+            except Exception:
+                # Fall back: dense inverse. Materialises (n, n) -- OK only
+                # at small n; warn so users notice.
+                import warnings
+                warnings.warn(
+                    "DetAdjoint CUDA backward: cuDSS path unavailable, "
+                    "falling back to dense torch.linalg.inv. Install "
+                    "nvmath-python (with cuDSS) to avoid the (n,n) alloc.",
+                    RuntimeWarning, stacklevel=2,
+                )
+                indices = torch.stack([row, col], dim=0).to(device)
+                sparse_coo = torch.sparse_coo_tensor(
+                    indices, val, shape, device=device)
+                dense = sparse_coo.to_dense()
+                A_inv = torch.linalg.inv(dense)
+                grad_val = det_val * A_inv[col.to(torch.int64),
+                                             row.to(torch.int64)] * grad_output
+                return grad_val, None, None, None, None, None
 
         # CPU sparse path -- single SuperLU, chunked batched solve.
         #
@@ -428,6 +512,64 @@ def _gather_sparse_at_coords(C_sparse, row_q, col_q, n_cols):
         found, v_c[idx_clamped],
         torch.zeros_like(pos_q, dtype=v_c.dtype),
     )
+
+
+class SvdAdjoint(Function):
+    """Differentiable truncated SVD for sparse matrices.
+
+    Forward runs detached (ARPACK / dense / power-iteration) so the
+    iterative process never enters the autograd graph. Backward uses the
+    Townsend & Wendland (2014) closed form sampled at A's nnz pattern.
+
+    Gradient support (this first implementation):
+
+    * Singular-value gradient (``∂L/∂σ_i``) — full support. Closed form
+      ``∂σ_i/∂A = u_i v_iᵀ`` gathered at A's pattern; cost O(nnz · k).
+    * Singular-vector gradient (``∂L/∂U`` / ``∂L/∂V``) — NOT YET
+      implemented. If non-zero gradient flows back through U or V,
+      emits a ``RuntimeWarning`` and treats those contributions as zero.
+
+    Most use cases (spectral regularisation, nuclear norm penalty,
+    PCA-style targets) only need σ gradients; full Townsend formula for
+    U/V is tracked as a separate follow-up.
+    """
+
+    @staticmethod
+    def forward(ctx, val, row, col, shape, k, svd_fn, gather_fn):
+        with torch.no_grad():
+            U, S, Vt = svd_fn(val.detach(), row, col, shape, k)
+        ctx.save_for_backward(val, U, S, Vt)
+        ctx.gather_fn = gather_fn
+        ctx.shape = shape
+        return U.detach(), S.detach(), Vt.detach()
+
+    @staticmethod
+    def backward(ctx, grad_U, grad_S, grad_Vt):
+        val, U, S, Vt = ctx.saved_tensors
+
+        # Singular-vector gradient not yet supported; warn if any flow.
+        u_norm = float(grad_U.abs().max()) if grad_U is not None else 0.0
+        v_norm = float(grad_Vt.abs().max()) if grad_Vt is not None else 0.0
+        if u_norm > 0 or v_norm > 0:
+            import warnings
+            warnings.warn(
+                "SvdAdjoint: gradient through singular vectors (U, V) "
+                "is not yet implemented in the first SvdAdjoint release; "
+                "only ∂L/∂σ contributions are propagated to A. The U/V "
+                "Townsend cross-term will land in a follow-up PR. "
+                "Treating ∂L/∂U / ∂L/∂V as zero for now.",
+                RuntimeWarning, stacklevel=2,
+            )
+
+        if grad_S is None or float(grad_S.abs().max()) == 0.0:
+            return torch.zeros_like(val), None, None, None, None, None, None
+
+        # ∂σ_i / ∂A = u_i v_i^T, so for each nnz (row[k], col[k]):
+        #   grad_val[k] = Σ_i grad_S[i] * U[row[k], i] * Vt[i, col[k]]
+        # gather_fn implements this; for distributed it maps local CSR
+        # row/col into global indices before indexing U / Vt.
+        grad_val = ctx.gather_fn(U, S, Vt, grad_S)
+        return grad_val, None, None, None, None, None, None
 
 
 def _sparse_sparse_matmul_with_sparse_grad(

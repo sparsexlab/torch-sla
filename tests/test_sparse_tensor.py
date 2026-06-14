@@ -603,15 +603,55 @@ class TestEigenvalueSVD:
         """Test basic SVD computation."""
         val, row, col, shape = create_tridiagonal_spd(20)
         A = SparseTensor(val, row, col, shape)
-        
+
         U, S, Vt = A.svd(k=5)
-        
+
         assert U.shape == (20, 5)
         assert S.shape == (5,)
         assert Vt.shape == (5, 20)
-        
+
         # Singular values should be positive
         assert (S > 0).all()
+
+    def test_svd_sigma_backward(self):
+        """``SvdAdjoint`` propagates ∂L/∂σ_i = u_i v_i^T at A's nnz pattern.
+
+        Uses ``Synthetic['anisotropic_2d_64_eps_001']`` from
+        torch_sla.datasets -- a real PDE matrix with non-degenerate
+        spectrum so the comparison against dense torch.linalg.svd is
+        not muddied by U/V rotations in degenerate subspaces.
+        """
+        from torch_sla.datasets import Synthetic
+
+        bench = Synthetic["anisotropic_2d_64_eps_001"]
+        n = int(bench.shape[0])
+        k = 5
+
+        # Ours: sparse SVD with SvdAdjoint backward
+        val_g = bench.val.detach().clone().requires_grad_(True)
+        A_sp = SparseTensor(val_g, bench.row, bench.col, bench.shape)
+        _, S, _ = A_sp.svd(k=k)
+        S.sum().backward()
+        grad_ours = val_g.grad.clone()
+
+        # Reference: dense torch.linalg.svd backward (sum of top-k σ).
+        val_d = bench.val.detach().clone().requires_grad_(True)
+        A_dense = torch.zeros(n, n, dtype=bench.val.dtype)
+        A_dense[bench.row, bench.col] = val_d
+        _, S_ref, _ = torch.linalg.svd(A_dense, full_matrices=False)
+        S_ref[:k].sum().backward()
+        grad_ref = val_d.grad.clone()
+
+        # When σ values are non-degenerate, fp64 eps; gradient direction
+        # is the meaningful invariant even in degenerate subspaces, so
+        # cosine similarity > 0.999 is the right test.
+        cos = torch.nn.functional.cosine_similarity(
+            grad_ours.unsqueeze(0), grad_ref.unsqueeze(0)
+        ).item()
+        assert cos > 0.999, (
+            f"σ gradient direction on {bench.name!r} differs from "
+            f"dense ref: cos={cos:.4f}"
+        )
     
     def test_condition_number(self):
         """Test condition number estimation."""

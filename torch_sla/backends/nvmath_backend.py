@@ -201,6 +201,114 @@ def nvmath_solve(val, row, col, shape, b, matrix_type="general"):
     return x.squeeze(1) if is_1d else x.contiguous()
 
 
+def nvmath_factor_solve_many(val, row, col, shape, build_rhs,
+                              n_chunks, gather_per_chunk,
+                              matrix_type="general"):
+    """Factor A once via cuDSS, then solve A X = E for each E chunk.
+
+    Used by :class:`DetAdjoint.backward` on CUDA: we need n_uc solves of
+    ``A^T y = e_c`` and want to share the factorisation across all of them.
+    The wrapper :func:`nvmath_solve` always re-factors, so callers that
+    issue many solves on the same A should use this helper.
+
+    Parameters
+    ----------
+    val, row, col, shape : CSR triple on CUDA + matrix dimensions.
+    build_rhs : callable ``i -> (E_chunk, meta)``. ``E_chunk`` is a
+        ``[m, width]`` CUDA tensor (one column per RHS). ``meta`` is an
+        opaque object passed back to ``gather_per_chunk``.
+    n_chunks : number of times to call ``build_rhs``.
+    gather_per_chunk : callable ``(X_chunk, meta) -> None``. ``X_chunk``
+        is the ``[m, width]`` solution; the gatherer is expected to slice
+        out whatever entries the caller needs and store them. The chunk
+        tensors are reused across iterations, so copy out what you need.
+
+    Notes
+    -----
+    The factorisation cost (analyze + factor) is paid once. Each chunk
+    only pays the SOLVE phase cost, which for sparse LU is O(nnz(L) +
+    nnz(U)) per RHS column.
+    """
+    m, n = shape
+    assert m == n, "Matrix must be square"
+    assert val.is_cuda, "val must be on CUDA"
+
+    if matrix_type == "auto":
+        matrix_type = detect_matrix_type(val, row, col, shape)
+    matrix_type = matrix_type.lower()
+    if matrix_type not in _VALID_MATRIX_TYPES:
+        raise ValueError(
+            f"Unknown matrix_type {matrix_type!r}; "
+            f"expected one of {list(_VALID_MATRIX_TYPES) + ['auto']}"
+        )
+
+    cudss, _MTYPE_MAP = _load_cudss()
+
+    indices = torch.stack([row, col], dim=0)
+    A_coo = torch.sparse_coo_tensor(indices, val, (m, n)).coalesce()
+    A_csr = A_coo.to_sparse_csr()
+    crow = A_csr.crow_indices().int()
+    ccol = A_csr.col_indices().int()
+    cval = A_csr.values()
+    nnz = cval.numel()
+
+    if cval.dtype not in _DTYPE_MAP:
+        raise TypeError(
+            f"cuDSS backend does not support dtype {cval.dtype}; "
+            f"supported: {sorted(d.__str__() for d in _DTYPE_MAP)}"
+        )
+    value_type = _DTYPE_MAP[cval.dtype]
+    mtype, mview = _MTYPE_MAP[matrix_type]
+
+    handle = cudss.create()
+    try:
+        cudss.set_stream(handle, torch.cuda.current_stream().cuda_stream)
+
+        A_desc = cudss.matrix_create_csr(
+            m, n, nnz,
+            crow.data_ptr(), 0, ccol.data_ptr(), cval.data_ptr(),
+            CUDA_R_32I, value_type,
+            mtype, mview, cudss.IndexBase.ZERO.value
+        )
+        config = cudss.config_create()
+        data = cudss.data_create(handle)
+
+        analyzed = False
+        for i in range(n_chunks):
+            E_chunk, meta = build_rhs(i)
+            assert E_chunk.is_cuda and E_chunk.dim() == 2 and E_chunk.size(0) == m
+            width = int(E_chunk.size(1))
+            X_chunk = torch.empty_like(E_chunk)
+            # cuDSS wants COL_MAJOR contiguous; t().contiguous() gives [width, m].
+            b_col = E_chunk.t().contiguous()
+            x_col = torch.empty_like(b_col)
+            b_desc = cudss.matrix_create_dn(
+                m, width, m, b_col.data_ptr(), value_type, cudss.Layout.COL_MAJOR.value
+            )
+            x_desc = cudss.matrix_create_dn(
+                m, width, m, x_col.data_ptr(), value_type, cudss.Layout.COL_MAJOR.value
+            )
+            if not analyzed:
+                cudss.execute(handle, cudss.Phase.ANALYSIS.value,
+                              config, data, A_desc, x_desc, b_desc)
+                cudss.execute(handle, cudss.Phase.FACTORIZATION.value,
+                              config, data, A_desc, x_desc, b_desc)
+                analyzed = True
+            cudss.execute(handle, cudss.Phase.SOLVE.value,
+                          config, data, A_desc, x_desc, b_desc)
+            torch.cuda.synchronize()
+            X_chunk.copy_(x_col.t())
+            gather_per_chunk(X_chunk, meta)
+            cudss.matrix_destroy(x_desc)
+            cudss.matrix_destroy(b_desc)
+
+        cudss.data_destroy(handle, data)
+        cudss.config_destroy(config)
+        cudss.matrix_destroy(A_desc)
+    finally:
+        cudss.destroy(handle)
+
+
 class _NvmathCudssModule:
     """Drop-in replacement for the JIT-compiled C++ cudss_spsolve module.
 

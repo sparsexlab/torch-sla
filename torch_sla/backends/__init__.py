@@ -161,6 +161,29 @@ def is_cudss_available() -> bool:
     return _cudss_available
 
 
+_torch_spsolve_available = None
+def is_torch_spsolve_available() -> bool:
+    """Check if :func:`torch.sparse.spsolve` is dispatchable on the
+    default device. On PyTorch 2.12 the underlying ``aten::_spsolve``
+    op is only registered for MPS; CPU/CUDA raise ``NotImplementedError``
+    so this returns False on those devices.
+
+    When upstream PyTorch lands CPU/CUDA kernels for ``_spsolve``,
+    this will start returning True with no code change here.
+    """
+    global _torch_spsolve_available
+    if _torch_spsolve_available is None:
+        try:
+            from .torch_spsolve_backend import is_torch_spsolve_supported
+            # Probe on the default device (CPU is safest -- works as
+            # a "does the dispatch table have an entry" check).
+            _torch_spsolve_available = is_torch_spsolve_supported(
+                torch.device("cpu"))
+        except Exception:
+            _torch_spsolve_available = False
+    return _torch_spsolve_available
+
+
 _pyamg_available = None
 def is_pyamg_available() -> bool:
     """Check if the PyAMG backend is available (CPU AMG; cross-platform)."""

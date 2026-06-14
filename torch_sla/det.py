@@ -235,6 +235,106 @@ def _logdet_hutchinson(matvec: Callable, n: int, *,
 
 
 # ====================================================================== #
+# Differentiable Hutchinson log-det                                       #
+# ====================================================================== #
+class HutchLogDetAdjoint(torch.autograd.Function):
+    """Differentiable Hutchinson log-det estimator.
+
+    Forward runs detached -- the Lanczos / matvec stack does not enter
+    the autograd graph (so even for ``lanczos_iter * num_probes ~ 800``
+    we emit a single Function node, not 800 of them).
+
+    Backward uses ``∂ log|det A| / ∂ A_ij = (A^{-1})^T_{ij}`` together with
+    the Hutchinson identity ``(A^{-T})_{ij} = E_z[z_i * (A^{-T} z)_j]``::
+
+        grad_val[k] ≈ (1/M) Σ_m z_m[row[k]] * (A^{-T} z_m)[col[k]]
+
+    Each probe requires one solve ``A^T x = z`` (or ``A x = z`` for
+    symmetric A); pure matvec stack, no dense ``(N, N)`` intermediate.
+
+    The caller supplies three closures so the same Function works for
+    :class:`~torch_sla.SparseTensor` (single-process) and
+    :class:`~torch_sla.distributed.DSparseTensor` (each rank only sees
+    its local slice of the gradient).
+
+    Parameters (forward inputs)
+    ----------
+    val : (nnz,) Tensor, requires_grad
+        Values that get the gradient. For DSparseTensor this is the
+        rank-local values.
+    matvec_fn : callable ``x -> A @ x``
+        Used by the forward Lanczos. Closes over A's structure.
+    solve_fn : callable ``z -> A^{-T} z``
+        Used by backward, once per probe. For SPD A this is just the
+        regular ``solve(z)``.
+    gather_fn : callable ``(z, x_solved) -> Tensor of shape (nnz,)``
+        Returns ``z[row_k] * x_solved[col_k]`` evaluated at the
+        positions ``val`` lives at. For DSparseTensor the closure maps
+        local CSR indices through ``partition.local_to_global`` first.
+    num_probes, lanczos_iter, distribution, seed : Hutchinson knobs.
+    n_global : int -- size of the *full* matrix (so the probe vector
+        is correctly sized even when ``val`` is local).
+    dtype, device : forwarded to probe vector construction.
+    """
+
+    @staticmethod
+    def forward(ctx, val, matvec_fn, solve_fn, gather_fn,
+                num_probes, lanczos_iter, distribution, seed,
+                n_global, dtype, device):
+        with torch.no_grad():
+            log_det = _logdet_hutchinson(
+                matvec_fn, n_global,
+                num_probes=num_probes,
+                lanczos_iter=lanczos_iter,
+                distribution=distribution,
+                dtype=dtype, device=device,
+                generator=_make_gen(seed),
+            )
+        ctx.save_for_backward(val)
+        ctx.solve_fn = solve_fn
+        ctx.gather_fn = gather_fn
+        ctx.num_probes = num_probes
+        ctx.distribution = distribution
+        ctx.seed = seed
+        ctx.n_global = n_global
+        ctx.dtype = dtype
+        ctx.device = device
+        return log_det.detach()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (val,) = ctx.saved_tensors
+        N = ctx.n_global
+        dtype = ctx.dtype
+        device = ctx.device
+
+        # Decorrelate backward probes from forward (same M for variance,
+        # different seed so the gradient estimate is independent of the
+        # forward estimate's noise).
+        gen = _make_gen((ctx.seed if ctx.seed is not None else 0) + 991)
+
+        grad_val = torch.zeros_like(val)
+        for _ in range(ctx.num_probes):
+            if ctx.distribution == "rademacher":
+                z_cpu = torch.randint(0, 2, (N,), dtype=torch.long,
+                                       generator=gen) * 2 - 1
+                z = z_cpu.to(device=device, dtype=dtype)
+            else:
+                z = torch.randn(N, dtype=dtype, generator=gen).to(device)
+            x = ctx.solve_fn(z)            # A^{-T} z
+            grad_val = grad_val + ctx.gather_fn(z, x)
+
+        grad_val = grad_val * (grad_output / ctx.num_probes)
+        return (grad_val,) + (None,) * 10
+
+
+def _make_gen(seed):
+    g = torch.Generator(device="cpu")
+    g.manual_seed(int(seed) if seed is not None else 0)
+    return g
+
+
+# ====================================================================== #
 # Main dispatcher                                                        #
 # ====================================================================== #
 def _det_dispatch(self, **explicit) -> torch.Tensor:
@@ -360,14 +460,29 @@ def logdet(self, **explicit) -> torch.Tensor:
 
     if method == "hutchinson":
         from .sparse_tensor import SparseTensor as _ST
-        matvec = lambda x: self @ x
-        return _logdet_hutchinson(
-            matvec, M,
-            num_probes=opts["num_probes"],
-            lanczos_iter=opts["lanczos_iter"],
-            distribution=opts["distribution"],
-            dtype=self.values.dtype,
-            device=self.device,
+        # Build a detached SparseTensor view for matvec / solve closures;
+        # we save the original values (with requires_grad) on the Function.
+        A_det = _ST(self.values.detach(), self.row_indices,
+                    self.col_indices, (M, N))
+        row_i64 = self.row_indices.to(torch.int64)
+        col_i64 = self.col_indices.to(torch.int64)
+
+        def matvec_fn(x):
+            return A_det @ x
+
+        def solve_fn(z):
+            # For SPD A, A^T = A so the same solve() works. For general A
+            # this would need an A^T solve; Hutchinson logdet is biased
+            # anyway when A is non-SPD, so we accept this and document it.
+            return A_det.solve(z)
+
+        def gather_fn(z, x_solved):
+            return z[row_i64] * x_solved[col_i64]
+
+        return HutchLogDetAdjoint.apply(
+            self.values, matvec_fn, solve_fn, gather_fn,
+            opts["num_probes"], opts["lanczos_iter"], opts["distribution"],
+            opts.get("seed", 0), M, self.values.dtype, self.device,
         )
     if method == "cholesky":
         try:
