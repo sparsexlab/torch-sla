@@ -579,20 +579,52 @@ class DSparseTensor:
         return None
 
     def full_tensor(self) -> "SparseTensor":
-        """Materialise the full global matrix on every rank.
+        """Materialise the full global tensor on every rank.
 
-        Mirrors :meth:`DTensor.full_tensor`: every rank ends up with
-        the same :class:`SparseTensor`. For :class:`SparseShard(axis=0)`
-        we drop the halo rows from the local SparseTensor (only owned
-        rows count), translate local indices back to global, and
-        all-gather the (val, row, col) triples across the mesh.
+        Mirrors :meth:`DTensor.full_tensor`. For :class:`SparseShard(axis=0)`
+        we drop halo rows, translate indices to global, and allgather
+        the COO triples. For :class:`BatchShard` we allgather the per-rank
+        values slices along the sharded batch axis.
         """
         from ..sparse_tensor import SparseTensor
 
         if self._spec is None:
-            raise RuntimeError(
-                "DSparseTensor.full_tensor() requires a spec -- build "
-                "via .partition(...) / .from_sparse_local(...).")
+            raise RuntimeError("DSparseTensor.full_tensor() requires a spec")
+
+        if isinstance(self._spec.placement, BatchShard):
+            placement = self._spec.placement
+            local_vals = self._local_tensor.values.contiguous()
+            if not (DIST_AVAILABLE and dist.is_initialized()):
+                full_vals = local_vals
+            else:
+                world = dist.get_world_size()
+                sizes = torch.tensor([local_vals.shape[placement.axis]],
+                                      dtype=torch.long, device=local_vals.device)
+                all_sizes = [torch.zeros_like(sizes) for _ in range(world)]
+                dist.all_gather(all_sizes, sizes)
+                sizes_l = [int(s.item()) for s in all_sizes]
+                max_size = max(sizes_l)
+                pad_n = max_size - local_vals.shape[placement.axis]
+                if pad_n > 0:
+                    pad_shape = list(local_vals.shape)
+                    pad_shape[placement.axis] = pad_n
+                    pad = torch.zeros(pad_shape, dtype=local_vals.dtype,
+                                       device=local_vals.device)
+                    padded = torch.cat([local_vals, pad], dim=placement.axis)
+                else:
+                    padded = local_vals
+                gathered = [torch.zeros_like(padded) for _ in range(world)]
+                dist.all_gather(gathered, padded)
+                slices = [g.narrow(placement.axis, 0, sz)
+                          for g, sz in zip(gathered, sizes_l)]
+                full_vals = torch.cat(slices, dim=placement.axis)
+            return SparseTensor(
+                full_vals,
+                self._local_tensor.row_indices,
+                self._local_tensor.col_indices,
+                shape=self._spec.global_shape,
+                sparse_dim=self._local_tensor.sparse_dim,
+            )
 
         partition = self._partition_for_dispatch()
         if partition is None:
@@ -952,6 +984,9 @@ class DSparseTensor:
     def sum(self, axis: Optional[Union[int, Tuple[int, ...]]] = None,
             keepdim: bool = False) -> torch.Tensor:
         """Sum stored values. ``axis`` in ``{None, 0, 1}``."""
+        if isinstance(self._spec.placement, BatchShard):
+            local_sum = self._local_tensor.values.sum()
+            return self._all_reduce_scalar(local_sum, dist.ReduceOp.SUM)
         local = self._local_tensor
         if axis is None:
             total = (local.values.clone() if local.values.requires_grad
@@ -977,6 +1012,15 @@ class DSparseTensor:
 
     def mean(self, axis: Optional[Union[int, Tuple[int, ...]]] = None) -> torch.Tensor:
         """Mean over stored values (implicit zeros excluded)."""
+        if isinstance(self._spec.placement, BatchShard):
+            total = self._local_tensor.values.sum()
+            count = torch.tensor([self._local_tensor.values.numel()],
+                                  dtype=torch.long,
+                                  device=self._local_tensor.values.device)
+            total = self._all_reduce_scalar(total, dist.ReduceOp.SUM)
+            if DIST_AVAILABLE and dist.is_initialized():
+                dist.all_reduce(count, op=dist.ReduceOp.SUM)
+            return total / count.clamp_(min=1).to(total.dtype)
         total = self.sum(axis=axis)
         if axis is None:
             return total / max(1, self.global_nnz())
@@ -1022,6 +1066,9 @@ class DSparseTensor:
             else:
                 local_sq = (v ** 2).sum()
             return self._all_reduce_scalar(local_sq, dist.ReduceOp.SUM).sqrt()
+        if isinstance(self._spec.placement, BatchShard):
+            raise NotImplementedError(
+                "BatchShard norm only supports 'fro'; for 1/inf use full_tensor()")
         if ord == 1:
             return self._abs_axis_sum(axis=0).max()
         if ord == float("inf"):
@@ -1174,11 +1221,39 @@ class DSparseTensor:
     def eigsh(self, k: int = 6, which: str = "LM", maxiter: int = 200,
               tol: float = 1e-8, return_eigenvectors: bool = True,
               sigma: Optional[float] = None, verbose: bool = False):
-        """Distributed LOBPCG. See :func:`distributed_eigsh.eigsh_shard`."""
+        """Distributed LOBPCG (SparseShard) or per-batch eigsh (BatchShard).
+
+        BatchShard returns ``(eigenvalues, eigenvectors)`` whose first
+        axis is the batch axis -- each rank runs SparseTensor.eigsh on
+        its local batch slice, no inter-rank comm.
+        """
+        if isinstance(self._spec.placement, BatchShard):
+            return self._local_tensor.eigsh(
+                k=k, which=which, sigma=sigma,
+                return_eigenvectors=return_eigenvectors)
         from .eigsh import eigsh_shard
         return eigsh_shard(self, k=k, which=which, maxiter=maxiter, tol=tol,
                            return_eigenvectors=return_eigenvectors,
                            sigma=sigma, verbose=verbose)
+
+    def solve_batch_shard(self, b: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Per-batch solve under :class:`BatchShard`. Each rank slices
+        ``b`` to its own batch range and reuses
+        :meth:`SparseTensor.solve_batch` (same-pattern batched solve)
+        on its local values stack. Returns this rank's batch slice of
+        the solution; allgather via :meth:`full_tensor`-style code if
+        you need it globally. Zero inter-rank communication."""
+        from ..sparse_tensor import SparseTensor
+        placement = self._spec.placement
+        if not isinstance(placement, BatchShard):
+            raise RuntimeError("solve_batch_shard requires BatchShard placement")
+        my_b = b.narrow(placement.axis, placement.start,
+                        placement.end - placement.start)
+        local = self._local_tensor
+        M, N = local.sparse_shape
+        template = SparseTensor(local.values[0], local.row_indices,
+                                local.col_indices, (M, N))
+        return template.solve_batch(local.values, my_b, **kwargs)
 
     
     

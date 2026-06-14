@@ -126,5 +126,104 @@ def test_batch_shard_rejects_unbatched():
         DSparseTensor.partition_batch(A, mesh=None, axis=0)
 
 
+def _full_op_worker(rank: int, world: int, port: int, q: mp.Queue):
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world)
+    try:
+        from torch_sla import SparseTensor, DSparseTensor
+
+        B, n = 4, 12
+        A = _build_batched_A(B, n)
+        D = DSparseTensor.partition_batch(A, mesh=None, axis=0)
+
+        # full_tensor allgather
+        full = D.full_tensor()
+        full_match = bool(torch.allclose(full.values, A.values))
+
+        # Cross-rank reductions
+        sum_d = float(D.sum().item())
+        sum_ref = float(A.sum().item())
+
+        mean_d = float(D.mean().item())
+        mean_ref = float(A.mean().item())
+
+        max_d = float(D.max().item())
+        max_ref = float(A.max().item())
+
+        norm_d = float(D.norm("fro").item())
+        norm_ref = float((A.norm("fro") ** 2).sum().sqrt().item())
+
+        # Per-batch eigsh on local slice
+        evals_local, _ = D.eigsh(k=3, which="LM")
+        evals_ref, _ = A.eigsh(k=3, which="LM")
+        evals_local_first = evals_local[0].tolist()
+        evals_ref_first = evals_ref[D._spec.placement.start].tolist()
+
+        # solve_batch_shard parity vs single-process solve_batch
+        torch.manual_seed(0)
+        b = torch.randn(B, n, dtype=torch.float64)
+        x_local = D.solve_batch_shard(b)
+        # Reference: use SparseTensor.solve_batch on the full A
+        from torch_sla import SparseTensor as _ST
+        ref_template = _ST(A.values[0], A.row_indices, A.col_indices, (n, n))
+        x_ref = ref_template.solve_batch(A.values, b)
+        local_slice = x_ref.narrow(0, D._spec.placement.start,
+                                    D._spec.placement.end - D._spec.placement.start)
+        solve_err = float((x_local - local_slice).abs().max().item())
+
+        q.put({
+            "rank": rank,
+            "full_match": full_match,
+            "sum_diff": abs(sum_d - sum_ref),
+            "mean_diff": abs(mean_d - mean_ref),
+            "max_diff": abs(max_d - max_ref),
+            "norm_diff": abs(norm_d - norm_ref),
+            "evals_local_first": evals_local_first,
+            "evals_ref_first": evals_ref_first,
+            "solve_err": solve_err,
+        })
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not dist.is_available(),
+                    reason="torch.distributed not available")
+def test_batch_shard_full_op_2procs():
+    """End-to-end on 2 procs: full_tensor + reductions + eigsh + solve_batch."""
+    world_size = 2
+    port = 29712
+    ctx = mp.get_context("spawn")
+    q: mp.Queue = ctx.Queue()
+    procs = [ctx.Process(target=_full_op_worker,
+                         args=(rank, world_size, port, q))
+             for rank in range(world_size)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=180)
+
+    results = []
+    while not q.empty():
+        results.append(q.get())
+    assert len(results) == world_size
+
+    for r in results:
+        assert r["full_match"]
+        assert r["sum_diff"] < 1e-9
+        assert r["mean_diff"] < 1e-9
+        assert r["max_diff"] < 1e-9
+        assert r["norm_diff"] < 1e-9
+        for got, ref in zip(r["evals_local_first"], r["evals_ref_first"]):
+            assert abs(got - ref) < 1e-6
+        assert r["solve_err"] < 1e-9, \
+            f"rank {r['rank']}: solve mismatch {r['solve_err']:.2e}"
+
+    print(f"\n[OK] batch shard end-to-end on 2 procs:")
+    for r in sorted(results, key=lambda x: x["rank"]):
+        print(f"  rank {r['rank']}: solve_err={r['solve_err']:.2e} "
+              f"norm_diff={r['norm_diff']:.2e}")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-xvs"])
