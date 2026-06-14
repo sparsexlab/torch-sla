@@ -156,32 +156,42 @@ def test_det_components_disconnected():
 
 def test_logdet_hutchinson_backward_cosine_match():
     """Hutchinson logdet backward gives grad with high cosine similarity
-    to the exact ``(A^-1)^T``. With M=400 probes on n=32 we expect cos > 0.99."""
+    to the exact ``(A^-1)^T`` sampled at A's nnz pattern.
+
+    Uses ``Synthetic['poisson_2d_16']`` (n=256 SPD 5-pt Laplacian) so
+    the test exercises a real PDE matrix rather than a hand-rolled
+    tridiagonal.
+    """
     import numpy as np
     from torch_sla import SparseTensor, DetConfig
+    from torch_sla.datasets import Synthetic
 
-    torch.manual_seed(0)
-    n = 32
-    A = SparseTensor.tridiagonal(n, 4.0, -1.0)
-    val = A.values.detach().clone().requires_grad_(True)
-    A2 = SparseTensor(val, A.row_indices, A.col_indices, (n, n))
+    bench = Synthetic["poisson_2d_16"]
+    val = bench.val.detach().clone().requires_grad_(True)
+    A = SparseTensor(val, bench.row, bench.col, bench.shape)
+    n = int(bench.shape[0])
 
-    with DetConfig(method="hutchinson", num_probes=400, lanczos_iter=30):
-        ld = A2.logdet()
+    # n=256 -> 1216 nnz; Hutchinson stderr scales ~1/sqrt(M), so we
+    # need more probes than the toy n=32 case to hit cos > 0.985.
+    with DetConfig(method="hutchinson", num_probes=800, lanczos_iter=30):
+        ld = A.logdet()
     ld.backward()
 
-    # Exact gradient: (A^-1)^T at (row, col) positions.
-    A_dense = np.zeros((n, n))
-    A_dense[A.row_indices.numpy(), A.col_indices.numpy()] = A.values.numpy()
+    # Exact gradient: (A^-1)^T sampled at (row, col).
+    A_dense = np.zeros((n, n), dtype=np.float64)
+    A_dense[bench.row.numpy(), bench.col.numpy()] = bench.val.numpy()
     A_inv = np.linalg.inv(A_dense)
     grad_exact = torch.from_numpy(
-        A_inv[A.col_indices.numpy(), A.row_indices.numpy()]
+        A_inv[bench.col.numpy(), bench.row.numpy()]
     )
 
     cos = torch.nn.functional.cosine_similarity(
         val.grad.unsqueeze(0).double(), grad_exact.unsqueeze(0)
     ).item()
-    assert cos > 0.99, f"cosine similarity {cos:.4f} too low; Hutchinson noise"
+    assert cos > 0.985, (
+        f"cosine similarity {cos:.4f} on {bench.name!r} too low; "
+        f"Hutchinson noise too high (raise num_probes or check variance)"
+    )
 
 
 def _logdet_backward_worker(rank: int, world: int, port: int, q: mp.Queue):
