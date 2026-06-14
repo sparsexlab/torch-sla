@@ -100,7 +100,13 @@ class DetAdjoint(Function):
                                          row.to(torch.int64)] * grad_output
             return grad_val, None, None, None, None, None
 
-        # CPU sparse path -- single SuperLU + batched solve.
+        # CPU sparse path -- single SuperLU, chunked batched solve.
+        #
+        # For each unique col c we need column c of A^-T, then we gather
+        # at (row[k], col_inv[k]). The full Y has shape (N, n_uc), which
+        # at n_uc ~ N is N^2 doubles -- 5 GB at n=25600. Chunking RHS
+        # keeps the peak at (N * CHUNK_COLS), gathering per chunk into
+        # the final 1-D grad buffer.
         from ..backends.scipy_backend import torch_coo_to_scipy_csr
         import scipy.sparse.linalg as spla
         import numpy as np
@@ -108,13 +114,44 @@ class DetAdjoint(Function):
         A_T_csc = torch_coo_to_scipy_csr(val, row, col, shape).T.tocsc()
         unique_cols, col_inv = torch.unique(col, return_inverse=True)
         unique_cols_np = unique_cols.cpu().numpy()
-        n_uc = unique_cols_np.shape[0]
-        E = np.zeros((shape[0], n_uc), dtype=val.detach().cpu().numpy().dtype)
-        E[unique_cols_np, np.arange(n_uc)] = 1.0
+        n_uc = int(unique_cols_np.shape[0])
+        N = int(shape[0])
+        np_dtype = val.detach().cpu().numpy().dtype
+
+        # Target ~64 MB per chunk (8 bytes/double, both E and Y live).
+        CHUNK_BYTES = 64 * 1024 * 1024
+        bytes_per_col = N * 8 * 2
+        chunk_cols = max(1, min(n_uc, CHUNK_BYTES // max(1, bytes_per_col)))
+
         lu = spla.splu(A_T_csc)
-        Y_np = lu.solve(E)                       # (N, n_uc)
-        Y = torch.from_numpy(Y_np).to(dtype=val.dtype, device=device)
-        gathered = Y[row.to(torch.int64), col_inv.to(torch.int64)]
+        row_np = row.cpu().numpy().astype(np.int64)
+        col_inv_np = col_inv.cpu().numpy().astype(np.int64)
+
+        # Sort nnz by col_inv so each chunk handles a contiguous slice.
+        order = np.argsort(col_inv_np, kind="stable")
+        col_inv_sorted = col_inv_np[order]
+        row_sorted = row_np[order]
+        gathered_np = np.empty(row_np.shape[0], dtype=np_dtype)
+
+        nnz_starts = np.searchsorted(col_inv_sorted, np.arange(n_uc))
+        # Append sentinel so [start_k, start_{k+1}) works.
+        nnz_starts = np.concatenate([nnz_starts, [row_np.shape[0]]])
+
+        E_buf = np.zeros((N, chunk_cols), dtype=np_dtype)
+        for c0 in range(0, n_uc, chunk_cols):
+            c1 = min(c0 + chunk_cols, n_uc)
+            width = c1 - c0
+            E = E_buf[:, :width]
+            E.fill(0.0)
+            E[unique_cols_np[c0:c1], np.arange(width)] = 1.0
+            Y = lu.solve(E)                       # (N, width)
+            nnz_lo = nnz_starts[c0]
+            nnz_hi = nnz_starts[c1]
+            sub_inv = col_inv_sorted[nnz_lo:nnz_hi] - c0
+            sub_row = row_sorted[nnz_lo:nnz_hi]
+            gathered_np[order[nnz_lo:nnz_hi]] = Y[sub_row, sub_inv]
+
+        gathered = torch.from_numpy(gathered_np).to(dtype=val.dtype, device=device)
         grad_val = det_val * gathered * grad_output
         return grad_val, None, None, None, None, None
 
