@@ -112,11 +112,11 @@ from .distributed import (
     partition_simple,
     # DTensor-mirror placement vocabulary
     DSparseSpec,
-    SparseShard,
-    row_shard,
-    col_shard,
+    VertexShard,
+    VertexShardReplicated,
+    BatchShard,
     Replicated,
-    RowPartitioned,  # deprecated alias for SparseShard(axis=0)
+    SparseShard,  # deprecated alias (factory)
 )
 
 from .io import (

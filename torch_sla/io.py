@@ -411,6 +411,17 @@ def load_metadata(directory: Union[str, Path]) -> Dict:
 _DSPARSE_FORMAT_VERSION = "2.0"
 
 
+def _placement_axis(placement) -> int:
+    """Back-compat axis ID for a VertexShard / VertexShardReplicated /
+    legacy SparseShard placement, written into metadata.json."""
+    from .distributed import VertexShard, VertexShardReplicated
+    if isinstance(placement, VertexShard):
+        return 0
+    if isinstance(placement, VertexShardReplicated):
+        return 1
+    return int(getattr(placement, "axis", 0))
+
+
 def _partition_to_safetensors_dict(local_tensor, partition):
     out = {
         "values":          local_tensor.values.contiguous().cpu(),
@@ -487,7 +498,7 @@ def save_dsparse(tensor: "DSparseTensor", directory: Union[str, Path],
             "shape":          list(tensor.shape),
             "dtype":          str(tensor.dtype),
             "num_partitions": int(tensor.num_partitions),
-            "placement_axis": int(placement.axis),
+            "placement_axis": _placement_axis(placement),
             "partitions": [{
                 "partition_id": int(partition.partition_id),
                 "num_owned":    int(partition.owned_nodes.numel()),

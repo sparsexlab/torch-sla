@@ -120,39 +120,27 @@ class Replicated:
 
 
 @dataclass(frozen=True)
-class SparseShard:
-    """DSparseTensor placement: shard one of the **sparse** axes of the
-    underlying :class:`SparseTensor` across the mesh.
+class VertexShard:
+    """DSparseTensor placement: METIS-style vertex partition with
+    **row-storage** local layout.
 
-    Mirrors ``torch.distributed.tensor.Shard(dim)`` -- one generic
-    placement parameterised by axis number, not separate classes per
-    direction. For a 2-D sparse matrix ``(M, N)`` the canonical axes
-    are 0 (rows) and 1 (cols); for a batched / block-sparse tensor
-    ``(*batch, M, N, *block)`` the row axis is ``axis=len(batch_shape)``
-    and the col axis is ``axis=len(batch_shape) + 1``.
+    Each rank holds ``A[owned_vertices, local_to_global]`` -- the rows
+    are restricted to its owned vertex set and the columns span owned +
+    halo. Matvec output is ``DTensor[Shard(0)]`` (each rank owns the
+    owned-row slice of y); no all-reduce required.
 
-    Unlike DTensor's ``Shard(dim)`` -- which assumes uniform chunks of
-    size ``N/world_size`` -- a sparse shard can carry an irregular
-    partition map (METIS / hypergraph / RCB) via the optional
-    ``partition`` field.
+    The ``partition`` field carries the irregular per-rank vertex map
+    (``owned_nodes`` / ``halo_nodes`` / ``neighbor_partitions``) that
+    METIS / Hilbert / RCB produce. ``None`` only when an empty marker
+    is being passed around as a type tag.
 
-    The ``partition`` field carries the per-rank ``owned_nodes`` /
-    ``halo_nodes`` / ``neighbor_partitions`` so the placement is the
-    single source of truth for the irregular shard map. It is set by
-    :meth:`DSparseTensor.from_sparse_local` / :meth:`partition` /
-    :meth:`from_global_distributed`; ``None`` only when an empty
-    placement object is being passed around as a type tag.
+    This is the **default** placement -- every Krylov solver, eigsh,
+    and persistence path uses it.
     """
-    axis: int = 0
     partition: Optional["Partition"] = None
 
     def __eq__(self, other: object) -> bool:
-        # Frozen dataclass eq would call torch.Tensor.__eq__ inside
-        # Partition and explode; restrict equality to the axis +
-        # partition_id pair, which is what placement dispatch needs.
-        if not isinstance(other, SparseShard):
-            return False
-        if self.axis != other.axis:
+        if not isinstance(other, VertexShard):
             return False
         my_pid = self.partition.partition_id if self.partition else None
         ot_pid = other.partition.partition_id if other.partition else None
@@ -160,31 +148,51 @@ class SparseShard:
 
     def __hash__(self) -> int:
         pid = self.partition.partition_id if self.partition else -1
-        return hash((type(self).__name__, self.axis, pid))
+        return hash(("VertexShard", pid))
 
 
-def row_shard(axis_offset: int = 0) -> SparseShard:
-    """Convenience: row sharding for a ``(*batch, M, N, *block)`` tensor
-    where there are ``axis_offset`` leading batch dims. Defaults to a
-    plain 2-D matrix (``axis_offset=0``)."""
-    return SparseShard(axis=axis_offset)
+@dataclass(frozen=True)
+class VertexShardReplicated:
+    """Same vertex partition as :class:`VertexShard` but with
+    **col-storage** local layout.
+
+    Each rank holds ``A[local_to_global, owned_vertices]`` -- partial
+    matvec products end up Replicated after ``all_reduce(SUM)``.
+    Specialised path; almost no production code needs this -- only
+    transpose-heavy algorithms (normal equations, certain autograd
+    paths) benefit. Not yet implemented end-to-end.
+    """
+    partition: Optional["Partition"] = None
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, VertexShardReplicated):
+            return False
+        my_pid = self.partition.partition_id if self.partition else None
+        ot_pid = other.partition.partition_id if other.partition else None
+        return my_pid == ot_pid
+
+    def __hash__(self) -> int:
+        pid = self.partition.partition_id if self.partition else -1
+        return hash(("VertexShardReplicated", pid))
 
 
-def col_shard(axis_offset: int = 0) -> SparseShard:
-    """Convenience: col sharding for a ``(*batch, M, N, *block)`` tensor.
-    Defaults to a plain 2-D matrix (``axis_offset=0``)."""
-    return SparseShard(axis=axis_offset + 1)
-
-
-# ---------------------------------------------------------------------- #
-# Backward-compatibility aliases.
-# Pre-rename: ``RowPartitioned()`` -- empty marker for "row-sharded".
-# Post-rename: ``SparseShard(axis=0)`` is the canonical name.
-# Kept as a deprecated alias so external callers keep working.
-# ---------------------------------------------------------------------- #
-def RowPartitioned() -> SparseShard:  # noqa: N802 -- legacy capital
-    """Deprecated alias for :func:`row_shard()` / ``SparseShard(axis=0)``."""
-    return SparseShard(axis=0)
+# Deprecated alias for back-compat. Callers should switch to
+# :class:`VertexShard` / :class:`VertexShardReplicated` directly.
+def SparseShard(axis: int = 0, partition: Optional["Partition"] = None):
+    """Deprecated. Use :class:`VertexShard` or :class:`VertexShardReplicated`."""
+    import warnings
+    warnings.warn(
+        "SparseShard(axis=...) is deprecated; use VertexShard() (axis=0) or "
+        "VertexShardReplicated() (axis=1) directly. The `axis` parameter was "
+        "misleading -- partition is over the vertex set, axis only selected "
+        "the local data layout.",
+        DeprecationWarning, stacklevel=2,
+    )
+    if axis == 0:
+        return VertexShard(partition=partition)
+    if axis == 1:
+        return VertexShardReplicated(partition=partition)
+    raise ValueError(f"axis must be 0 or 1, got {axis}")
 
 
 @dataclass(frozen=True)
@@ -217,7 +225,9 @@ class BatchShard:
         return hash((type(self).__name__, self.axis, self.start, self.end))
 
 
-SparsePlacement = Union[Replicated, SparseShard, BatchShard]
+SparsePlacement = Union[Replicated, VertexShard, VertexShardReplicated, BatchShard]
+# Tuple form for ``isinstance(p, _VERTEX_SHARDS)`` checks inside dispatch.
+_VERTEX_SHARDS = (VertexShard, VertexShardReplicated)
 
 
 @dataclass(frozen=True)
@@ -391,7 +401,12 @@ class DSparseTensor:
         self._local_tensor = local_tensor
         self._halo_send_buffers = {}
         self._halo_recv_buffers = {}
-        placement = SparseShard(axis=axis, partition=partition)
+        if axis == 0:
+            placement = VertexShard(partition=partition)
+        elif axis == 1:
+            placement = VertexShardReplicated(partition=partition)
+        else:
+            raise ValueError(f"axis must be 0 or 1, got {axis}")
         self._spec = DSparseSpec(placement=placement, mesh=mesh,
                                  global_shape=global_shape)
         return self
@@ -573,7 +588,7 @@ class DSparseTensor:
         """Return the active :class:`Partition` from the spec, or
         ``None`` if no spec is set."""
         if self._spec is not None and isinstance(
-                self._spec.placement, SparseShard) \
+                self._spec.placement, _VERTEX_SHARDS) \
                 and self._spec.placement.partition is not None:
             return self._spec.placement.partition
         return None
@@ -930,9 +945,12 @@ class DSparseTensor:
 
         new_local = self._local_tensor.to(device=device, dtype=dtype)
         placement = self._spec.placement
+        # BatchShard has no .partition; only VertexShard variants do.
+        has_partition = isinstance(placement, _VERTEX_SHARDS)
         new_partition = (placement.partition.to(device)
-                         if device is not None and placement.partition is not None
-                         else placement.partition)
+                         if has_partition and device is not None
+                         and placement.partition is not None
+                         else (placement.partition if has_partition else None))
 
         out = type(self).__new__(type(self))
         out._values = None
@@ -947,8 +965,16 @@ class DSparseTensor:
         out._local_tensor = new_local
         out._halo_send_buffers = {}
         out._halo_recv_buffers = {}
+        if isinstance(placement, BatchShard):
+            new_placement = placement
+        elif isinstance(placement, VertexShard):
+            new_placement = VertexShard(partition=new_partition)
+        elif isinstance(placement, VertexShardReplicated):
+            new_placement = VertexShardReplicated(partition=new_partition)
+        else:
+            new_placement = placement
         out._spec = DSparseSpec(
-            placement=SparseShard(axis=placement.axis, partition=new_partition),
+            placement=new_placement,
             mesh=self._spec.mesh,
             global_shape=self._spec.global_shape,
         )
@@ -1308,7 +1334,7 @@ class DSparseTensor:
         from .matvec import matmul_spec, matmul_batch_shard
         if self._spec is None:
             raise RuntimeError("DSparseTensor.__matmul__ requires a spec")
-        if isinstance(self._spec.placement, SparseShard):
+        if isinstance(self._spec.placement, _VERTEX_SHARDS):
             return matmul_spec(self, x)
         if isinstance(self._spec.placement, BatchShard):
             return matmul_batch_shard(self, x)
@@ -1370,10 +1396,10 @@ class DSparseTensor:
         ...     y = D.solve_distributed_shard(b, atol=1e-12)  # kwarg wins
         """
         if self._spec is None or not isinstance(
-                self._spec.placement, SparseShard):
+                self._spec.placement, _VERTEX_SHARDS):
             raise RuntimeError(
                 "solve_distributed_shard() requires a DSparseTensor "
-                "with SparseShard placement -- build one via "
+                "with VertexShard placement -- build one via "
                 "DSparseTensor.from_local(local, mesh, ...) or "
                 "DSparseTensor.partition(A, mesh, ...)."
             )

@@ -122,32 +122,32 @@ def matmul_row_shard(D, x: Any) -> Any:
 
 
 def matmul_col_shard(D, x: Any) -> Any:
-    """Col-partitioned matvec (``SparseShard(axis=1)``). Not implemented."""
+    """Col-storage matvec (``VertexShardReplicated``). Not implemented.
+
+    Each rank's local A is ``A[:, owned_cols]``; matvec gives a partial
+    sum that needs ``all_reduce(SUM)`` to land Replicated. End-to-end
+    plumbing isn't done -- only transpose-heavy code paths need this.
+    """
     raise NotImplementedError(
-        "SparseShard(axis=1) col-partitioned matvec is not yet implemented; "
-        "use SparseShard(axis=0)."
-    )
+        "VertexShardReplicated matvec is not implemented; use VertexShard.")
 
 
 def matmul_spec(D, x: Any) -> Any:
-    """``D @ x`` dispatcher. Routes on ``spec.placement.axis``."""
-    from .core import SparseShard
+    """``D @ x`` dispatcher. Routes on the vertex-shard layout flavour."""
+    from .core import VertexShard, VertexShardReplicated
 
     if D._local_tensor is None:
         raise RuntimeError(
             "DSparseTensor matvec requires a SparseTensor backing. "
             "Build via .partition(...) / .from_sparse_local(...).")
     placement = D._spec.placement
-    if not isinstance(placement, SparseShard):
-        raise RuntimeError(
-            f"matmul_spec expects SparseShard placement; got {type(placement).__name__}")
-
-    if placement.axis == 0:
+    if isinstance(placement, VertexShard):
         return matmul_row_shard(D, x)
-    if placement.axis == 1:
+    if isinstance(placement, VertexShardReplicated):
         return matmul_col_shard(D, x)
-    raise NotImplementedError(
-        f"SparseShard(axis={placement.axis}) matvec dispatch not implemented")
+    raise RuntimeError(
+        f"matmul_spec expects a VertexShard placement; "
+        f"got {type(placement).__name__}")
 
 
 def shard_matvec(D, x_owned: torch.Tensor) -> torch.Tensor:
