@@ -449,37 +449,69 @@ class SparseSparseMatmulFunction(Function):
     
     @staticmethod
     def backward(ctx, grad_C_values, grad_row_c, grad_col_c):
-        (val_a, row_a, col_a, val_b, row_b, col_b, 
+        (val_a, row_a, col_a, val_b, row_b, col_b,
          row_c, col_c, val_c) = ctx.saved_tensors
         M, K = ctx.shape_a
         K2, N = ctx.shape_b
-        
+
         grad_val_a = None
         grad_val_b = None
-        
+
         if ctx.needs_input_grad[0]:
-            # grad_A = grad_C @ B^T
+            # grad_A = (grad_C @ B^T)[A_row, A_col]
+            # Keep sparse end-to-end; never materialise an (M, K) dense.
             grad_C_coo = torch.sparse_coo_tensor(
                 torch.stack([row_c, col_c]), grad_C_values, (M, N)
             ).coalesce()
             B_T_coo = torch.sparse_coo_tensor(
                 torch.stack([col_b, row_b]), val_b, (N, K)
             ).coalesce()
-            grad_A_dense = torch.sparse.mm(grad_C_coo, B_T_coo).to_dense()
-            grad_val_a = grad_A_dense[row_a, col_a]
-        
+            grad_A_sparse = torch.sparse.mm(grad_C_coo, B_T_coo)
+            grad_val_a = _gather_sparse_at_coords(grad_A_sparse, row_a, col_a, K)
+
         if ctx.needs_input_grad[4]:
-            # grad_B = A^T @ grad_C
+            # grad_B = (A^T @ grad_C)[B_row, B_col]
             A_T_coo = torch.sparse_coo_tensor(
                 torch.stack([col_a, row_a]), val_a, (K, M)
             ).coalesce()
             grad_C_coo = torch.sparse_coo_tensor(
                 torch.stack([row_c, col_c]), grad_C_values, (M, N)
             ).coalesce()
-            grad_B_dense = torch.sparse.mm(A_T_coo, grad_C_coo).to_dense()
-            grad_val_b = grad_B_dense[row_b, col_b]
-        
+            grad_B_sparse = torch.sparse.mm(A_T_coo, grad_C_coo)
+            grad_val_b = _gather_sparse_at_coords(grad_B_sparse, row_b, col_b, N)
+
         return grad_val_a, None, None, None, grad_val_b, None, None, None
+
+
+def _gather_sparse_at_coords(C_sparse, row_q, col_q, n_cols):
+    """Gather sparse tensor C at positions (row_q[i], col_q[i]).
+
+    Positions outside C's sparsity pattern return 0. No dense intermediate
+    is materialised; cost is O((nnz(C) + nnz(query)) log nnz(C)).
+
+    Used in SparseSparseMatmul backward to extract grad at A/B's nnz
+    positions from the sparse product (grad_C @ B^T) / (A^T @ grad_C).
+    """
+    C_coo = C_sparse.coalesce()
+    i_c = C_coo.indices()[0].to(torch.int64)
+    j_c = C_coo.indices()[1].to(torch.int64)
+    v_c = C_coo.values()
+
+    if v_c.numel() == 0:
+        return torch.zeros(row_q.shape[0], dtype=v_c.dtype, device=v_c.device)
+
+    # Linearise (i, j) -> i * n_cols + j; coalesce() guarantees C's
+    # indices are lexicographically sorted, so no extra sort is needed.
+    pos_c = i_c * n_cols + j_c
+    pos_q = row_q.to(torch.int64) * n_cols + col_q.to(torch.int64)
+
+    idx = torch.searchsorted(pos_c, pos_q)
+    idx_clamped = idx.clamp(max=pos_c.numel() - 1)
+    found = (idx < pos_c.numel()) & (pos_c[idx_clamped] == pos_q)
+    return torch.where(
+        found, v_c[idx_clamped],
+        torch.zeros_like(pos_q, dtype=v_c.dtype),
+    )
 
 
 class SvdAdjoint(Function):

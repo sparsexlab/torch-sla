@@ -4,6 +4,7 @@ from typing import Union
 import torch
 
 from .core import SparseTensor  # noqa: E402  # cross-module use
+from .autograd import _sparse_sparse_matmul_with_sparse_grad
 
 
 def _spmv_coo(self, x: torch.Tensor) -> torch.Tensor:
