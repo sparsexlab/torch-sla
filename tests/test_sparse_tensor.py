@@ -603,15 +603,43 @@ class TestEigenvalueSVD:
         """Test basic SVD computation."""
         val, row, col, shape = create_tridiagonal_spd(20)
         A = SparseTensor(val, row, col, shape)
-        
+
         U, S, Vt = A.svd(k=5)
-        
+
         assert U.shape == (20, 5)
         assert S.shape == (5,)
         assert Vt.shape == (5, 20)
-        
+
         # Singular values should be positive
         assert (S > 0).all()
+
+    def test_svd_sigma_backward(self):
+        """``SvdAdjoint`` propagates ∂L/∂σ_i = u_i v_i^T at A's nnz pattern."""
+        import numpy as np
+        torch.manual_seed(0)
+        M, N, k = 30, 25, 5
+        A_d = torch.randn(M, N, dtype=torch.float64) * 0.5
+        A_d[A_d.abs() < 0.5] = 0
+        ra, ca = torch.nonzero(A_d, as_tuple=True)
+        val = A_d[ra, ca]
+
+        # Ours: sparse SVD with SvdAdjoint backward
+        val_g = val.detach().clone().requires_grad_(True)
+        A_sp = SparseTensor(val_g, ra, ca, (M, N))
+        _, S, _ = A_sp.svd(k=k)
+        S.sum().backward()
+        grad_ours = val_g.grad.clone()
+
+        # Reference: dense torch.linalg.svd backward (sum of top-k σ).
+        val_d = val.detach().clone().requires_grad_(True)
+        A_dense = torch.zeros(M, N, dtype=torch.float64)
+        A_dense[ra, ca] = val_d
+        _, S_ref, _ = torch.linalg.svd(A_dense, full_matrices=False)
+        S_ref[:k].sum().backward()
+        grad_ref = val_d.grad.clone()
+
+        rel = (grad_ours - grad_ref).abs().max() / grad_ref.abs().max()
+        assert rel < 1e-10, f"σ gradient mismatch rel={rel:.2e}"
     
     def test_condition_number(self):
         """Test condition number estimation."""

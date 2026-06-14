@@ -398,6 +398,64 @@ class SparseSparseMatmulFunction(Function):
         return grad_val_a, None, None, None, grad_val_b, None, None, None
 
 
+class SvdAdjoint(Function):
+    """Differentiable truncated SVD for sparse matrices.
+
+    Forward runs detached (ARPACK / dense / power-iteration) so the
+    iterative process never enters the autograd graph. Backward uses the
+    Townsend & Wendland (2014) closed form sampled at A's nnz pattern.
+
+    Gradient support (this first implementation):
+
+    * Singular-value gradient (``∂L/∂σ_i``) — full support. Closed form
+      ``∂σ_i/∂A = u_i v_iᵀ`` gathered at A's pattern; cost O(nnz · k).
+    * Singular-vector gradient (``∂L/∂U`` / ``∂L/∂V``) — NOT YET
+      implemented. If non-zero gradient flows back through U or V,
+      emits a ``RuntimeWarning`` and treats those contributions as zero.
+
+    Most use cases (spectral regularisation, nuclear norm penalty,
+    PCA-style targets) only need σ gradients; full Townsend formula for
+    U/V is tracked as a separate follow-up.
+    """
+
+    @staticmethod
+    def forward(ctx, val, row, col, shape, k, svd_fn, gather_fn):
+        with torch.no_grad():
+            U, S, Vt = svd_fn(val.detach(), row, col, shape, k)
+        ctx.save_for_backward(val, U, S, Vt)
+        ctx.gather_fn = gather_fn
+        ctx.shape = shape
+        return U.detach(), S.detach(), Vt.detach()
+
+    @staticmethod
+    def backward(ctx, grad_U, grad_S, grad_Vt):
+        val, U, S, Vt = ctx.saved_tensors
+
+        # Singular-vector gradient not yet supported; warn if any flow.
+        u_norm = float(grad_U.abs().max()) if grad_U is not None else 0.0
+        v_norm = float(grad_Vt.abs().max()) if grad_Vt is not None else 0.0
+        if u_norm > 0 or v_norm > 0:
+            import warnings
+            warnings.warn(
+                "SvdAdjoint: gradient through singular vectors (U, V) "
+                "is not yet implemented in the first SvdAdjoint release; "
+                "only ∂L/∂σ contributions are propagated to A. The U/V "
+                "Townsend cross-term will land in a follow-up PR. "
+                "Treating ∂L/∂U / ∂L/∂V as zero for now.",
+                RuntimeWarning, stacklevel=2,
+            )
+
+        if grad_S is None or float(grad_S.abs().max()) == 0.0:
+            return torch.zeros_like(val), None, None, None, None, None, None
+
+        # ∂σ_i / ∂A = u_i v_i^T, so for each nnz (row[k], col[k]):
+        #   grad_val[k] = Σ_i grad_S[i] * U[row[k], i] * Vt[i, col[k]]
+        # gather_fn implements this; for distributed it maps local CSR
+        # row/col into global indices before indexing U / Vt.
+        grad_val = ctx.gather_fn(U, S, Vt, grad_S)
+        return grad_val, None, None, None, None, None, None
+
+
 def _sparse_sparse_matmul_with_sparse_grad(
     val_a: torch.Tensor, row_a: torch.Tensor, col_a: torch.Tensor, shape_a: Tuple[int, int],
     val_b: torch.Tensor, row_b: torch.Tensor, col_b: torch.Tensor, shape_b: Tuple[int, int]
