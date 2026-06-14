@@ -154,5 +154,101 @@ def test_det_components_disconnected():
     assert abs(d - expected) / abs(expected) < 1e-9
 
 
+def test_logdet_hutchinson_backward_cosine_match():
+    """Hutchinson logdet backward gives grad with high cosine similarity
+    to the exact ``(A^-1)^T`` sampled at A's nnz pattern.
+
+    Uses ``Synthetic['poisson_2d_16']`` (n=256 SPD 5-pt Laplacian) so
+    the test exercises a real PDE matrix rather than a hand-rolled
+    tridiagonal.
+    """
+    import numpy as np
+    from torch_sla import SparseTensor, DetConfig
+    from torch_sla.datasets import Synthetic
+
+    bench = Synthetic["poisson_2d_16"]
+    val = bench.val.detach().clone().requires_grad_(True)
+    A = SparseTensor(val, bench.row, bench.col, bench.shape)
+    n = int(bench.shape[0])
+
+    # n=256 -> 1216 nnz; Hutchinson stderr scales ~1/sqrt(M), so we
+    # need more probes than the toy n=32 case to hit cos > 0.985.
+    with DetConfig(method="hutchinson", num_probes=800, lanczos_iter=30):
+        ld = A.logdet()
+    ld.backward()
+
+    # Exact gradient: (A^-1)^T sampled at (row, col).
+    A_dense = np.zeros((n, n), dtype=np.float64)
+    A_dense[bench.row.numpy(), bench.col.numpy()] = bench.val.numpy()
+    A_inv = np.linalg.inv(A_dense)
+    grad_exact = torch.from_numpy(
+        A_inv[bench.col.numpy(), bench.row.numpy()]
+    )
+
+    cos = torch.nn.functional.cosine_similarity(
+        val.grad.unsqueeze(0).double(), grad_exact.unsqueeze(0)
+    ).item()
+    assert cos > 0.985, (
+        f"cosine similarity {cos:.4f} on {bench.name!r} too low; "
+        f"Hutchinson noise too high (raise num_probes or check variance)"
+    )
+
+
+def _logdet_backward_worker(rank: int, world: int, port: int, q: mp.Queue):
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world)
+    try:
+        from torch_sla import SparseTensor, DetConfig
+        from torch_sla.datasets import Synthetic
+
+        bench = Synthetic["poisson_2d_16"]
+        A = SparseTensor(bench.val, bench.row, bench.col, bench.shape)
+        D = A.partition_for_rank(rank=rank, world_size=world)
+
+        # Make the local values trainable, run distributed Hutchinson +
+        # backprop. Just verifying gradient flows through; the numeric
+        # match check lives in the single-process test where there's no
+        # rank/partition partitioning noise.
+        D._local_tensor.values.requires_grad_(True)
+        with DetConfig(method="hutchinson", num_probes=20, lanczos_iter=20):
+            ld = D.logdet()
+        ld.backward()
+
+        grad = D._local_tensor.values.grad
+        q.put({"rank": rank,
+               "has_grad": grad is not None,
+               "grad_nonzero": int((grad != 0).sum()) if grad is not None else 0,
+               "grad_shape": list(grad.shape) if grad is not None else None})
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not dist.is_available(),
+                    reason="torch.distributed not available")
+def test_dsparse_logdet_backward_2procs():
+    """Distributed Hutchinson logdet is differentiable: each rank's
+    local values get a non-trivial gradient on .backward()."""
+    world_size = 2
+    port = 29744
+    ctx = mp.get_context("spawn")
+    q: mp.Queue = ctx.Queue()
+    procs = [ctx.Process(target=_logdet_backward_worker,
+                         args=(rank, world_size, port, q))
+             for rank in range(world_size)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=180)
+
+    results = []
+    while not q.empty():
+        results.append(q.get())
+    assert len(results) == world_size
+    for r in results:
+        assert r["has_grad"], f"rank {r['rank']} got no gradient"
+        assert r["grad_nonzero"] > 0, f"rank {r['rank']} grad all-zero"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-xvs"])

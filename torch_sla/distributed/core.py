@@ -1274,55 +1274,78 @@ class DSparseTensor:
                 is_pd = False
             method = "hutchinson" if is_pd else "lu"
         if method == "hutchinson":
-            # Distributed Hutchinson: Lanczos sees full N-vectors. Each
-            # call slices z to owned rows, runs ``_shard_matvec`` (halo
-            # exchange + local SpMV on owned rows), then allgathers
-            # the owned-row results into a full y. Same probe seed on
-            # every rank, so the estimator is coherent.
+            # Distributed Hutchinson. forward Lanczos and backward solves
+            # both go through ``HutchLogDetAdjoint`` so the gradient on
+            # ``self._local_tensor.values`` is wired up.
+            from ..det import HutchLogDetAdjoint
             partition = self._spec.placement.partition
             owned = partition.owned_nodes.to(self.device).long()
+            l2g = partition.local_to_global.to(self.device).long()
+            local_st = self._local_tensor
+            row_local_i64 = local_st.row_indices.to(torch.int64)
+            col_local_i64 = local_st.col_indices.to(torch.int64)
+            # Map local CSR coords to global -- the grad closure indexes
+            # the global z / x_solved vectors here, so we need globals.
+            g_row = l2g[row_local_i64]
+            g_col = l2g[col_local_i64]
 
-            def matvec(z):
-                z_owned = z[owned] if owned.numel() < z.shape[0] else z
-                y_owned = self._shard_matvec(z_owned.contiguous())
+            def _allgather_full(idx_local, val_local, N_global, dtype, device):
+                """Build a length-N_global vector from per-rank owned
+                slices via ``dist.all_gather`` of (idx, val) pads."""
                 if not (DIST_AVAILABLE and dist.is_initialized()):
-                    # Single proc: owned == all rows.
-                    out = torch.zeros_like(z)
-                    out[owned] = y_owned
+                    out = torch.zeros(N_global, dtype=dtype, device=device)
+                    out[idx_local] = val_local
                     return out
-                # Allgather owned slices into the global y.
                 world = dist.get_world_size()
-                local_idx = owned
-                # Gather (size, owned_idx, y_owned) from every rank.
-                max_size = torch.tensor([z.shape[0]], dtype=torch.long,
-                                         device=z.device)
-                # Each rank pads to max so dist.all_gather has uniform shape.
-                idx_pad = torch.zeros(z.shape[0], dtype=torch.long,
-                                       device=z.device)
-                idx_pad[: local_idx.numel()] = local_idx
-                val_pad = torch.zeros(z.shape[0], dtype=y_owned.dtype,
-                                       device=z.device)
-                val_pad[: y_owned.numel()] = y_owned
-                size_local = torch.tensor([local_idx.numel()],
-                                           dtype=torch.long, device=z.device)
-                all_sizes = [torch.zeros_like(size_local)
-                             for _ in range(world)]
+                idx_pad = torch.zeros(N_global, dtype=torch.long, device=device)
+                idx_pad[: idx_local.numel()] = idx_local
+                val_pad = torch.zeros(N_global, dtype=dtype, device=device)
+                val_pad[: val_local.numel()] = val_local
+                size_local = torch.tensor([idx_local.numel()],
+                                           dtype=torch.long, device=device)
+                all_sizes = [torch.zeros_like(size_local) for _ in range(world)]
                 dist.all_gather(all_sizes, size_local)
                 all_idx = [torch.zeros_like(idx_pad) for _ in range(world)]
                 dist.all_gather(all_idx, idx_pad)
                 all_val = [torch.zeros_like(val_pad) for _ in range(world)]
                 dist.all_gather(all_val, val_pad)
-                out = torch.zeros_like(z)
+                out = torch.zeros(N_global, dtype=dtype, device=device)
                 for sz, ix, vl in zip(all_sizes, all_idx, all_val):
                     n = int(sz.item())
                     out[ix[:n]] = vl[:n]
                 return out
-            return _logdet_hutchinson(
-                matvec, N,
-                num_probes=opts["num_probes"],
-                lanczos_iter=opts["lanczos_iter"],
-                distribution=opts["distribution"],
-                dtype=self.dtype, device=self.device,
+
+            def matvec_fn(z):
+                z_owned = z[owned] if owned.numel() < z.shape[0] else z
+                y_owned = self._shard_matvec(z_owned.contiguous())
+                return _allgather_full(owned, y_owned, z.shape[0],
+                                       z.dtype, z.device)
+
+            def solve_fn(z):
+                # Distributed CG on owned slice. For SPD A, A = A^T.
+                from .solve import cg_shard
+                from ..solve import _active_defaults
+                opts_ = _active_defaults() or {}
+                z_owned = z[owned] if owned.numel() < z.shape[0] else z
+                x_owned = cg_shard(
+                    self, z_owned.contiguous(),
+                    M_apply=lambda r: r,
+                    atol=opts_.get("atol", 1e-8),
+                    rtol=opts_.get("rtol", 1e-8),
+                    maxiter=opts_.get("maxiter", 200),
+                    verbose=False,
+                )
+                return _allgather_full(owned, x_owned, z.shape[0],
+                                       z.dtype, z.device)
+
+            def gather_fn(z, x_solved):
+                # local-nnz grad contribution -- map to global coords.
+                return z[g_row] * x_solved[g_col]
+
+            return HutchLogDetAdjoint.apply(
+                local_st.values, matvec_fn, solve_fn, gather_fn,
+                opts["num_probes"], opts["lanczos_iter"], opts["distribution"],
+                opts.get("seed", 0), N, self.dtype, self.device,
             )
         # Fallback: gather + single-process logdet
         return self._gather_warn("logdet").logdet(**kwargs)
