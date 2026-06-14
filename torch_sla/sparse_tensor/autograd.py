@@ -37,32 +37,26 @@ class DetAdjoint(Function):
     
     @staticmethod
     def forward(ctx, val, row, col, shape, device, is_cuda):
-        """Forward pass: compute determinant."""
-        from ..backends.scipy_backend import scipy_det
-        
-        if is_cuda:
-            # For CUDA, convert to dense and use torch.linalg.det
-            # NOTE: This is inefficient for sparse matrices due to O(n²) memory
-            # and O(n³) computation. cuDSS doesn't expose determinant
-            # computation for sparse matrices directly.
-            # 
-            # Performance: ~100x slower than CPU for sparse matrices
-            # Recommendation: Use .cpu().det() for better performance
-            val_detached = val.detach()
-            indices = torch.stack([row, col], dim=0).to(device)
-            sparse_coo = torch.sparse_coo_tensor(indices, val_detached, shape, device=device)
-            dense = sparse_coo.to_dense()
-            det_val = torch.linalg.det(dense)
-        else:
-            # For CPU, use scipy backend
-            det_val = scipy_det(val.detach(), row, col, shape)
-        
-        # Save for backward
+        """Forward pass via the DetConfig dispatcher.
+
+        Routing (CPU=SuperLU LU, CUDA=copy-to-CPU+SuperLU by default,
+        SPD=Cholesky if scikit-sparse is installed, disconnected matrices
+        factored per-component) lives in :mod:`torch_sla.det`.
+        """
+        from ..sparse_tensor import SparseTensor
+        from ..det import _det_dispatch
+        # Build a no-grad SparseTensor view so the dispatcher can look
+        # at properties (is_pd / connected_components / ...).
+        A = SparseTensor(val.detach(), row, col, shape)
+        det_val = _det_dispatch(A)
+        if not torch.is_tensor(det_val):
+            det_val = torch.tensor(det_val, dtype=val.dtype, device=device)
+        elif det_val.device != device:
+            det_val = det_val.to(device)
         ctx.save_for_backward(val, row, col, det_val)
         ctx.shape = shape
         ctx.device = device
         ctx.is_cuda = is_cuda
-        
         return det_val
     
     @staticmethod

@@ -654,24 +654,36 @@ def det(self) -> torch.Tensor:
     if self.is_batched:
         batch_shape = self.batch_shape
         det_list = []
-        
+
         for idx in self._batch_indices():
             A_single = SparseTensor(
                 self.values[idx], self.row_indices, self.col_indices, (M, N)
             )
             det_list.append(A_single.det())
-        
+
         return torch.stack(det_list).reshape(*batch_shape)
-    
-    # Use adjoint method for gradient support
+
+    # Use adjoint method for gradient support. Forward path routes
+    # through DetConfig dispatcher (see torch_sla/det.py).
     return DetAdjoint.apply(
-        self.values, 
-        self.row_indices, 
-        self.col_indices, 
+        self.values,
+        self.row_indices,
+        self.col_indices,
         (M, N),
         self.device,
         self.is_cuda
     )
+
+
+def logdet(self, **kwargs) -> torch.Tensor:
+    """Log-determinant of this matrix. See :mod:`torch_sla.det`.
+
+    For large SPD matrices, the default ``method='auto'`` selects the
+    Hutchinson stochastic estimator (pure matvec, distributed-friendly).
+    Smaller matrices use Cholesky / LU.
+    """
+    from ..det import logdet as _logdet
+    return _logdet(self, **kwargs)
 
 def lu(self) -> "LUFactorization":
     """

@@ -58,6 +58,7 @@ from .solve import (
     SolverConfig,
     MatrixLike,
 )
+from .det import DetConfig
 
 # Side-effect import: installs SolverConfig.for_spd_gpu(), for_matrix(),
 # etc. classmethods. Kept in its own module so the SolverConfig dataclass

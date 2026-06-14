@@ -1253,6 +1253,80 @@ class DSparseTensor:
         """Condition number via :meth:`full_tensor` + single-process. Warns."""
         return self._gather_warn("condition_number").condition_number(ord=ord)
 
+    def logdet(self, **kwargs) -> torch.Tensor:
+        """Distributed log-determinant via Hutchinson + Lanczos.
+
+        When ``method='hutchinson'`` (the default for SPD), no gather
+        happens -- the trace estimator only needs ``A @ z`` which
+        routes through ``_shard_matvec``. Falls back to ``full_tensor()``
+        + single-process LU for non-SPD or explicit ``method='lu'``.
+
+        See :mod:`torch_sla.det` for the full :class:`DetConfig` knobs.
+        """
+        from ..det import _resolve, _logdet_hutchinson
+        opts = _resolve(**kwargs)
+        method = opts["method"]
+        N = int(self._shape[0])
+        if method == "auto":
+            try:
+                is_pd = bool(self.is_positive_definite())
+            except Exception:
+                is_pd = False
+            method = "hutchinson" if is_pd else "lu"
+        if method == "hutchinson":
+            # Distributed Hutchinson: Lanczos sees full N-vectors. Each
+            # call slices z to owned rows, runs ``_shard_matvec`` (halo
+            # exchange + local SpMV on owned rows), then allgathers
+            # the owned-row results into a full y. Same probe seed on
+            # every rank, so the estimator is coherent.
+            partition = self._spec.placement.partition
+            owned = partition.owned_nodes.to(self.device).long()
+
+            def matvec(z):
+                z_owned = z[owned] if owned.numel() < z.shape[0] else z
+                y_owned = self._shard_matvec(z_owned.contiguous())
+                if not (DIST_AVAILABLE and dist.is_initialized()):
+                    # Single proc: owned == all rows.
+                    out = torch.zeros_like(z)
+                    out[owned] = y_owned
+                    return out
+                # Allgather owned slices into the global y.
+                world = dist.get_world_size()
+                local_idx = owned
+                # Gather (size, owned_idx, y_owned) from every rank.
+                max_size = torch.tensor([z.shape[0]], dtype=torch.long,
+                                         device=z.device)
+                # Each rank pads to max so dist.all_gather has uniform shape.
+                idx_pad = torch.zeros(z.shape[0], dtype=torch.long,
+                                       device=z.device)
+                idx_pad[: local_idx.numel()] = local_idx
+                val_pad = torch.zeros(z.shape[0], dtype=y_owned.dtype,
+                                       device=z.device)
+                val_pad[: y_owned.numel()] = y_owned
+                size_local = torch.tensor([local_idx.numel()],
+                                           dtype=torch.long, device=z.device)
+                all_sizes = [torch.zeros_like(size_local)
+                             for _ in range(world)]
+                dist.all_gather(all_sizes, size_local)
+                all_idx = [torch.zeros_like(idx_pad) for _ in range(world)]
+                dist.all_gather(all_idx, idx_pad)
+                all_val = [torch.zeros_like(val_pad) for _ in range(world)]
+                dist.all_gather(all_val, val_pad)
+                out = torch.zeros_like(z)
+                for sz, ix, vl in zip(all_sizes, all_idx, all_val):
+                    n = int(sz.item())
+                    out[ix[:n]] = vl[:n]
+                return out
+            return _logdet_hutchinson(
+                matvec, N,
+                num_probes=opts["num_probes"],
+                lanczos_iter=opts["lanczos_iter"],
+                distribution=opts["distribution"],
+                dtype=self.dtype, device=self.device,
+            )
+        # Fallback: gather + single-process logdet
+        return self._gather_warn("logdet").logdet(**kwargs)
+
     def T(self) -> "DSparseTensor":
         """Transpose. Allgathers, transposes, repartitions on same mesh."""
         full_T = self._global_view().T()

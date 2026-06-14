@@ -780,6 +780,10 @@ class SparseTensor:
         from .linalg import det as _impl
         return _impl(self, *args, **kwargs)
 
+    def logdet(self, *args, **kwargs):
+        from .linalg import logdet as _impl
+        return _impl(self, *args, **kwargs)
+
     def lu(self, *args, **kwargs):
         from .linalg import lu as _impl
         return _impl(self, *args, **kwargs)
