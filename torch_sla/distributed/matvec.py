@@ -207,3 +207,25 @@ def shard_matvec(D, x_owned: torch.Tensor) -> torch.Tensor:
         D._y_full_cache = yf
     torch.mv(csr, x_padded, out=yf)
     return yf[:num_owned]
+
+
+def matmul_batch_shard(D, x):
+    """Embarrassingly-parallel matvec for ``BatchShard(axis=k)``.
+
+    Every rank computes ``A_local @ x_local`` on its own batch slice;
+    no halo exchange, no cross-rank reduction. ``x`` may be a
+    same-spec DSparseTensor (already sharded along the same axis) or
+    a plain ``torch.Tensor`` whose batch axis is full-extent (in which
+    case we slice it).
+    """
+    from .core import DSparseTensor, BatchShard
+    placement = D._spec.placement
+    assert isinstance(placement, BatchShard)
+    if isinstance(x, DSparseTensor):
+        x_local = x._local_tensor.values
+    elif hasattr(x, 'to_local'):  # DTensor input
+        x_local = x.to_local()
+    else:
+        x_local = x.narrow(placement.axis, placement.start,
+                           placement.end - placement.start)
+    return D._local_tensor @ x_local

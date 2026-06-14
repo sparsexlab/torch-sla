@@ -187,7 +187,37 @@ def RowPartitioned() -> SparseShard:  # noqa: N802 -- legacy capital
     return SparseShard(axis=0)
 
 
-SparsePlacement = Union[Replicated, SparseShard]
+@dataclass(frozen=True)
+class BatchShard:
+    """DSparseTensor placement: shard a **batch** axis (not a sparse axis).
+
+    For a SparseTensor of shape ``(*batch, M, N, *block)`` with
+    ``BatchShard(axis=k)``, rank ``r`` holds the contiguous slice of
+    the k-th batch axis ``batch[k][r*chunk:(r+1)*chunk]`` (with the
+    last rank picking up any tail). The sparse pattern -- row and col
+    indices -- is **replicated** on every rank; only ``values`` is
+    sharded.
+
+    Matvec is embarrassingly parallel: each rank computes its own
+    batch slice with zero inter-rank communication. Cross-batch
+    reductions (``sum`` / ``norm`` / ``mean`` over the sharded axis)
+    use a single ``all_reduce(SUM)``.
+    """
+    axis: int = 0
+    chunk: int = 0       # size of this rank's slice
+    start: int = 0       # first batch index this rank owns
+    end: int = 0         # one past the last batch index this rank owns
+    global_size: int = 0  # full extent of the sharded batch axis
+
+    def __eq__(self, other: object) -> bool:
+        return (isinstance(other, BatchShard) and self.axis == other.axis
+                and self.start == other.start and self.end == other.end)
+
+    def __hash__(self) -> int:
+        return hash((type(self).__name__, self.axis, self.start, self.end))
+
+
+SparsePlacement = Union[Replicated, SparseShard, BatchShard]
 
 
 @dataclass(frozen=True)
@@ -364,6 +394,71 @@ class DSparseTensor:
         placement = SparseShard(axis=axis, partition=partition)
         self._spec = DSparseSpec(placement=placement, mesh=mesh,
                                  global_shape=global_shape)
+        return self
+
+    @classmethod
+    def partition_batch(
+        cls,
+        A: "SparseTensor",
+        mesh: Any,
+        *,
+        axis: int = 0,
+    ) -> "DSparseTensor":
+        """Batch-shard a batched :class:`SparseTensor` across ``mesh``.
+
+        Every rank gets the same row/col indices; only the values
+        tensor is sliced along ``A.batch_shape[axis]``. No halo
+        exchange, no cross-rank comm in matvec.
+
+        Requires ``A.is_batched`` and ``axis < len(A.batch_shape)``.
+        """
+        if not A.is_batched:
+            raise ValueError("partition_batch requires a batched SparseTensor")
+        if axis < 0 or axis >= len(A.batch_shape):
+            raise ValueError(
+                f"axis {axis} out of range for batch_shape {A.batch_shape}")
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            world = dist.get_world_size() if dist.is_initialized() else 1
+        except (RuntimeError, ImportError):
+            rank, world = 0, 1
+
+        B = int(A.batch_shape[axis])
+        chunk = (B + world - 1) // world
+        start = min(rank * chunk, B)
+        end = min(start + chunk, B)
+        my_size = end - start
+
+        # Slice values along the sharded batch axis. SparseTensor's
+        # ``values`` has shape ``[*batch, nnz, *block]`` so the batch
+        # axis position matches ``axis``.
+        new_values = A.values.narrow(axis, start, my_size)
+        # Sub-tensor's batch_shape replaces the sharded extent.
+        new_shape = list(A.shape)
+        new_shape[axis] = my_size
+        from ..sparse_tensor import SparseTensor
+        local_st = SparseTensor(new_values, A.row_indices, A.col_indices,
+                                shape=tuple(new_shape),
+                                sparse_dim=A.sparse_dim)
+
+        placement = BatchShard(axis=axis, chunk=chunk, start=start,
+                               end=end, global_size=B)
+        self = cls.__new__(cls)
+        self._values = None
+        self._row_indices = None
+        self._col_indices = None
+        self._shape = tuple(A.shape)
+        self._num_partitions = world
+        self._coords = None
+        self._partition_method = None
+        self._verbose = False
+        self._device = local_st.values.device
+        self._local_tensor = local_st
+        self._halo_send_buffers = {}
+        self._halo_recv_buffers = {}
+        self._spec = DSparseSpec(placement=placement, mesh=mesh,
+                                 global_shape=tuple(A.shape))
         return self
 
     @classmethod
@@ -1133,13 +1228,18 @@ class DSparseTensor:
     # =========================================================================
     
     def __matmul__(self, x: Union[torch.Tensor, "DTensor"]) -> Union[torch.Tensor, "DTensor"]:
-        """``D @ x``. See :func:`distributed_matvec.matmul_spec`."""
-        from .matvec import matmul_spec
-        if self._spec is not None and isinstance(self._spec.placement, SparseShard):
+        """``D @ x``. See :func:`distributed_matvec.matmul_spec` /
+        :func:`distributed_matvec.matmul_batch_shard`."""
+        from .matvec import matmul_spec, matmul_batch_shard
+        if self._spec is None:
+            raise RuntimeError("DSparseTensor.__matmul__ requires a spec")
+        if isinstance(self._spec.placement, SparseShard):
             return matmul_spec(self, x)
+        if isinstance(self._spec.placement, BatchShard):
+            return matmul_batch_shard(self, x)
         raise RuntimeError(
-            "DSparseTensor.__matmul__ requires a SparseShard placement; "
-            "build via DSparseTensor.partition(A, mesh) or .from_sparse_local(...)")
+            f"DSparseTensor.__matmul__ does not support "
+            f"placement {type(self._spec.placement).__name__}")
 
 
     # ====================================================================== #
