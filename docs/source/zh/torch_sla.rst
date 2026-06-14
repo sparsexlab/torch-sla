@@ -53,16 +53,6 @@ DSparseTensor
    :undoc-members:
    :show-inheritance:
 
-DSparseMatrix
-~~~~~~~~~~~~~
-
-为大规模 CFD/FEM 计算设计的分布式稀疏矩阵。提供带 halo 交换的域分解。
-
-.. autoclass:: torch_sla.DSparseMatrix
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 ----
 
 线性求解函数

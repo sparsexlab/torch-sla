@@ -5,11 +5,11 @@
 Run with:
     torchrun --standalone --nproc_per_node=4 benchmark_distributed_4gpu.py
 
-Compare optimization strategies in true multi-GPU distributed setting:
-1. Baseline: Standard distributed CG
-2. +CSR Cache: Cached sparse matrix format
-3. +Jacobi Precond: Diagonal preconditioner
-4. +Comm Overlap: Communication-computation overlap
+Compare preconditioner choices in true multi-GPU distributed setting:
+1. Baseline:     plain CG (no preconditioner)
+2. +Jacobi:      diagonal inverse on owned rows
+3. +Block-Jacobi: dense LU on the owned-by-owned block per rank
+4. +SSOR:        symmetric SOR sweep on the owned-by-owned block
 """
 
 import argparse
@@ -97,80 +97,70 @@ def reset_memory(device):
 
 
 def benchmark_solve(
-    dsparse, 
-    b: torch.Tensor,
+    D,
+    b_dt,
     preconditioner: str,
-    use_cache: bool,
     rtol: float,
     maxiter: int,
     warmup: int,
     repeat: int,
     rank: int,
-    world_size: int
+    world_size: int,
 ) -> tuple:
     """Benchmark a solve configuration."""
-    device = dsparse.device
-    
-    # Clear cache if testing without it
-    if not use_cache:
-        dsparse._invalidate_cache()
-    
-    # Warmup
+    from torch_sla import solve
+
+    device = b_dt.to_local().device
+    precond = None if preconditioner == "none" else preconditioner
+
+    main_kw = dict(method="cg", preconditioner=precond,
+                   rtol=rtol, atol=0.0, maxiter=maxiter)
+    warmup_kw = dict(main_kw, maxiter=min(50, maxiter))
+
     for _ in range(warmup):
-        if not use_cache:
-            dsparse._csr_cache = None
-            dsparse._ic0_L_csr = None
-            dsparse._ic0_U_csr = None
-        x = dsparse.solve(b, preconditioner=preconditioner, overlap=False,
-                         rtol=rtol, maxiter=min(50, maxiter), verbose=False)
-    
+        _ = solve(D, b_dt, **warmup_kw)
+
     dist.barrier()
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
-    
-    # Reset memory
+
     reset_memory(device)
-    
-    # Benchmark
+
     times = []
+    x_dt = None
     for _ in range(repeat):
-        if not use_cache:
-            dsparse._csr_cache = None
-            dsparse._ic0_L_csr = None
-            dsparse._ic0_U_csr = None
-        
         dist.barrier()
         if device.type == 'cuda':
             torch.cuda.synchronize(device)
-        
+
         t0 = time.perf_counter()
-        x = dsparse.solve(b, preconditioner=preconditioner, overlap=False,
-                         rtol=rtol, maxiter=maxiter, verbose=False)
-        
+        x_dt = solve(D, b_dt, **main_kw)
+
         if device.type == 'cuda':
             torch.cuda.synchronize(device)
         dist.barrier()
-        
+
         times.append(time.perf_counter() - t0)
-    
-    # Get memory
+
     memory_mb = get_gpu_memory_mb(device)
-    
-    # Compute residual
-    x_full = torch.zeros(dsparse.num_local, dtype=b.dtype, device=device)
-    x_full[:dsparse.num_owned] = x
-    dsparse.halo_exchange(x_full)
-    Ax = dsparse.matvec(x_full, exchange_halo=False)
-    
-    b_full = torch.zeros(dsparse.num_local, dtype=b.dtype, device=device)
-    b_full[:dsparse.num_owned] = b
-    local_residual = (Ax[:dsparse.num_owned] - b[:dsparse.num_owned]).norm() ** 2
-    
-    # Global residual
-    global_residual = local_residual.clone()
-    dist.all_reduce(global_residual, op=dist.ReduceOp.SUM)
-    residual = global_residual.sqrt().item()
-    
+
+    # Residual via public ops -- ``D @ x_dt`` is the distributed matvec.
+    r_dt = b_dt - D @ x_dt
+    # torch 2.3+ has DTensor.full_tensor(); older releases fall back to
+    # redistribute → to_local().
+    if hasattr(r_dt, "full_tensor"):
+        r_full = r_dt.full_tensor()
+        b_full = b_dt.full_tensor()
+    else:
+        try:
+            from torch.distributed.tensor import Replicate
+        except ImportError:
+            from torch.distributed._tensor import Replicate
+        mesh = r_dt.device_mesh
+        r_full = r_dt.redistribute(mesh, [Replicate()]).to_local()
+        b_full = b_dt.redistribute(mesh, [Replicate()]).to_local()
+    residual = float((r_full.norm() / b_full.norm()).item())
+
     return min(times) * 1000, memory_mb, residual
 
 
@@ -194,8 +184,13 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
     
-    from torch_sla.distributed import DSparseMatrix
-    
+    try:
+        from torch.distributed.device_mesh import init_device_mesh
+    except ImportError:
+        from torch.distributed._tensor.device_mesh import init_device_mesh
+
+    from torch_sla import SparseTensor, DSparseTensor
+
     if rank == 0:
         print("=" * 80)
         print(f"4-GPU Distributed Solver Benchmark (World Size: {world_size})")
@@ -205,15 +200,14 @@ def main():
         print(f"rtol: {args.rtol}, maxiter: {args.maxiter}")
         print()
     
-    # Configurations: (name, use_cache, preconditioner)
-    # IC0/Polynomial removed - don't converge well for distributed Poisson
-    # SSOR is the best preconditioner (7% speedup)
+    # Configurations: (name, preconditioner)
     configs = [
-        ("Baseline", False, 'none'),
-        ("+CSR Cache", True, 'none'),
-        ("+Jacobi", True, 'jacobi'),
-        ("+SSOR", True, 'ssor'),
+        ("Baseline",       "none"),
+        ("+Jacobi",        "jacobi"),
+        ("+Block-Jacobi",  "block_jacobi"),
+        ("+SSOR",          "ssor"),
     ]
+    mesh = init_device_mesh("cuda", (world_size,))
     
     all_results = []
     
@@ -225,38 +219,34 @@ def main():
             print(f"Grid {n}×{n} = {N:,} DOF, {world_size} GPUs ({N//world_size:,} DOF/GPU)")
             print(f"{'='*80}")
         
-        # Create matrix (same on all ranks)
+        # Build SparseTensor on every rank, then row-shard across the mesh.
         val, row, col, shape = create_2d_poisson(n)
-        
-        # Distribute
-        dsparse = DSparseMatrix.from_global(
-            val, row, col, shape,
-            num_partitions=world_size,
-            my_partition=rank,
-            device=device
-        )
-        
-        # RHS
-        b = torch.ones(dsparse.num_owned, dtype=torch.float64, device=device)
-        
+        A_global = SparseTensor(val.to(device), row.to(device),
+                                 col.to(device), shape)
+        D = DSparseTensor.partition(A_global, mesh,
+                                     partition_method="simple")
+
+        b_global = torch.ones(shape[0], dtype=torch.float64, device=device)
+        b_dt = D.scatter(b_global)
+
         if rank == 0:
-            print(f"Rank 0: owned={dsparse.num_owned}, halo={dsparse.num_halo}, nnz={dsparse.nnz}")
-            dsparse._build_interior_boundary_decomposition()
-            stats = dsparse._overlap_stats
-            print(f"Interior ratio: {stats.get('interior_ratio', 0):.1%}")
+            partition = D._spec.placement.partition
+            owned = int(partition.owned_nodes.numel())
+            halo  = int(partition.halo_nodes.numel())
+            print(f"Rank 0: owned={owned}, halo={halo}, local_nnz={D.nnz}")
             print()
             print(f"{'Config':<20} {'Time (ms)':>12} {'Memory (MB)':>12} {'Residual':>12} {'Speedup':>10}")
             print("-" * 70)
-        
+
         dist.barrier()
-        
+
         baseline_time = None
-        
-        for name, use_cache, precond in configs:
+
+        for name, precond in configs:
             time_ms, mem_mb, residual = benchmark_solve(
-                dsparse, b, precond, use_cache,
+                D, b_dt, precond,
                 args.rtol, args.maxiter, args.warmup, args.repeat,
-                rank, world_size
+                rank, world_size,
             )
             
             if baseline_time is None:

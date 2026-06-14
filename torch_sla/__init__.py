@@ -58,6 +58,7 @@ from .solve import (
     SolverConfig,
     MatrixLike,
 )
+from .det import DetConfig
 
 # Side-effect import: installs SolverConfig.for_spd_gpu(), for_matrix(),
 # etc. classmethods. Kept in its own module so the SolverConfig dataclass
@@ -105,7 +106,6 @@ from .backends import (
 )
 
 from .distributed import (
-    DSparseMatrix,
     DSparseTensor,
     Partition,
     partition_graph_metis,
@@ -113,24 +113,26 @@ from .distributed import (
     partition_simple,
     # DTensor-mirror placement vocabulary
     DSparseSpec,
-    RowPartitioned,
+    VertexShard,
+    VertexShardReplicated,
+    BatchShard,
     Replicated,
+    SparseShard,  # deprecated alias (factory)
 )
 
 from .io import (
     save_sparse,
     load_sparse,
-    load_sparse_as_partition,
-    save_distributed,
-    load_partition,
     load_metadata,
-    load_distributed_as_sparse,
-    save_dsparse,
-    load_dsparse,
     # Matrix Market format
     save_mtx,
     load_mtx,
     load_mtx_info,
+    # Distributed I/O
+    save_dsparse,
+    load_dsparse,
+    save_sparse_sharded,
+    load_sparse_shard,
 )
 
 from .nonlinear_solve import (
@@ -176,7 +178,6 @@ __all__ = [
     "BackendType",
     "MethodType",
     # Distributed
-    "DSparseMatrix",
     "DSparseTensor",
     "Partition",
     "partition_graph_metis",
@@ -185,17 +186,16 @@ __all__ = [
     # I/O
     "save_sparse",
     "load_sparse",
-    "load_sparse_as_partition",
-    "save_distributed",
-    "load_partition",
     "load_metadata",
-    "load_distributed_as_sparse",
-    "save_dsparse",
-    "load_dsparse",
     # Matrix Market format
     "save_mtx",
     "load_mtx",
     "load_mtx_info",
+    # Distributed I/O
+    "save_dsparse",
+    "load_dsparse",
+    "save_sparse_sharded",
+    "load_sparse_shard",
     # Nonlinear solve
     "nonlinear_solve",
     "adjoint_solve",

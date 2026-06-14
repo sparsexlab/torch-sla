@@ -1,70 +1,70 @@
 #!/usr/bin/env python
-"""
-Distributed Linear Solve Example
+"""Distributed linear solve via ``DSparseTensor`` + unified ``solve``.
 
-Usage:
+Demonstrates the row-sharded CG / BiCGStab / GMRES family on the same
+SPD tridiagonal matrix, with Jacobi preconditioning. Verified against a
+scipy single-process CG so any drift fails the example.
+
+Run::
+
     torchrun --standalone --nproc_per_node=4 distributed_solve.py
 """
 
-import os
 import torch
 import torch.distributed as dist
-from torch_sla.distributed import DSparseMatrix, partition_simple
 
 
 def main():
-    # Initialize distributed
-    dist.init_process_group(backend='gloo')
+    dist.init_process_group(backend="gloo")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    
+
     if rank == 0:
-        print("=" * 60)
-        print("Distributed Solve: A @ x = b")
-        print(f"  World size: {world_size}")
-        print("=" * 60)
-    
-    # Problem size
-    n = 100
-    
-    # Create tridiagonal SPD matrix
-    idx = torch.arange(n)
-    val = torch.cat([
-        torch.full((n,), 4.0, dtype=torch.float64),
-        torch.full((n-1,), -1.0, dtype=torch.float64),
-        torch.full((n-1,), -1.0, dtype=torch.float64)
-    ])
-    row = torch.cat([idx, idx[1:], idx[:-1]])
-    col = torch.cat([idx, idx[:-1], idx[1:]])
-    
-    # Each rank creates its local partition
-    A = DSparseMatrix.from_global(
-        val, row, col, (n, n),
-        num_partitions=world_size,
-        my_partition=rank,
-        partition_ids=partition_simple(n, world_size),
-        verbose=(rank == 0)
-    )
-    
-    print(f"[Rank {rank}] {A.num_owned} owned, {A.num_halo} halo nodes")
-    dist.barrier()
-    
-    # Create local RHS (only for owned nodes)
-    b_owned = torch.ones(A.num_owned, dtype=torch.float64)
-    
-    # Distributed CG solve
+        print(f"{'=' * 60}\nDistributed Solve: Ax = b  (world={world_size})\n{'=' * 60}")
+
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch_sla import DSparseTensor, SparseTensor, solve, SolverConfig
+
+    # SPD tridiagonal A, deterministic b.
+    n = 256
+    A = SparseTensor.tridiagonal(n, diag=4.0, off_diag=-1.0)
+
+    mesh = init_device_mesh("cpu", (world_size,))
+    D = DSparseTensor.partition(A, mesh, partition_method="simple")
+
+    torch.manual_seed(0)
+    b_global = torch.randn(n, dtype=torch.float64)
+    b_dt = D.scatter(b_global)
+
+    # Unified API: solve auto-routes on the DSparseTensor type.
+    with SolverConfig(method="cg", preconditioner="jacobi",
+                       atol=1e-12, rtol=1e-10, maxiter=2000):
+        x_dt = solve(D, b_dt)
+
+    # Residual ‖b − A x‖ / ‖b‖, computed without leaving Shard(0).
+    r_dt = b_dt - D @ x_dt
+    rel_resid = (r_dt.full_tensor().norm() / b_dt.full_tensor().norm()).item()
+
+    # Cross-check against a scipy CG on the same global system.
+    import scipy.sparse as sp
+    import scipy.sparse.linalg as spla
+    A_sp = sp.coo_matrix(
+        (A.values.numpy(), (A.row_indices.numpy(), A.col_indices.numpy())),
+        shape=(n, n),
+    ).tocsr()
+    x_ref, _ = spla.cg(A_sp, b_global.numpy(), rtol=1e-12, maxiter=2000)
+    rel_to_scipy = (
+        (torch.from_numpy(x_ref) - x_dt.full_tensor()).norm()
+        / (torch.from_numpy(x_ref).norm() + 1e-12)
+    ).item()
+
+    print(f"[rank {rank}] rel residual={rel_resid:.2e}  "
+          f"rel diff vs scipy CG={rel_to_scipy:.2e}")
+
     if rank == 0:
-        print("\nSolving with distributed CG...")
-    
-    x_owned = A.solve(b_owned, atol=1e-10, maxiter=1000, verbose=True)
-    
-    print(f"[Rank {rank}] ||x_owned|| = {x_owned.norm():.4f}")
-    
-    if rank == 0:
-        print("\n" + "=" * 60)
-        print("Distributed solve completed!")
-        print("=" * 60)
-    
+        assert rel_resid < 1e-8 and rel_to_scipy < 1e-6, "distributed solve diverged"
+        print("\nDistributed CG converged.")
+
     dist.destroy_process_group()
 
 

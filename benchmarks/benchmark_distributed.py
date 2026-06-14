@@ -2,7 +2,7 @@
 """
 Distributed Sparse Solve Benchmark
 
-Benchmarks DSparseMatrix.solve() on CPU (Gloo) and CUDA (NCCL).
+Benchmarks distributed solve(D, b_dt) on CPU (Gloo) and CUDA (NCCL).
 
 Usage:
     # CPU with 4 processes
@@ -96,8 +96,14 @@ def get_memory_mb():
 def benchmark_distributed(args):
     """Run distributed benchmark."""
     import torch.distributed as dist
-    from torch_sla.distributed import DSparseMatrix, partition_simple
-    
+    # torch ≥2.2: device_mesh promoted to top level. torch 2.1.x: still under _tensor.
+    try:
+        from torch.distributed.device_mesh import init_device_mesh
+    except ImportError:
+        from torch.distributed._tensor.device_mesh import init_device_mesh
+
+    from torch_sla import SparseTensor, DSparseTensor, solve
+
     # Choose backend based on device
     backend = 'nccl' if args.device == 'cuda' else 'gloo'
     dist.init_process_group(backend=backend)
@@ -141,92 +147,78 @@ def benchmark_distributed(args):
     
     results = []
     cumulative_time = 0.0
-    
+
+    mesh = init_device_mesh(args.device, (world_size,))
+
+    warmup_kw = dict(method="cg", atol=1e-4, rtol=0.0, maxiter=50)
+    main_kw = dict(method="cg", atol=args.atol, rtol=0.0, maxiter=args.maxiter)
+
     for idx, target_dof in enumerate(dofs):
-        # Create matrix on CPU first, then move
+        # Build the global SparseTensor on CPU, ship to device.
         val, row, col, shape, actual_dof = create_poisson_2d(target_dof, device='cpu')
-        n = shape[0]
-        
-        partition_ids = partition_simple(n, world_size)
-        
+
         try:
             if args.device == 'cuda':
                 torch.cuda.reset_peak_memory_stats()
-            
-            # Move data to device
-            val_dev = val.to(device)
-            row_dev = row.to(device)
-            col_dev = col.to(device)
-            
-            # Create local matrix
-            A = DSparseMatrix.from_global(
-                val_dev, row_dev, col_dev, shape,
-                num_partitions=world_size,
-                my_partition=rank,
-                partition_ids=partition_ids,
-                device=device,  # Important: pass device!
-                verbose=False
-            )
-            
-            # RHS
-            b_owned = torch.ones(A.num_owned, dtype=torch.float64, device=device)
-            
+
+            A = SparseTensor(val, row, col, shape).to(device)
+
+            # Row-shard across the mesh -- one Partition per rank.
+            D = DSparseTensor.partition(A, mesh, partition_method="simple")
+
+            # RHS as a DTensor[Shard(0)] sized to owned rows.
+            b_global = torch.ones(shape[0], dtype=torch.float64, device=device)
+            b_dt = D.scatter(b_global)
+
             # Warmup
             dist.barrier()
             try:
-                _ = A.solve(b_owned, atol=1e-4, maxiter=50, verbose=False)
+                _ = solve(D, b_dt, **warmup_kw)
             except Exception:
                 pass
             dist.barrier()
-            
+
             if args.device == 'cuda':
                 torch.cuda.synchronize()
-            
+
             # Benchmark
             dist.barrier()
             start = time.perf_counter()
-            
-            x_owned = A.solve(b_owned, atol=args.atol, maxiter=args.maxiter, verbose=False)
-            
+
+            x_dt = solve(D, b_dt, **main_kw)
+
             if args.device == 'cuda':
                 torch.cuda.synchronize()
             dist.barrier()
-            
+
             elapsed = time.perf_counter() - start
-            
-            # Get memory per GPU
+
+            # Per-GPU peak memory (max across ranks).
             if args.device == 'cuda':
-                local_peak_mem = torch.cuda.max_memory_allocated() / 1024**3  # GB
-                # Gather all GPUs' memory
+                local_peak_mem = torch.cuda.max_memory_allocated() / 1024**3
                 mem_tensor = torch.tensor([local_peak_mem], device=device)
                 all_mems = [torch.zeros(1, device=device) for _ in range(world_size)]
                 dist.all_gather(all_mems, mem_tensor)
                 all_mems = [m.item() for m in all_mems]
-                peak_mem = max(all_mems)  # Max memory across GPUs
+                peak_mem = max(all_mems)
             else:
                 local_peak_mem = 0
                 all_mems = [0] * world_size
                 peak_mem = 0
-            
-            # Compute residual
-            x_local = torch.zeros(A.num_local, dtype=torch.float64, device=device)
-            x_local[:A.num_owned] = x_owned
-            A.halo_exchange(x_local)
-            Ax_local = A.matvec(x_local, exchange_halo=False)
-            
-            b_local = torch.zeros(A.num_local, dtype=torch.float64, device=device)
-            b_local[:A.num_owned] = b_owned
-            
-            local_res_sq = ((Ax_local[:A.num_owned] - b_local[:A.num_owned]) ** 2).sum()
-            
-            # All-reduce residual (need to move to CPU for gloo/nccl compatibility)
-            if args.device == 'cuda':
-                # For NCCL, keep on GPU
-                global_res_sq = local_res_sq.clone()
-                dist.all_reduce(global_res_sq, op=dist.ReduceOp.SUM)
+
+            # Residual via public ops only: r_dt = b_dt - D @ x_dt; gather.
+            r_dt = b_dt - D @ x_dt
+            # ``full_tensor()`` is torch 2.3+; fall back to redistribute
+            # for older releases (e.g. the torch 2.1 on autodl).
+            if hasattr(r_dt, "full_tensor"):
+                r_full = r_dt.full_tensor()
             else:
-                global_res_sq = local_res_sq.clone()
-                dist.all_reduce(global_res_sq, op=dist.ReduceOp.SUM)
+                try:
+                    from torch.distributed.tensor import Replicate
+                except ImportError:
+                    from torch.distributed._tensor import Replicate
+                r_full = r_dt.redistribute(mesh, [Replicate()]).to_local()
+            global_res_sq = (r_full ** 2).sum()
             
             residual = global_res_sq.sqrt().item()
             
@@ -254,7 +246,7 @@ def benchmark_distributed(args):
             })
             
             # Clean up
-            del A, val_dev, row_dev, col_dev, x_owned, b_owned
+            del A, D, x_dt, b_dt, b_global, r_dt
             if args.device == 'cuda':
                 torch.cuda.empty_cache()
             
