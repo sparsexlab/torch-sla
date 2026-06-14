@@ -20,6 +20,75 @@ from torch.autograd.function import Function
 # Adjoint Determinant Solver
 # =============================================================================
 
+def _det_backward_cuda_cudss(val, row, col, shape, det_val, grad_output):
+    """CUDA chunked det backward via cuDSS multi-RHS solve.
+
+    Same chunking strategy as the CPU path (factor-once, solve in
+    ~64 MB chunks, gather at A's nnz positions). Raises if cuDSS /
+    nvmath-python is missing -- caller falls back to dense.
+
+    Returns
+    -------
+    grad_val : torch.Tensor
+        Shape ``[nnz]``, on the same device/dtype as ``val``.
+    """
+    from ..backends.nvmath_backend import nvmath_factor_solve_many
+
+    device = val.device
+    N = int(shape[0])
+    unique_cols, col_inv = torch.unique(col, return_inverse=True)
+    n_uc = int(unique_cols.numel())
+
+    # Same 64 MB target as CPU; bytes_per_col = N * 16 (E + Y both live).
+    CHUNK_BYTES = 64 * 1024 * 1024
+    bytes_per_col = N * 8 * 2
+    chunk_cols = max(1, min(n_uc, CHUNK_BYTES // max(1, bytes_per_col)))
+
+    # Sort nnz by col_inv so chunks map to contiguous slices.
+    order = torch.argsort(col_inv, stable=True)
+    col_inv_sorted = col_inv[order]
+    row_sorted = row[order].to(torch.int64)
+
+    nnz_starts = torch.searchsorted(
+        col_inv_sorted, torch.arange(n_uc, device=device, dtype=col_inv_sorted.dtype),
+    )
+    nnz_starts = torch.cat([
+        nnz_starts,
+        torch.tensor([row.numel()], device=device, dtype=nnz_starts.dtype),
+    ])
+
+    gathered = torch.empty(row.numel(), dtype=val.dtype, device=device)
+    unique_cols_i64 = unique_cols.to(torch.int64)
+
+    n_chunks = (n_uc + chunk_cols - 1) // chunk_cols
+
+    def build_rhs(i):
+        c0 = i * chunk_cols
+        c1 = min(c0 + chunk_cols, n_uc)
+        width = c1 - c0
+        E = torch.zeros(N, width, dtype=val.dtype, device=device)
+        rows_i = unique_cols_i64[c0:c1]
+        cols_i = torch.arange(width, device=device, dtype=torch.int64)
+        E[rows_i, cols_i] = 1.0
+        return E, (c0, c1)
+
+    def gather_chunk(X, meta):
+        c0, c1 = meta
+        lo = int(nnz_starts[c0].item())
+        hi = int(nnz_starts[c1].item())
+        sub_inv = col_inv_sorted[lo:hi] - c0
+        sub_row = row_sorted[lo:hi]
+        gathered[order[lo:hi]] = X[sub_row, sub_inv.to(torch.int64)]
+
+    # Solve A^T y = e_c by swapping (row, col) -> A^T's COO triple.
+    nvmath_factor_solve_many(
+        val, col, row, shape, build_rhs, n_chunks, gather_chunk,
+        matrix_type="general",
+    )
+
+    return det_val * gathered * grad_output
+
+
 class DetAdjoint(Function):
     """
     Adjoint-based differentiable determinant computation.
@@ -88,17 +157,32 @@ class DetAdjoint(Function):
         # and replaces N LU solves with one batched solve (SuperLU shares
         # the factorisation).
 
-        # On CUDA we fall back to dense for now -- a sparse batched solve
-        # path on CUDA would need cuDSS-style multi-RHS support.
+        # On CUDA: prefer cuDSS multi-RHS chunked solve (mirrors the CPU
+        # SuperLU path, factor-once / solve-many). Falls back to dense
+        # inverse if cuDSS / nvmath-python is unavailable.
         if is_cuda:
-            indices = torch.stack([row, col], dim=0).to(device)
-            sparse_coo = torch.sparse_coo_tensor(
-                indices, val, shape, device=device)
-            dense = sparse_coo.to_dense()
-            A_inv = torch.linalg.inv(dense)
-            grad_val = det_val * A_inv[col.to(torch.int64),
-                                         row.to(torch.int64)] * grad_output
-            return grad_val, None, None, None, None, None
+            try:
+                grad_val = _det_backward_cuda_cudss(
+                    val, row, col, shape, det_val, grad_output)
+                return grad_val, None, None, None, None, None
+            except Exception:
+                # Fall back: dense inverse. Materialises (n, n) -- OK only
+                # at small n; warn so users notice.
+                import warnings
+                warnings.warn(
+                    "DetAdjoint CUDA backward: cuDSS path unavailable, "
+                    "falling back to dense torch.linalg.inv. Install "
+                    "nvmath-python (with cuDSS) to avoid the (n,n) alloc.",
+                    RuntimeWarning, stacklevel=2,
+                )
+                indices = torch.stack([row, col], dim=0).to(device)
+                sparse_coo = torch.sparse_coo_tensor(
+                    indices, val, shape, device=device)
+                dense = sparse_coo.to_dense()
+                A_inv = torch.linalg.inv(dense)
+                grad_val = det_val * A_inv[col.to(torch.int64),
+                                             row.to(torch.int64)] * grad_output
+                return grad_val, None, None, None, None, None
 
         # CPU sparse path -- single SuperLU, chunked batched solve.
         #
