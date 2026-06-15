@@ -8,6 +8,7 @@ keeps working after the package split. Implementation lives in:
 * :mod:`.matvec`  -- ``D @ x`` / hot-path ``_shard_matvec`` / halo exchange.
 * :mod:`.solve`   -- Shard(0) Krylov methods + preconditioners.
 * :mod:`.eigsh`   -- distributed LOBPCG.
+* :mod:`.collectives` -- owned-slice <-> global-vector helpers.
 """
 from .core import (
     DSparseTensor,
@@ -25,6 +26,7 @@ from .core import (
     _hilbert_sort_indices,
     _hilbert_curve_indices,
 )
+from .collectives import gather_owned_to_global
 
 __all__ = [
     "DSparseTensor",
@@ -38,4 +40,5 @@ __all__ = [
     "partition_graph_metis",
     "partition_coordinates",
     "partition_simple",
+    "gather_owned_to_global",
 ]
