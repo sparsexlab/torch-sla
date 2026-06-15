@@ -43,6 +43,18 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
       block; ``apply`` does two triangular solves
     * ``"ssor"`` -- forward + backward symmetric SOR sweep on the
       owned-by-owned block, ``omega``-damped
+    * ``"amg"`` / ``"pyamg"`` -- PyAMG V-cycle per call, hierarchy built
+      from the owned-rows × owned-cols block (block-Jacobi AMG).
+      Cached on the DSparseTensor instance via
+      ``D._amg_hierarchy_cache``; call :func:`invalidate_precond_cache`
+      after the matrix values change. **Hierarchy build runs on CPU**
+      (PyAMG limitation); for production-scale CUDA workloads prefer
+      ``"amgx"`` below.
+    * ``"amgx"`` / ``"torch_amgx"`` -- AmgX V-cycle, hierarchy build +
+      apply both on GPU via the ``torch-amgx`` package. Same
+      block-Jacobi structure as PyAMG but stays on CUDA the entire
+      time. Cached on ``D._amgx_solver_cache``; same invalidation
+      semantics. Requires Linux/Windows CUDA + ``pip install torch-amgx``.
     * ``"polynomial"`` / ``"neumann"`` -- Neumann series
       M⁻¹ ≈ τ⁻¹ Σ_{k=0..degree-1} (I - A/τ)^k. Uses
       ``D._shard_matvec`` so halo exchange happens inside the
@@ -131,6 +143,99 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
 
         return apply_ssor
 
+    if kind_l in ("amgx", "torch_amgx"):
+        # CUDA-native AMG preconditioner via torch-amgx. AmgX runs the
+        # full hierarchy build + V-cycle entirely on the GPU -- no PyAMG
+        # CPU roundtrip. Cached on D._amgx_solver_cache.
+        cached = getattr(D, "_amgx_solver_cache", None)
+        if cached is not None:
+            return cached
+
+        try:
+            from torch_amgx import Config as _AmgxConfig, Solver as _AmgxSolver
+        except ImportError as e:
+            raise RuntimeError(
+                f"AmgX preconditioner needs torch-amgx: {e}. "
+                "Install via: pip install torch-amgx (Linux/Windows CUDA only)."
+            )
+
+        st = D._local_tensor
+        rows = st.row_indices
+        cols = st.col_indices
+        vals = st.values
+        mask = (rows < no) & (cols < no)
+        # AmgX requires CSR with int32 indices on CUDA. Build the owned
+        # sub-block as a torch.sparse_coo, coalesce, convert to CSR.
+        owned_indices = torch.stack(
+            [rows[mask].to(torch.int64), cols[mask].to(torch.int64)])
+        sparse_coo = torch.sparse_coo_tensor(
+            owned_indices, vals[mask], (no, no)).coalesce()
+        sparse_csr = sparse_coo.to_sparse_csr()
+        crow = sparse_csr.crow_indices().to(torch.int32)
+        ccol = sparse_csr.col_indices().to(torch.int32)
+        cval = sparse_csr.values()
+
+        # max_iters=1, tolerance=0 forces exactly one V-cycle per solve()
+        # call regardless of residual (we are a preconditioner, the outer
+        # CG decides convergence).
+        config = _AmgxConfig(
+            method="amg", maxiter=1, tol=0.0,
+            presweeps=1, postsweeps=1,
+        )
+        solver = _AmgxSolver(config, device=device)
+        solver.setup_csr(crow, ccol, cval, no)
+
+        def apply_amgx(r):
+            return solver.solve(r.contiguous())
+
+        # Hold a reference so the AmgX C handles stay alive for the
+        # lifetime of D, and the closure for the user.
+        D._amgx_solver_cache = apply_amgx
+        D._amgx_solver_handle = solver        # keep handle alive
+        return apply_amgx
+
+    if kind_l in ("amg", "pyamg"):
+        # PyAMG block-Jacobi preconditioner: each rank builds an AMG
+        # hierarchy on its owned-rows × owned-cols block, applies one
+        # V-cycle per call. Cached on the DSparseTensor instance so
+        # repeated solves on the same matrix (time-stepping, inverse
+        # design, multi-RHS) pay setup once.
+        cached = getattr(D, "_amg_hierarchy_cache", None)
+        if cached is not None:
+            return cached
+
+        try:
+            from ..backends.pyamg_backend import PyAMGHierarchy
+        except ImportError as e:
+            raise RuntimeError(
+                f"AMG preconditioner needs PyAMG: {e}. "
+                "Install with: pip install pyamg"
+            )
+
+        import scipy.sparse as sp
+        st = D._local_tensor
+        rows = st.row_indices
+        cols = st.col_indices
+        vals = st.values
+        # Filter to owned-rows × owned-cols block (sparse, no dense alloc).
+        mask = (rows < no) & (cols < no)
+        r_owned = rows[mask].cpu().numpy()
+        c_owned = cols[mask].cpu().numpy()
+        v_owned = vals[mask].cpu().numpy()
+        A_owned_csr = sp.coo_matrix(
+            (v_owned, (r_owned, c_owned)), shape=(no, no)).tocsr()
+
+        hierarchy = PyAMGHierarchy.from_scipy_csr(
+            A_owned_csr,
+            method="ruge_stuben",
+            device=device, dtype=st.values.dtype,
+            max_levels=10, max_coarse=128,
+            num_pre_smooth=1, num_post_smooth=1,
+        )
+        # Cache the callable on D so subsequent solves reuse it.
+        D._amg_hierarchy_cache = hierarchy
+        return hierarchy
+
     if kind_l in ("polynomial", "neumann"):
         # τ ≈ ||A||_∞ on owned rows; take max across ranks for safety.
         block = _owned_block()
@@ -153,7 +258,8 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
     raise ValueError(
         f"Unknown preconditioner {kind!r}; expected one of None / "
         "'none' / 'jacobi' / 'jacobi_l1' / 'block_jacobi' / "
-        "'ssor' / 'polynomial' / 'neumann', or a callable."
+        "'ssor' / 'polynomial' / 'neumann' / 'amg' / 'amgx', "
+        "or a callable."
     )
 
 
@@ -162,6 +268,9 @@ def invalidate_precond_cache(D) -> None:
     local values change (the cache is keyed implicitly on the
     DSparseTensor instance, not on a hash of the values)."""
     D._owned_block_cache = None
+    D._amg_hierarchy_cache = None
+    D._amgx_solver_cache = None
+    D._amgx_solver_handle = None
 
 
 # ====================================================================== #
