@@ -532,21 +532,31 @@ def svd(self, k: int = 6) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # differentiable tuple (single Function node, regardless of how
     # many iterations the inner solver took).
     if self.is_cuda:
-        def _svd_forward(val_det, row, col, shape, kk):
-            from .core import SparseTensor as _ST
-            A = _ST(val_det, row, col, shape)
-            matvec = lambda x: A._spmv_coo(x)
-            matvec_T = lambda x: A.T()._spmv_coo(x)
-            return _power_iteration_svd(
-                matvec, matvec_T, shape[0], shape[1], kk,
-                val_det.dtype, val_det.device,
-            )
-    elif is_scipy_available():
-        def _svd_forward(val_det, row, col, shape, kk):
-            U, S, Vt = scipy_svds(val_det, row, col, shape, k=kk)
-            return U.to(val_det.device), S.to(val_det.device), Vt.to(val_det.device)
-    else:
-        raise RuntimeError("SciPy is required for SVD on CPU")
+        # No CUDA-native sparse SVD available that's both correct on
+        # clustered spectra and not a multi-GB CPU<->GPU round-trip:
+        #   * power iteration (was the old default) -- wrong σ on
+        #     near-degenerate clusters (Halko-Martinsson undershoot).
+        #   * torch.svd_lowrank -- same randomised-undershoot issue.
+        #   * cuSOLVER / nvmath-python -- no sparse SVD routine exists.
+        # True CUDA-native Lanczos bidiagonalisation (Golub-Kahan with
+        # partial reorthogonalisation, PROPACK-style) is tracked as a
+        # follow-up. Until then, ask the user to move the matrix to
+        # CPU explicitly.
+        raise NotImplementedError(
+            "SparseTensor.svd() on CUDA is not currently supported. "
+            "Workaround: move to CPU first.\n"
+            "  U, S, Vt = A.cpu().svd(k=k)\n"
+            "  if you need them back on GPU: U = U.cuda(); S = S.cuda(); ...\n"
+            "Future work: CUDA-native Lanczos bidiagonalisation."
+        )
+
+    if not is_scipy_available():
+        raise RuntimeError("SciPy is required for sparse SVD on CPU")
+
+    def _svd_forward(val_det, row, col, shape, kk):
+        U, S, Vt = scipy_svds(val_det, row, col, shape, k=kk)
+        return (U.to(val_det.device), S.to(val_det.device),
+                Vt.to(val_det.device))
 
     row_i64 = self.row_indices.to(torch.int64)
     col_i64 = self.col_indices.to(torch.int64)
