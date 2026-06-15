@@ -43,11 +43,18 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
       block; ``apply`` does two triangular solves
     * ``"ssor"`` -- forward + backward symmetric SOR sweep on the
       owned-by-owned block, ``omega``-damped
-    * ``"amg"`` / ``"pyamg"`` -- AMG V-cycle per call, hierarchy built
+    * ``"amg"`` / ``"pyamg"`` -- PyAMG V-cycle per call, hierarchy built
       from the owned-rows × owned-cols block (block-Jacobi AMG).
       Cached on the DSparseTensor instance via
       ``D._amg_hierarchy_cache``; call :func:`invalidate_precond_cache`
-      after the matrix values change.
+      after the matrix values change. **Hierarchy build runs on CPU**
+      (PyAMG limitation); for production-scale CUDA workloads prefer
+      ``"amgx"`` below.
+    * ``"amgx"`` / ``"torch_amgx"`` -- AmgX V-cycle, hierarchy build +
+      apply both on GPU via the ``torch-amgx`` package. Same
+      block-Jacobi structure as PyAMG but stays on CUDA the entire
+      time. Cached on ``D._amgx_solver_cache``; same invalidation
+      semantics. Requires Linux/Windows CUDA + ``pip install torch-amgx``.
     * ``"polynomial"`` / ``"neumann"`` -- Neumann series
       M⁻¹ ≈ τ⁻¹ Σ_{k=0..degree-1} (I - A/τ)^k. Uses
       ``D._shard_matvec`` so halo exchange happens inside the
@@ -136,6 +143,57 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
 
         return apply_ssor
 
+    if kind_l in ("amgx", "torch_amgx"):
+        # CUDA-native AMG preconditioner via torch-amgx. AmgX runs the
+        # full hierarchy build + V-cycle entirely on the GPU -- no PyAMG
+        # CPU roundtrip. Cached on D._amgx_solver_cache.
+        cached = getattr(D, "_amgx_solver_cache", None)
+        if cached is not None:
+            return cached
+
+        try:
+            from torch_amgx import Config as _AmgxConfig, Solver as _AmgxSolver
+        except ImportError as e:
+            raise RuntimeError(
+                f"AmgX preconditioner needs torch-amgx: {e}. "
+                "Install via: pip install torch-amgx (Linux/Windows CUDA only)."
+            )
+
+        st = D._local_tensor
+        rows = st.row_indices
+        cols = st.col_indices
+        vals = st.values
+        mask = (rows < no) & (cols < no)
+        # AmgX requires CSR with int32 indices on CUDA. Build the owned
+        # sub-block as a torch.sparse_coo, coalesce, convert to CSR.
+        owned_indices = torch.stack(
+            [rows[mask].to(torch.int64), cols[mask].to(torch.int64)])
+        sparse_coo = torch.sparse_coo_tensor(
+            owned_indices, vals[mask], (no, no)).coalesce()
+        sparse_csr = sparse_coo.to_sparse_csr()
+        crow = sparse_csr.crow_indices().to(torch.int32)
+        ccol = sparse_csr.col_indices().to(torch.int32)
+        cval = sparse_csr.values()
+
+        # max_iters=1, tolerance=0 forces exactly one V-cycle per solve()
+        # call regardless of residual (we are a preconditioner, the outer
+        # CG decides convergence).
+        config = _AmgxConfig(
+            method="amg", maxiter=1, tol=0.0,
+            presweeps=1, postsweeps=1,
+        )
+        solver = _AmgxSolver(config, device=device)
+        solver.setup_csr(crow, ccol, cval, no)
+
+        def apply_amgx(r):
+            return solver.solve(r.contiguous())
+
+        # Hold a reference so the AmgX C handles stay alive for the
+        # lifetime of D, and the closure for the user.
+        D._amgx_solver_cache = apply_amgx
+        D._amgx_solver_handle = solver        # keep handle alive
+        return apply_amgx
+
     if kind_l in ("amg", "pyamg"):
         # PyAMG block-Jacobi preconditioner: each rank builds an AMG
         # hierarchy on its owned-rows × owned-cols block, applies one
@@ -200,8 +258,83 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
     raise ValueError(
         f"Unknown preconditioner {kind!r}; expected one of None / "
         "'none' / 'jacobi' / 'jacobi_l1' / 'block_jacobi' / "
-        "'ssor' / 'polynomial' / 'neumann', or a callable."
+        "'ssor' / 'polynomial' / 'neumann' / 'amg' / 'amgx', "
+        "or a callable."
     )
+
+
+# ====================================================================== #
+# TileLang fused CG kernels (optional)                                   #
+# ====================================================================== #
+def _try_load_tilelang():
+    """Lazy-import tilelang and JIT-compile the fused CG-update kernel.
+
+    Returns a callable ``fused_cg_update(x, p, r, Ap, alpha)`` that
+    performs ``x += α·p; r -= α·Ap; r·r`` in a single kernel and returns
+    the partial-sum ``r·r`` tensor (still needs distributed all_reduce).
+
+    Returns ``None`` if tilelang isn't available or compilation fails;
+    caller falls back to the standard torch path. This keeps the
+    SolverConfig.use_tilelang opt-in lazy: no penalty for not having
+    tilelang installed.
+    """
+    try:
+        import tilelang as tl
+        import tilelang.language as T
+    except ImportError:
+        return None
+
+    @tl.jit(out_idx=[5])
+    def _kernel(
+        N: tl.const, block_M: tl.const,
+        x: T.Buffer((N,), "float64"),
+        p: T.Buffer((N,), "float64"),
+        r: T.Buffer((N,), "float64"),
+        Ap: T.Buffer((N,), "float64"),
+        alpha: T.Buffer((1,), "float64"),
+        rr_partial: T.Buffer((1,), "float64"),
+    ):
+        with T.Kernel(T.ceildiv(N, block_M), threads=128) as bx:
+            # Per-thread accumulator for local r·r partial sum.
+            local_acc = T.alloc_local((1,), "float64")
+            local_acc[0] = 0.0
+            for i in T.Parallel(block_M):
+                gi = bx * block_M + i
+                if gi < N:
+                    xi = x[gi] + alpha[0] * p[gi]
+                    ri = r[gi] - alpha[0] * Ap[gi]
+                    x[gi] = xi
+                    r[gi] = ri
+                    local_acc[0] += ri * ri
+            # Block-level reduction then atomic add to global accumulator.
+            T.atomic_add(rr_partial[0], local_acc[0])
+
+    return _kernel
+
+
+_TILELANG_KERNEL_CACHE: dict = {"tried": False, "kernel": None}
+
+
+def _try_fused_cg_update(x, p, r, Ap, alpha):
+    """Run the fused CG update via TileLang if available, else fall back.
+
+    Returns the new ``r·r`` LOCAL partial sum (still needs
+    ``dist.all_reduce`` upstream when distributed).
+    """
+    if not _TILELANG_KERNEL_CACHE["tried"]:
+        _TILELANG_KERNEL_CACHE["tried"] = True
+        _TILELANG_KERNEL_CACHE["kernel"] = _try_load_tilelang()
+    kernel = _TILELANG_KERNEL_CACHE["kernel"]
+    if kernel is None:
+        # Pure torch fallback -- identical behaviour to the non-tilelang path.
+        x.add_(p, alpha=alpha.item())
+        r.add_(Ap, alpha=-alpha.item())
+        return (r * r).sum()
+    # Fused TileLang path
+    alpha_buf = alpha if alpha.dim() == 1 else alpha.unsqueeze(0)
+    rr_partial = torch.zeros(1, dtype=r.dtype, device=r.device)
+    kernel(x.numel(), 1024, x, p, r, Ap, alpha_buf, rr_partial)
+    return rr_partial.squeeze(0)
 
 
 def invalidate_precond_cache(D) -> None:
@@ -210,6 +343,8 @@ def invalidate_precond_cache(D) -> None:
     DSparseTensor instance, not on a hash of the values)."""
     D._owned_block_cache = None
     D._amg_hierarchy_cache = None
+    D._amgx_solver_cache = None
+    D._amgx_solver_handle = None
 
 
 # ====================================================================== #
@@ -217,12 +352,18 @@ def invalidate_precond_cache(D) -> None:
 # ====================================================================== #
 def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
               atol: float, rtol: float, maxiter: int,
-              verbose: bool) -> torch.Tensor:
+              verbose: bool, use_tilelang: bool = False) -> torch.Tensor:
     """Preconditioned CG in Shard(0) space.
 
     Saad §9.2 PCG: ``rho_k = <r_k, z_k>`` with ``z_k = M⁻¹ r_k``;
     ``p_k = z_k + beta_{k-1} p_{k-1}``. Identity ``M_apply`` recovers
     plain CG.
+
+    When ``use_tilelang=True``, the BLAS-1 inner loop (``x += α·p;
+    r -= α·Ap; r·r``) dispatches to a fused TileLang kernel that
+    bundles three separate kernel launches and one CPU sync into one.
+    Falls back silently to the standard torch path if tilelang isn't
+    installed; the caller-visible behaviour is identical either way.
     """
     no = D._num_owned()
     if b_owned.shape[0] != no:
@@ -256,16 +397,34 @@ def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
     check_every = 10
     r_norm_sq = None
 
+    # Lazy-load tilelang once before the hot loop so JIT compile time
+    # doesn't pollute per-iter timings.
+    if use_tilelang and not _TILELANG_KERNEL_CACHE["tried"]:
+        _TILELANG_KERNEL_CACHE["tried"] = True
+        _TILELANG_KERNEL_CACHE["kernel"] = _try_load_tilelang()
+
     for k in range(maxiter):
         Ap = D._shard_matvec(p)
         pAp = D._shard_dot(p, Ap)             # all_reduce #1 / iter
         alpha = rs_old / pAp
-        torch.addcmul(x, alpha, p, value=1.0, out=x)
-        torch.addcmul(r, alpha, Ap, value=-1.0, out=r)
+        if use_tilelang:
+            # Fused: x += α·p; r -= α·Ap; rr_partial = r·r in one kernel.
+            # The all_reduce on the rr partial sum still happens upstream.
+            r_norm_sq_local = _try_fused_cg_update(x, p, r, Ap, alpha)
+            # Patch the all_reduce flow below; replace torch.dot(r, r).
+            _precomputed_rr = r_norm_sq_local
+        else:
+            torch.addcmul(x, alpha, p, value=1.0, out=x)
+            torch.addcmul(r, alpha, Ap, value=-1.0, out=r)
+            _precomputed_rr = None
 
         z = M_apply(r)
         # Fused: <r, r> AND <r, z> in one 2-element all_reduce.
-        loc2 = torch.stack([torch.dot(r, r), torch.dot(r, z)])
+        # When use_tilelang is on, _precomputed_rr already holds the
+        # LOCAL r·r partial sum produced by the fused kernel; we just
+        # skip the redundant torch.dot(r, r) call.
+        rr_local = _precomputed_rr if _precomputed_rr is not None else torch.dot(r, r)
+        loc2 = torch.stack([rr_local, torch.dot(r, z)])
         if _DIST_AVAILABLE and dist.is_initialized():
             dist.all_reduce(loc2, op=dist.ReduceOp.SUM)  # all_reduce #2 / iter
         r_norm_sq = loc2[0]

@@ -1551,6 +1551,7 @@ class DSparseTensor:
         maxiter = _pick(maxiter, "maxiter", 1000)
         restart = restart if restart is not None else 30  # not in SolverConfig
         verbose = _pick(verbose, "verbose", False)
+        use_tilelang = bool(defaults.get("use_tilelang", False))
         # ``preconditioner`` is special-cased in SolverConfig because
         # ``None`` is a legitimate "no preconditioning" choice (the
         # _UNSET sentinel distinguishes that from "not set"). Mirror
@@ -1571,7 +1572,8 @@ class DSparseTensor:
         common = dict(M_apply=M_apply, atol=atol, rtol=rtol,
                        maxiter=maxiter, verbose=verbose)
         if method_l in ("cg", "pcg"):
-            x_owned = _ds.cg_shard(self, b_owned, **common)
+            x_owned = _ds.cg_shard(self, b_owned,
+                                    use_tilelang=use_tilelang, **common)
         elif method_l == "bicgstab":
             x_owned = _ds.bicgstab_shard(self, b_owned, **common)
         elif method_l in ("gmres", "fgmres"):
