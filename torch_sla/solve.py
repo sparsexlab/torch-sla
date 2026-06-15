@@ -215,14 +215,6 @@ class SolverConfig:
     mixed_precision: Optional[bool] = None
     return_info: Optional[bool] = None
     verbose: Optional[bool] = None
-    # Opt-in TileLang fused-kernel path for distributed CG's BLAS-1
-    # hot loop (axpy + dot + reduce). Skips ~3 separate kernel launches
-    # per iter. Profiled gain at N=10^8 on 2x A100: ~20% per-iter.
-    #
-    # Off by default because TileLang's Windows support is experimental;
-    # users who care about throughput on CUDA Linux can flip this on.
-    # Falls back to the standard torch path if tilelang is not installed.
-    use_tilelang: Optional[bool] = None
     # Private state powering the chainable preset builders attached by
     # ``torch_sla.presets`` (``SolverConfig.spd().gpu().direct()`` etc).
     # ``compare=False`` keeps them out of __eq__ and ``repr=False`` keeps

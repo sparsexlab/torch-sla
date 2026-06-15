@@ -263,80 +263,6 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
     )
 
 
-# ====================================================================== #
-# TileLang fused CG kernels (optional)                                   #
-# ====================================================================== #
-def _try_load_tilelang():
-    """Lazy-import tilelang and JIT-compile the fused CG-update kernel.
-
-    Returns a callable ``fused_cg_update(x, p, r, Ap, alpha)`` that
-    performs ``x += α·p; r -= α·Ap; r·r`` in a single kernel and returns
-    the partial-sum ``r·r`` tensor (still needs distributed all_reduce).
-
-    Returns ``None`` if tilelang isn't available or compilation fails;
-    caller falls back to the standard torch path. This keeps the
-    SolverConfig.use_tilelang opt-in lazy: no penalty for not having
-    tilelang installed.
-    """
-    try:
-        import tilelang as tl
-        import tilelang.language as T
-    except ImportError:
-        return None
-
-    @tl.jit(out_idx=[5])
-    def _kernel(
-        N: tl.const, block_M: tl.const,
-        x: T.Buffer((N,), "float64"),
-        p: T.Buffer((N,), "float64"),
-        r: T.Buffer((N,), "float64"),
-        Ap: T.Buffer((N,), "float64"),
-        alpha: T.Buffer((1,), "float64"),
-        rr_partial: T.Buffer((1,), "float64"),
-    ):
-        with T.Kernel(T.ceildiv(N, block_M), threads=128) as bx:
-            # Per-thread accumulator for local r·r partial sum.
-            local_acc = T.alloc_local((1,), "float64")
-            local_acc[0] = 0.0
-            for i in T.Parallel(block_M):
-                gi = bx * block_M + i
-                if gi < N:
-                    xi = x[gi] + alpha[0] * p[gi]
-                    ri = r[gi] - alpha[0] * Ap[gi]
-                    x[gi] = xi
-                    r[gi] = ri
-                    local_acc[0] += ri * ri
-            # Block-level reduction then atomic add to global accumulator.
-            T.atomic_add(rr_partial[0], local_acc[0])
-
-    return _kernel
-
-
-_TILELANG_KERNEL_CACHE: dict = {"tried": False, "kernel": None}
-
-
-def _try_fused_cg_update(x, p, r, Ap, alpha):
-    """Run the fused CG update via TileLang if available, else fall back.
-
-    Returns the new ``r·r`` LOCAL partial sum (still needs
-    ``dist.all_reduce`` upstream when distributed).
-    """
-    if not _TILELANG_KERNEL_CACHE["tried"]:
-        _TILELANG_KERNEL_CACHE["tried"] = True
-        _TILELANG_KERNEL_CACHE["kernel"] = _try_load_tilelang()
-    kernel = _TILELANG_KERNEL_CACHE["kernel"]
-    if kernel is None:
-        # Pure torch fallback -- identical behaviour to the non-tilelang path.
-        x.add_(p, alpha=alpha.item())
-        r.add_(Ap, alpha=-alpha.item())
-        return (r * r).sum()
-    # Fused TileLang path
-    alpha_buf = alpha if alpha.dim() == 1 else alpha.unsqueeze(0)
-    rr_partial = torch.zeros(1, dtype=r.dtype, device=r.device)
-    kernel(x.numel(), 1024, x, p, r, Ap, alpha_buf, rr_partial)
-    return rr_partial.squeeze(0)
-
-
 def invalidate_precond_cache(D) -> None:
     """Drop cached preconditioner factors. Call after the matrix's
     local values change (the cache is keyed implicitly on the
@@ -352,18 +278,12 @@ def invalidate_precond_cache(D) -> None:
 # ====================================================================== #
 def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
               atol: float, rtol: float, maxiter: int,
-              verbose: bool, use_tilelang: bool = False) -> torch.Tensor:
+              verbose: bool) -> torch.Tensor:
     """Preconditioned CG in Shard(0) space.
 
     Saad §9.2 PCG: ``rho_k = <r_k, z_k>`` with ``z_k = M⁻¹ r_k``;
     ``p_k = z_k + beta_{k-1} p_{k-1}``. Identity ``M_apply`` recovers
     plain CG.
-
-    When ``use_tilelang=True``, the BLAS-1 inner loop (``x += α·p;
-    r -= α·Ap; r·r``) dispatches to a fused TileLang kernel that
-    bundles three separate kernel launches and one CPU sync into one.
-    Falls back silently to the standard torch path if tilelang isn't
-    installed; the caller-visible behaviour is identical either way.
     """
     no = D._num_owned()
     if b_owned.shape[0] != no:
@@ -397,34 +317,16 @@ def cg_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
     check_every = 10
     r_norm_sq = None
 
-    # Lazy-load tilelang once before the hot loop so JIT compile time
-    # doesn't pollute per-iter timings.
-    if use_tilelang and not _TILELANG_KERNEL_CACHE["tried"]:
-        _TILELANG_KERNEL_CACHE["tried"] = True
-        _TILELANG_KERNEL_CACHE["kernel"] = _try_load_tilelang()
-
     for k in range(maxiter):
         Ap = D._shard_matvec(p)
         pAp = D._shard_dot(p, Ap)             # all_reduce #1 / iter
         alpha = rs_old / pAp
-        if use_tilelang:
-            # Fused: x += α·p; r -= α·Ap; rr_partial = r·r in one kernel.
-            # The all_reduce on the rr partial sum still happens upstream.
-            r_norm_sq_local = _try_fused_cg_update(x, p, r, Ap, alpha)
-            # Patch the all_reduce flow below; replace torch.dot(r, r).
-            _precomputed_rr = r_norm_sq_local
-        else:
-            torch.addcmul(x, alpha, p, value=1.0, out=x)
-            torch.addcmul(r, alpha, Ap, value=-1.0, out=r)
-            _precomputed_rr = None
+        torch.addcmul(x, alpha, p, value=1.0, out=x)
+        torch.addcmul(r, alpha, Ap, value=-1.0, out=r)
 
         z = M_apply(r)
         # Fused: <r, r> AND <r, z> in one 2-element all_reduce.
-        # When use_tilelang is on, _precomputed_rr already holds the
-        # LOCAL r·r partial sum produced by the fused kernel; we just
-        # skip the redundant torch.dot(r, r) call.
-        rr_local = _precomputed_rr if _precomputed_rr is not None else torch.dot(r, r)
-        loc2 = torch.stack([rr_local, torch.dot(r, z)])
+        loc2 = torch.stack([torch.dot(r, r), torch.dot(r, z)])
         if _DIST_AVAILABLE and dist.is_initialized():
             dist.all_reduce(loc2, op=dist.ReduceOp.SUM)  # all_reduce #2 / iter
         r_norm_sq = loc2[0]
