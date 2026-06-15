@@ -42,11 +42,16 @@ def gather_owned_to_global(
     with the gathered values scattered into their global positions
     (and zeros at any unfilled slot).
 
-    The implementation pads to ``max(owned.numel())`` across ranks
-    (so ``all_gather_into_tensor`` sees a uniform shape), concatenates
-    every rank's pad into one contiguous buffer, masks out the padding
-    entries with a single vectorised comparison, then does ONE
-    ``index_put_`` -- no Python loop over ranks.
+    The implementation pads to ``max(owned.numel())`` across ranks (so
+    the gathers see a uniform shape), stacks every rank's pad into one
+    ``(world, max_n)`` tensor, flattens it to a single buffer, masks
+    out the padding entries with a single vectorised comparison, then
+    does ONE ``index_put_`` -- no Python loop over ranks.
+
+    Uses the list-based :func:`torch.distributed.all_gather` rather
+    than ``all_gather_into_tensor`` because torch 2.1's Gloo backend
+    raises ``no support for _allgather_base in Gloo process group``.
+    NCCL supports both; the list API works on every backend.
 
     Falls back to a plain ``out[owned] = val`` when called outside a
     process group (e.g. unit tests on a single CPU).
@@ -61,11 +66,11 @@ def gather_owned_to_global(
 
     world = dist.get_world_size()
 
-    # all_gather_into_tensor needs contiguous output sized world * input.
     # Gather sizes first so we know how much padding to drop later.
     size_local = torch.tensor([owned.numel()], dtype=torch.long, device=device)
-    all_sizes = torch.zeros(world, dtype=torch.long, device=device)
-    dist.all_gather_into_tensor(all_sizes, size_local)
+    all_sizes_list = [torch.zeros_like(size_local) for _ in range(world)]
+    dist.all_gather(all_sizes_list, size_local)
+    all_sizes = torch.cat(all_sizes_list)  # (world,)
 
     max_n = int(all_sizes.max().item())
     if max_n == 0:
@@ -76,10 +81,14 @@ def gather_owned_to_global(
     idx_pad[: owned.numel()] = owned.to(torch.long)
     val_pad[: val.numel()] = val
 
-    big_idx = torch.empty(world * max_n, dtype=torch.long, device=device)
-    big_val = torch.empty(world * max_n, dtype=dtype, device=device)
-    dist.all_gather_into_tensor(big_idx, idx_pad)
-    dist.all_gather_into_tensor(big_val, val_pad)
+    all_idx_list = [torch.zeros_like(idx_pad) for _ in range(world)]
+    all_val_list = [torch.zeros_like(val_pad) for _ in range(world)]
+    dist.all_gather(all_idx_list, idx_pad)
+    dist.all_gather(all_val_list, val_pad)
+    # Stack -> (world, max_n), flatten to a contiguous (world*max_n,)
+    # buffer suitable for the masked index_put_ below.
+    big_idx = torch.stack(all_idx_list, dim=0).reshape(-1)
+    big_val = torch.stack(all_val_list, dim=0).reshape(-1)
 
     # Vectorised valid-position mask: position p on rank r is real iff
     # p < all_sizes[r]. Lay out as (world*max_n,) and compare elementwise.
