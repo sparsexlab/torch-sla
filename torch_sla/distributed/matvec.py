@@ -72,8 +72,12 @@ def halo_exchange(D, x: torch.Tensor, partition) -> torch.Tensor:
         for nid in ordered:
             ops.append(dist.P2POp(dist.isend, send_bufs[nid], int(nid)))
             ops.append(dist.P2POp(dist.irecv, recv_bufs[nid], int(nid)))
-        for req in dist.batch_isend_irecv(ops):
-            req.wait()
+        # batch_isend_irecv([]) crashes with IndexError -- skip when this
+        # rank has no neighbours (single-rank world, or fully owned
+        # subdomain with no halo).
+        if ops:
+            for req in dist.batch_isend_irecv(ops):
+                req.wait()
     else:
         for nid in ordered:
             nid_i = int(nid)

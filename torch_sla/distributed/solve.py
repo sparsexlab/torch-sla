@@ -43,6 +43,11 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
       block; ``apply`` does two triangular solves
     * ``"ssor"`` -- forward + backward symmetric SOR sweep on the
       owned-by-owned block, ``omega``-damped
+    * ``"amg"`` / ``"pyamg"`` -- AMG V-cycle per call, hierarchy built
+      from the owned-rows × owned-cols block (block-Jacobi AMG).
+      Cached on the DSparseTensor instance via
+      ``D._amg_hierarchy_cache``; call :func:`invalidate_precond_cache`
+      after the matrix values change.
     * ``"polynomial"`` / ``"neumann"`` -- Neumann series
       M⁻¹ ≈ τ⁻¹ Σ_{k=0..degree-1} (I - A/τ)^k. Uses
       ``D._shard_matvec`` so halo exchange happens inside the
@@ -131,6 +136,48 @@ def make_preconditioner(D, kind: Any, *, omega: float = 1.0,
 
         return apply_ssor
 
+    if kind_l in ("amg", "pyamg"):
+        # PyAMG block-Jacobi preconditioner: each rank builds an AMG
+        # hierarchy on its owned-rows × owned-cols block, applies one
+        # V-cycle per call. Cached on the DSparseTensor instance so
+        # repeated solves on the same matrix (time-stepping, inverse
+        # design, multi-RHS) pay setup once.
+        cached = getattr(D, "_amg_hierarchy_cache", None)
+        if cached is not None:
+            return cached
+
+        try:
+            from ..backends.pyamg_backend import PyAMGHierarchy
+        except ImportError as e:
+            raise RuntimeError(
+                f"AMG preconditioner needs PyAMG: {e}. "
+                "Install with: pip install pyamg"
+            )
+
+        import scipy.sparse as sp
+        st = D._local_tensor
+        rows = st.row_indices
+        cols = st.col_indices
+        vals = st.values
+        # Filter to owned-rows × owned-cols block (sparse, no dense alloc).
+        mask = (rows < no) & (cols < no)
+        r_owned = rows[mask].cpu().numpy()
+        c_owned = cols[mask].cpu().numpy()
+        v_owned = vals[mask].cpu().numpy()
+        A_owned_csr = sp.coo_matrix(
+            (v_owned, (r_owned, c_owned)), shape=(no, no)).tocsr()
+
+        hierarchy = PyAMGHierarchy.from_scipy_csr(
+            A_owned_csr,
+            method="ruge_stuben",
+            device=device, dtype=st.values.dtype,
+            max_levels=10, max_coarse=128,
+            num_pre_smooth=1, num_post_smooth=1,
+        )
+        # Cache the callable on D so subsequent solves reuse it.
+        D._amg_hierarchy_cache = hierarchy
+        return hierarchy
+
     if kind_l in ("polynomial", "neumann"):
         # τ ≈ ||A||_∞ on owned rows; take max across ranks for safety.
         block = _owned_block()
@@ -162,6 +209,7 @@ def invalidate_precond_cache(D) -> None:
     local values change (the cache is keyed implicitly on the
     DSparseTensor instance, not on a hash of the values)."""
     D._owned_block_cache = None
+    D._amg_hierarchy_cache = None
 
 
 # ====================================================================== #
