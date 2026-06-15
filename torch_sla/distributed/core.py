@@ -1289,37 +1289,12 @@ class DSparseTensor:
             g_row = l2g[row_local_i64]
             g_col = l2g[col_local_i64]
 
-            def _allgather_full(idx_local, val_local, N_global, dtype, device):
-                """Build a length-N_global vector from per-rank owned
-                slices via ``dist.all_gather`` of (idx, val) pads."""
-                if not (DIST_AVAILABLE and dist.is_initialized()):
-                    out = torch.zeros(N_global, dtype=dtype, device=device)
-                    out[idx_local] = val_local
-                    return out
-                world = dist.get_world_size()
-                idx_pad = torch.zeros(N_global, dtype=torch.long, device=device)
-                idx_pad[: idx_local.numel()] = idx_local
-                val_pad = torch.zeros(N_global, dtype=dtype, device=device)
-                val_pad[: val_local.numel()] = val_local
-                size_local = torch.tensor([idx_local.numel()],
-                                           dtype=torch.long, device=device)
-                all_sizes = [torch.zeros_like(size_local) for _ in range(world)]
-                dist.all_gather(all_sizes, size_local)
-                all_idx = [torch.zeros_like(idx_pad) for _ in range(world)]
-                dist.all_gather(all_idx, idx_pad)
-                all_val = [torch.zeros_like(val_pad) for _ in range(world)]
-                dist.all_gather(all_val, val_pad)
-                out = torch.zeros(N_global, dtype=dtype, device=device)
-                for sz, ix, vl in zip(all_sizes, all_idx, all_val):
-                    n = int(sz.item())
-                    out[ix[:n]] = vl[:n]
-                return out
+            from .collectives import gather_owned_to_global
 
             def matvec_fn(z):
                 z_owned = z[owned] if owned.numel() < z.shape[0] else z
                 y_owned = self._shard_matvec(z_owned.contiguous())
-                return _allgather_full(owned, y_owned, z.shape[0],
-                                       z.dtype, z.device)
+                return gather_owned_to_global(owned, y_owned, z.shape[0])
 
             def solve_fn(z):
                 # Distributed CG on owned slice. For SPD A, A = A^T.
@@ -1335,8 +1310,7 @@ class DSparseTensor:
                     maxiter=opts_.get("maxiter", 200),
                     verbose=False,
                 )
-                return _allgather_full(owned, x_owned, z.shape[0],
-                                       z.dtype, z.device)
+                return gather_owned_to_global(owned, x_owned, z.shape[0])
 
             def gather_fn(z, x_solved):
                 # local-nnz grad contribution -- map to global coords.
