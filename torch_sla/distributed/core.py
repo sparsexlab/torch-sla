@@ -535,11 +535,38 @@ class DSparseTensor:
 
         # Compute partition ids, build the Partition struct, extract
         # this rank's local SparseTensor, wrap.
-        partition_ids = resolve_partition_ids(
-            A.row_indices, A.col_indices,
-            int(A.shape[0]), world_size,
-            method=partition_method, coords=coords,
-        )
+        #
+        # Determinism: when a process group is active and world_size>1,
+        # let rank 0 compute the partition ids and broadcast the result
+        # to every other rank. Some partitioners (notably parallel
+        # METIS variants) seed their RNG from a thread- or
+        # process-local source and can yield different labellings on
+        # different ranks. If that drift happens silently, the owned /
+        # halo bookkeeping disagrees across ranks, halo exchanges land
+        # in the wrong slot, and distributed CG converges to a wrong
+        # answer with no error raised. Mirrors the pattern in
+        # :meth:`from_global_distributed`.
+        if (DIST_AVAILABLE and dist.is_initialized()
+                and world_size > 1):
+            device = A.values.device
+            n_rows = int(A.shape[0])
+            if rank == 0:
+                partition_ids = resolve_partition_ids(
+                    A.row_indices, A.col_indices,
+                    n_rows, world_size,
+                    method=partition_method, coords=coords,
+                ).to(device)
+            else:
+                partition_ids = torch.zeros(n_rows, dtype=torch.int64,
+                                             device=device)
+            dist.broadcast(partition_ids, src=0)
+            partition_ids = partition_ids.cpu()
+        else:
+            partition_ids = resolve_partition_ids(
+                A.row_indices, A.col_indices,
+                int(A.shape[0]), world_size,
+                method=partition_method, coords=coords,
+            )
         partition = build_partition(
             A.row_indices, A.col_indices,
             int(A.shape[0]), partition_ids, rank,
