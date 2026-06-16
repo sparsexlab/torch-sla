@@ -610,45 +610,12 @@ def _sparse_sparse_matmul_with_sparse_grad(
 # LOBPCG and Power Iteration for CUDA
 # =============================================================================
 
-def _cgs2_inplace(Z: torch.Tensor, ncols_keep: int) -> torch.Tensor:
-    """Twice-iterated classical Gram-Schmidt orthonormalisation in-place.
 
-    Two CGS sweeps give numerical reliability competitive with
-    Householder QR (Giraud et al., 2005) at a fraction of the cost
-    when the input is already mostly orthonormal -- the case in every
-    LOBPCG iteration after the first. Cheaper than a full
-    ``torch.linalg.qr(Z)`` whenever ``Z.shape[1]`` is not tiny because
-    QR does ``O(n m²)`` Householder flops while CGS2 does ``O(n m²)``
-    too but with only level-2 BLAS (matmul-friendly).
-
-    Returns a possibly column-pruned view (rank ``< ncols_keep``
-    surfaces as fewer columns retained).
-    """
-    eps = torch.finfo(Z.dtype).eps * 100
-    # Twice-iterated CGS: the second pass corrects for catastrophic
-    # cancellation in the first when columns of Z are nearly linearly
-    # dependent (typical for [X | R | P] near convergence where R is
-    # small).
-    for _ in range(2):
-        for j in range(Z.shape[1]):
-            if j > 0:
-                # Project column j onto the orthonormal basis of
-                # columns 0..j-1 and subtract.
-                # ``Z[:, :j].T @ Z[:, j]`` is one matmul of shape (j,).
-                coeff = Z[:, :j].T @ Z[:, j]
-                Z[:, j] -= Z[:, :j] @ coeff
-            nrm = Z[:, j].norm()
-            if nrm > eps:
-                Z[:, j] /= nrm
-            else:
-                Z[:, j].zero_()  # Drop degenerate direction; rank-deficient.
-    # Trim trailing zero columns (rank deficiency in [X | R | P]).
-    col_norms = Z.norm(dim=0)
-    valid = col_norms > 0.5  # >0.5 because just-normalised cols are unit.
-    if not bool(valid.all()):
-        Z = Z[:, valid]
-    return Z[:, :max(Z.shape[1], 1)]
-
+# Thin shim: the LOBPCG algorithmic core lives in
+# :mod:`torch_sla.sparse_tensor.linalg` so both the autograd path
+# (``EigshAdjoint`` below) and the distributed wrapper
+# (``torch_sla.distributed.eigsh.eigsh_shard``) share one
+# implementation.
 
 def _lobpcg_eigsh(
     A_matvec,
@@ -660,170 +627,14 @@ def _lobpcg_eigsh(
     maxiter: int = 1000,
     tol: float = 1e-8,
     T_apply=None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """LOBPCG eigenvalue solver.
-
-    Knyazev (2001) Locally Optimal Block Preconditioned Conjugate
-    Gradient method for the k extreme eigenpairs of a symmetric
-    matrix accessed only through a matvec callback. The earlier
-    implementation here was block steepest descent ([X | R]
-    subspace, no conjugate direction, no preconditioner) which
-    only converges linearly; this one adds three pieces:
-
-    1. **Conjugate direction P**. Subspace at iter > 0 is
-       ``[X | R | P]`` (3k columns) instead of ``[X | R]``. ``P`` is
-       the residual / previous-conjugate contribution to the new
-       Ritz vectors -- extracting it from the Ritz coefficients
-       costs no extra matvec. Convergence rate improves from linear
-       to the LOBPCG-standard "near cubic in the gap" rate.
-
-    2. **Buffer reuse**. ``X``, ``AX``, ``R``, ``P`` are allocated
-       once at start and rewritten in-place each iteration via
-       ``torch.matmul(..., out=...)``. The subspace ``Z`` /
-       ``AZ`` buffers are also pre-allocated and never re-cat'd. The
-       hot loop allocates only the small Hessian ``H`` and its
-       eigenvectors (size 3k x 3k, negligible vs the n x k blocks).
-
-    3. **CGS2 over QR**. Replaces ``torch.linalg.qr(combined)`` with
-       twice-iterated classical Gram-Schmidt. Stability matches
-       Householder QR (Giraud et al.) and the flops are equivalent
-       but matmul-bound (level-2 BLAS), much friendlier to GPU and
-       to autograd if Z later feeds a differentiable path.
-
-    Parameters
-    ----------
-    A_matvec : callable
-        ``A_matvec(X) -> A @ X`` for X of shape ``[n, m]``.
-    n, k : int
-        Matrix dimension and number of eigenpairs to return.
-    dtype, device
-        Output placement; X buffers live here.
-    largest : bool
-        Largest (``True``) or smallest (``False``) eigenpairs.
-    maxiter, tol : int, float
-        Outer iteration cap and convergence threshold on
-        ``|lambda_new - lambda_old| / |lambda|``.
-    T_apply : callable, optional
-        Optional preconditioner ``T(R) -> approx_inv_A @ R``. Speeds
-        up convergence whenever a cheap approximation to ``A^{-1}``
-        is available (e.g. Jacobi for diagonally-dominant ``A``).
-        ``None`` (default) keeps the unpreconditioned form.
-
-    Returns
-    -------
-    (eigenvalues, eigenvectors) : (Tensor[k], Tensor[n, k])
-    """
-    if k > n:
-        raise ValueError(f"k={k} exceeds matrix dimension n={n}")
-    k = max(k, 1)
-    # Work in a slightly larger block than k so we have buffer columns
-    # to resolve closely-clustered eigenvalues (especially for the
-    # ``smallest`` case where random init has low overlap with the true
-    # extreme eigenvector). The final return is the best k of m at
-    # convergence. ``2*k`` matches scipy.sparse.linalg.lobpcg's
-    # internal expansion; clamped to ``n``.
-    m = min(max(2 * k, k + 2), n)
-
-    # ---- Pre-allocated working buffers (lifetime = whole solve) ----
-    X = torch.randn(n, m, dtype=dtype, device=device)
-    X, _ = torch.linalg.qr(X)  # one QR at init, then never again
-    AX = torch.empty_like(X)
-    R = torch.empty_like(X)
-    P = torch.zeros_like(X)  # zero until iter 1 introduces the
-                             # conjugate direction
-    Z = torch.empty(n, 3 * m, dtype=dtype, device=device)
-    AZ = torch.empty_like(Z)
-
-    eigenvalues = torch.empty(m, dtype=dtype, device=device)
-    eigenvalues_prev = None
-
-    # ---- Initial Rayleigh-Ritz step ----
-    AX.copy_(A_matvec(X))
-    H = X.T @ AX
-    H = 0.5 * (H + H.T)  # symmetrise against floating-point drift
-    eigvals, V = torch.linalg.eigh(H)
-    if largest:
-        idx = eigvals.argsort(descending=True)
-    else:
-        idx = eigvals.argsort()
-    eigvals = eigvals[idx]
-    V = V[:, idx]
-    # Ritz rotation: X <- X V, AX <- AX V
-    X_new = X @ V
-    AX_new = AX @ V
-    X.copy_(X_new)
-    AX.copy_(AX_new)
-    eigenvalues.copy_(eigvals[:m])
-
-    iter_done = 0
-    for iteration in range(maxiter):
-        iter_done = iteration
-
-        # ---- Residual R = AX - X * lambda (column-wise scale) ----
-        # torch.sub + mul: R = AX - X * lambda[None, :]
-        torch.mul(X, eigenvalues.unsqueeze(0), out=R)
-        R.neg_()
-        R.add_(AX)
-
-        # Apply preconditioner if provided.
-        if T_apply is not None:
-            R = T_apply(R)
-
-        # ---- Build subspace Z = [X | R | P] (P all-zero on iter 0) ----
-        ncols = 2 * m if iteration == 0 else 3 * m
-        Z[:, :m].copy_(X)
-        Z[:, m:2 * m].copy_(R)
-        if iteration > 0:
-            Z[:, 2 * m:3 * m].copy_(P)
-
-        # ---- CGS2 orthonormalise the active part of Z ----
-        Z_active = _cgs2_inplace(Z[:, :ncols], ncols)
-        ncols_eff = Z_active.shape[1]
-
-        # ---- Compute AZ on the orthonormalised subspace ----
-        AZ_active = A_matvec(Z_active)
-
-        # ---- Project: small Hessian H = Z_active.T @ AZ_active ----
-        H = Z_active.T @ AZ_active
-        H = 0.5 * (H + H.T)
-        eigvals, V = torch.linalg.eigh(H)
-        if largest:
-            idx = eigvals.argsort(descending=True)
-        else:
-            idx = eigvals.argsort()
-        eigvals = eigvals[idx]
-        V = V[:, idx]
-        Vk = V[:, :m]
-
-        # ---- New Ritz vectors and conjugate direction ----
-        X_new = Z_active @ Vk         # [n, m]
-        AX_new = AZ_active @ Vk       # [n, m]
-        # Conjugate direction = portion of new Ritz vectors that came
-        # from the (R, P) blocks, i.e. NOT from the previous X block.
-        # Equivalent to Z_active[:, m:] @ Vk[m:, :] in the standard
-        # LOBPCG derivation (see Knyazev 2001 eq. 7).
-        if ncols_eff > m:
-            P_new = Z_active[:, m:] @ Vk[m:, :]
-        else:
-            P_new = torch.zeros_like(X)
-
-        X.copy_(X_new)
-        AX.copy_(AX_new)
-        P.copy_(P_new)
-        new_eigvals = eigvals[:m]
-
-        # ---- Convergence check on the k eigenpairs we actually return ----
-        if eigenvalues_prev is not None:
-            diff = (new_eigvals[:k] - eigenvalues_prev[:k]).abs()
-            denom = new_eigvals[:k].abs().clamp(min=1e-10)
-            if (diff < tol * denom).all():
-                eigenvalues.copy_(new_eigvals)
-                break
-        if eigenvalues_prev is None:
-            eigenvalues_prev = new_eigvals.clone()
-        else:
-            eigenvalues_prev.copy_(new_eigvals)
-        eigenvalues.copy_(new_eigvals)
-
-    return eigenvalues[:k], X[:, :k]
+    seed: Optional[int] = None,
+):
+    """LOBPCG eigsh -- delegates to :func:`linalg._lobpcg_core`."""
+    from .linalg import _lobpcg_core
+    return _lobpcg_core(
+        A_matvec, n, k,
+        dtype=dtype, device=device,
+        largest=largest, maxiter=maxiter, tol=tol,
+        T_apply=T_apply, seed=seed,
+    )
 
