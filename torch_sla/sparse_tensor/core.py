@@ -569,7 +569,24 @@ class SparseTensor:
     def half(self) -> "SparseTensor":
         """Convert to float16."""
         return self.to(dtype=torch.float16)
-    
+
+    def requires_grad_(self, requires_grad: bool = True) -> "SparseTensor":
+        """Mark the underlying ``values`` tensor as requiring gradient.
+
+        Mirrors :meth:`torch.Tensor.requires_grad_`: returns ``self`` so
+        the call can be chained, and flips ``self.values.requires_grad``
+        in-place. Indices (``row_indices`` / ``col_indices``) are
+        non-differentiable by construction and unaffected.
+
+        The 0.2.x line carried this as a bound method; the 0.3 refactor
+        moved the body into :mod:`.ops` but forgot to re-expose a
+        delegating shim on the class, breaking every downstream caller
+        that did ``A.requires_grad_(True)`` (TensorMesh backward tests
+        in particular). Restore the delegation.
+        """
+        from .ops import requires_grad_ as _impl
+        return _impl(self, requires_grad)
+
     def to_torch_sparse(self, *args, **kwargs):
         from .convert import to_torch_sparse as _impl
         return _impl(self, *args, **kwargs)

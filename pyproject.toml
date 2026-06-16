@@ -97,8 +97,17 @@ PyPI = "https://pypi.org/project/torch-sla/"
 Issues = "https://github.com/walkerchi/torch-sla/issues"
 
 [tool.setuptools]
-packages = ["torch_sla", "torch_sla.backends"]
 include-package-data = true
+
+# Auto-discover every torch_sla subpackage. The previous hard-coded
+# list (``torch_sla`` + ``torch_sla.backends``) missed
+# ``torch_sla.distributed`` and ``torch_sla.sparse_tensor`` -- they
+# worked under editable install (``pip install -e .``) because the
+# whole source tree is linked in, but ``pip install git+...`` builds
+# a wheel and drops anything not listed, breaking ``from
+# torch_sla.distributed import DSparseTensor``.
+[tool.setuptools.packages.find]
+include = ["torch_sla*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.cpp", "*.cu", "*.h", "*.cuh"]
