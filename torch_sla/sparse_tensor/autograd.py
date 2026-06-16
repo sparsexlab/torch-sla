@@ -716,18 +716,25 @@ def _lobpcg_eigsh(
     if k > n:
         raise ValueError(f"k={k} exceeds matrix dimension n={n}")
     k = max(k, 1)
+    # Work in a slightly larger block than k so we have buffer columns
+    # to resolve closely-clustered eigenvalues (especially for the
+    # ``smallest`` case where random init has low overlap with the true
+    # extreme eigenvector). The final return is the best k of m at
+    # convergence. ``2*k`` matches scipy.sparse.linalg.lobpcg's
+    # internal expansion; clamped to ``n``.
+    m = min(max(2 * k, k + 2), n)
 
     # ---- Pre-allocated working buffers (lifetime = whole solve) ----
-    X = torch.randn(n, k, dtype=dtype, device=device)
+    X = torch.randn(n, m, dtype=dtype, device=device)
     X, _ = torch.linalg.qr(X)  # one QR at init, then never again
     AX = torch.empty_like(X)
     R = torch.empty_like(X)
     P = torch.zeros_like(X)  # zero until iter 1 introduces the
                              # conjugate direction
-    Z = torch.empty(n, 3 * k, dtype=dtype, device=device)
+    Z = torch.empty(n, 3 * m, dtype=dtype, device=device)
     AZ = torch.empty_like(Z)
 
-    eigenvalues = torch.empty(k, dtype=dtype, device=device)
+    eigenvalues = torch.empty(m, dtype=dtype, device=device)
     eigenvalues_prev = None
 
     # ---- Initial Rayleigh-Ritz step ----
@@ -746,7 +753,7 @@ def _lobpcg_eigsh(
     AX_new = AX @ V
     X.copy_(X_new)
     AX.copy_(AX_new)
-    eigenvalues.copy_(eigvals[:k])
+    eigenvalues.copy_(eigvals[:m])
 
     iter_done = 0
     for iteration in range(maxiter):
@@ -763,11 +770,11 @@ def _lobpcg_eigsh(
             R = T_apply(R)
 
         # ---- Build subspace Z = [X | R | P] (P all-zero on iter 0) ----
-        ncols = 2 * k if iteration == 0 else 3 * k
-        Z[:, :k].copy_(X)
-        Z[:, k:2 * k].copy_(R)
+        ncols = 2 * m if iteration == 0 else 3 * m
+        Z[:, :m].copy_(X)
+        Z[:, m:2 * m].copy_(R)
         if iteration > 0:
-            Z[:, 2 * k:3 * k].copy_(P)
+            Z[:, 2 * m:3 * m].copy_(P)
 
         # ---- CGS2 orthonormalise the active part of Z ----
         Z_active = _cgs2_inplace(Z[:, :ncols], ncols)
@@ -786,29 +793,29 @@ def _lobpcg_eigsh(
             idx = eigvals.argsort()
         eigvals = eigvals[idx]
         V = V[:, idx]
-        Vk = V[:, :k]
+        Vk = V[:, :m]
 
         # ---- New Ritz vectors and conjugate direction ----
-        X_new = Z_active @ Vk         # [n, k]
-        AX_new = AZ_active @ Vk       # [n, k]
+        X_new = Z_active @ Vk         # [n, m]
+        AX_new = AZ_active @ Vk       # [n, m]
         # Conjugate direction = portion of new Ritz vectors that came
         # from the (R, P) blocks, i.e. NOT from the previous X block.
-        # Equivalent to Z_active[:, k:] @ Vk[k:, :] in the standard
+        # Equivalent to Z_active[:, m:] @ Vk[m:, :] in the standard
         # LOBPCG derivation (see Knyazev 2001 eq. 7).
-        if ncols_eff > k:
-            P_new = Z_active[:, k:] @ Vk[k:, :]
+        if ncols_eff > m:
+            P_new = Z_active[:, m:] @ Vk[m:, :]
         else:
             P_new = torch.zeros_like(X)
 
         X.copy_(X_new)
         AX.copy_(AX_new)
         P.copy_(P_new)
-        new_eigvals = eigvals[:k]
+        new_eigvals = eigvals[:m]
 
-        # ---- Convergence check ----
+        # ---- Convergence check on the k eigenpairs we actually return ----
         if eigenvalues_prev is not None:
-            diff = (new_eigvals - eigenvalues_prev).abs()
-            denom = new_eigvals.abs().clamp(min=1e-10)
+            diff = (new_eigvals[:k] - eigenvalues_prev[:k]).abs()
+            denom = new_eigvals[:k].abs().clamp(min=1e-10)
             if (diff < tol * denom).all():
                 eigenvalues.copy_(new_eigvals)
                 break
@@ -818,5 +825,5 @@ def _lobpcg_eigsh(
             eigenvalues_prev.copy_(new_eigvals)
         eigenvalues.copy_(new_eigvals)
 
-    return eigenvalues, X[:, :k]
+    return eigenvalues[:k], X[:, :k]
 

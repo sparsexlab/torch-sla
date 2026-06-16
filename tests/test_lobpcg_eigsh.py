@@ -30,6 +30,13 @@ def test_lobpcg_matches_dense_eigh(largest, k):
     gt = np.linalg.eigvalsh(A_np)
     gt_k = sorted(gt, reverse=largest)[:k]
 
+    # Seed the global RNG so the random init inside _lobpcg_eigsh is
+    # reproducible. Without this, CPU vs CUDA default seeds differ
+    # and the smallest k=1 case can converge to the next-smallest
+    # eigenvalue on clustered spectra.
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(0)
     ev, V = _lobpcg_eigsh(
         matvec, n, k, torch.float64, torch.device("cpu"),
         largest=largest, maxiter=400, tol=1e-10,
