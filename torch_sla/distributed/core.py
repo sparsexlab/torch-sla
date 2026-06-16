@@ -548,17 +548,27 @@ class DSparseTensor:
         # :meth:`from_global_distributed`.
         if (DIST_AVAILABLE and dist.is_initialized()
                 and world_size > 1):
-            device = A.values.device
+            # Pick the broadcast device by backend: NCCL refuses CPU
+            # tensors ("No backend type associated with device type
+            # cpu"), Gloo prefers CPU. Match the active backend and
+            # move the result back to CPU afterwards so downstream
+            # code (build_partition / extract_partition) sees a plain
+            # CPU LongTensor regardless of backend.
+            backend = dist.get_backend()
+            bcast_device = (
+                torch.device("cuda", torch.cuda.current_device())
+                if backend == "nccl" else torch.device("cpu")
+            )
             n_rows = int(A.shape[0])
             if rank == 0:
                 partition_ids = resolve_partition_ids(
                     A.row_indices, A.col_indices,
                     n_rows, world_size,
                     method=partition_method, coords=coords,
-                ).to(device)
+                ).to(bcast_device)
             else:
                 partition_ids = torch.zeros(n_rows, dtype=torch.int64,
-                                             device=device)
+                                             device=bcast_device)
             dist.broadcast(partition_ids, src=0)
             partition_ids = partition_ids.cpu()
         else:
