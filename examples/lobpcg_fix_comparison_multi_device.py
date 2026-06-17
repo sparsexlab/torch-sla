@@ -116,7 +116,7 @@ def main():
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 t = time.perf_counter() - t0
-                err = max(abs(g - e) for g, e in zip(gt, vals_t.double().tolist()))
+                err = max(abs(g - e) for g, e in zip(gt, vals_t.cpu().double().tolist()))
                 times["torch.lobpcg"].append(t * 1000)
                 errs["torch.lobpcg"].append(err)
                 print(f"  n={n:>5d}  torch.lobpcg            {t*1000:>9.2f}ms  err={err:.2e}")
@@ -136,7 +136,7 @@ def main():
                     if device.type == "cuda":
                         torch.cuda.synchronize()
                     t = time.perf_counter() - t0
-                    err = max(abs(g - e) for g, e in zip(gt, vals.double().tolist()))
+                    err = max(abs(g - e) for g, e in zip(gt, vals.cpu().double().tolist()))
                 except Exception as exc:
                     print(f"  n={n:>5d}  {label:22s}  ERROR: {type(exc).__name__}: {str(exc)[:80]}")
                     t = float("nan")

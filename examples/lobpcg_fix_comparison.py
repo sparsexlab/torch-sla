@@ -84,6 +84,17 @@ def _qr_orthonormalize(Z: torch.Tensor) -> torch.Tensor:
     return Q
 
 
+def _eigh_with_mps_fallback(H: torch.Tensor, device: torch.device):
+    """``aten::_linalg_eigh.eigenvalues`` isn't implemented on MPS in
+    current PyTorch. H is tiny here (3m x 3m <= 36 x 36), so the
+    round-trip to CPU is essentially free. Lets us bench LOBPCG on
+    Apple Silicon Metal until upstream fills the gap."""
+    if device.type == "mps":
+        eigvals, V = torch.linalg.eigh(H.cpu())
+        return eigvals.to(device), V.to(device)
+    return torch.linalg.eigh(H)
+
+
 def lobpcg_param(
     matvec: Callable, n: int, k: int, *, dtype, device,
     largest: bool = True, maxiter: int = 300, tol: float = 1e-8,
@@ -110,7 +121,7 @@ def lobpcg_param(
     AX.copy_(matvec(X))
     H = X.T @ AX
     H = 0.5 * (H + H.T)
-    eigvals, V = torch.linalg.eigh(H)
+    eigvals, V = _eigh_with_mps_fallback(H, device)
     idx = eigvals.argsort(descending=largest)
     eigvals, V = eigvals[idx], V[:, idx]
     X.copy_(X @ V); AX.copy_(AX @ V)
@@ -135,7 +146,7 @@ def lobpcg_param(
         AZ_active = matvec(Z_active)
         H = Z_active.T @ AZ_active
         H = 0.5 * (H + H.T)
-        eigvals, V = torch.linalg.eigh(H)
+        eigvals, V = _eigh_with_mps_fallback(H, device)
         idx = eigvals.argsort(descending=largest)
         eigvals, V = eigvals[idx], V[:, idx]
         Vk = V[:, :m]
