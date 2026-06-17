@@ -849,6 +849,17 @@ def _lobpcg_core(
     scipy.sparse.linalg.lobpcg) to give buffer columns that resolve
     closely-clustered extreme eigenvalues; the final return slices
     back to the requested ``k``.
+
+    Convergence is judged on the **Ritz residual norm**
+    ``||A x_i - lambda_i x_i||`` vs ``tol * |lambda_i|`` for
+    i = 1..k. The earlier eigvals-diff test (
+    ``|lambda_i^{n+1} - lambda_i^n| < tol``) tripped early on
+    clustered or near-degenerate spectra because successive
+    Rayleigh-Ritz steps could re-pick the same Ritz coordinate
+    without actually reducing the residual -- the eigenvalue
+    looked stable while the eigenvector was still wrong by
+    1e-3..1e-5. The residual-norm check is the true Ritz quality
+    metric.
     """
     if k > n:
         raise ValueError(f"k={k} exceeds matrix dimension n={n}")
@@ -867,7 +878,6 @@ def _lobpcg_core(
     P = torch.zeros_like(X)
     Z = torch.empty(n, 3 * m, dtype=dtype, device=device)
     eigenvalues = torch.empty(m, dtype=dtype, device=device)
-    eigenvalues_prev = None
 
     # Initial Rayleigh-Ritz step.
     AX.copy_(matvec(X))
@@ -887,6 +897,18 @@ def _lobpcg_core(
         torch.mul(X, eigenvalues.unsqueeze(0), out=R)
         R.neg_()
         R.add_(AX)
+
+        # Convergence on the TRUE Ritz residual (pre-preconditioner).
+        # ``T_apply`` rescales the residual to be a useful search
+        # direction, but ||T R|| is not the actual eigenpair error --
+        # checking it would let preconditioned LOBPCG report bogus
+        # convergence whenever T happens to map the residual to a
+        # small vector.
+        res_norms = R[:, :k].norm(dim=0)
+        denom = eigenvalues[:k].abs().clamp(min=1e-10)
+        if (res_norms < tol * denom).all():
+            break
+
         if T_apply is not None:
             R = T_apply(R)
 
@@ -918,19 +940,7 @@ def _lobpcg_core(
         X.copy_(X_new)
         AX.copy_(AX_new)
         P.copy_(P_new)
-        new_eigvals = eigvals[:m]
-
-        if eigenvalues_prev is not None:
-            diff = (new_eigvals[:k] - eigenvalues_prev[:k]).abs()
-            denom = new_eigvals[:k].abs().clamp(min=1e-10)
-            if (diff < tol * denom).all():
-                eigenvalues.copy_(new_eigvals)
-                break
-        if eigenvalues_prev is None:
-            eigenvalues_prev = new_eigvals.clone()
-        else:
-            eigenvalues_prev.copy_(new_eigvals)
-        eigenvalues.copy_(new_eigvals)
+        eigenvalues.copy_(eigvals[:m])
 
     return eigenvalues[:k], X[:, :k]
 
