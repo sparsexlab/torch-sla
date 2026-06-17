@@ -147,6 +147,17 @@ def main():
 
         per_device[dev_name] = {"times": times, "errs": errs, "sizes": sizes}
 
+    # Persist raw data so multiple runs (different machines) can be
+    # combined into one figure later.
+    import json
+    out_dir = os.path.normpath(os.path.join(HERE, "..", "assets", "examples"))
+    os.makedirs(out_dir, exist_ok=True)
+    devs_tag = "_".join(per_device.keys())
+    json_path = os.path.join(out_dir, f"lobpcg_fix_comparison_data_{devs_tag}.json")
+    with open(json_path, "w") as f:
+        json.dump(per_device, f, indent=2)
+    print(f"raw data: {json_path}")
+
     # Plot a combined figure: one column per device
     try:
         import matplotlib
