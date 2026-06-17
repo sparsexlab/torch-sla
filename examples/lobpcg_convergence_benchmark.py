@@ -248,7 +248,14 @@ def main():
                      f"(n={n}, k={k}, kappa=1e4)")
         ax.legend()
         ax.grid(True, which="both", alpha=0.3)
-        out = "lobpcg_convergence.png"
+        # Save next to the other example plots in the repo so PR
+        # descriptions and docs can reference it by relative path.
+        import os
+        here = os.path.dirname(os.path.abspath(__file__))
+        out_dir = os.path.normpath(os.path.join(
+            here, "..", "assets", "examples"))
+        os.makedirs(out_dir, exist_ok=True)
+        out = os.path.join(out_dir, "lobpcg_convergence.png")
         fig.tight_layout()
         fig.savefig(out, dpi=120)
         print(f"\nplot saved to {out}")
