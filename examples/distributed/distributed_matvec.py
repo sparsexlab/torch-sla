@@ -1,71 +1,56 @@
 #!/usr/bin/env python
-"""
-Distributed Matrix-Vector Multiplication Example
+"""Distributed matrix-vector multiplication via ``DSparseTensor``.
 
-Usage:
+Each rank holds a row-sharded slice of the same global matrix and runs
+``D @ x`` with automatic NCCL/gloo halo exchange. Result is compared
+against the single-process baseline so any drift fails the example.
+
+Run::
+
     torchrun --standalone --nproc_per_node=4 distributed_matvec.py
 """
 
-import os
 import torch
 import torch.distributed as dist
-from torch_sla.distributed import DSparseMatrix, partition_simple
 
 
 def main():
-    # Initialize distributed
-    dist.init_process_group(backend='gloo')
+    dist.init_process_group(backend="gloo")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    
+
     if rank == 0:
-        print("=" * 60)
-        print("Distributed Matvec: y = A @ x")
-        print(f"  World size: {world_size}")
-        print("=" * 60)
-    
-    # Problem size
-    n = 100
-    
-    # Create tridiagonal matrix (each rank creates its partition)
-    idx = torch.arange(n)
-    val = torch.cat([
-        torch.full((n,), 4.0, dtype=torch.float64),
-        torch.full((n-1,), -1.0, dtype=torch.float64),
-        torch.full((n-1,), -1.0, dtype=torch.float64)
-    ])
-    row = torch.cat([idx, idx[1:], idx[:-1]])
-    col = torch.cat([idx, idx[:-1], idx[1:]])
-    
-    # Each rank creates its local partition
-    A = DSparseMatrix.from_global(
-        val, row, col, (n, n),
-        num_partitions=world_size,
-        my_partition=rank,
-        partition_ids=partition_simple(n, world_size),
-        verbose=(rank == 0)
-    )
-    
-    print(f"[Rank {rank}] {A.num_owned} owned, {A.num_halo} halo nodes")
-    dist.barrier()
-    
-    # Create local vector x (owned part)
-    x_owned = A.partition.owned_nodes.double()
-    
-    # Extend to local size and do matvec
-    x_local = torch.zeros(A.num_local, dtype=torch.float64)
-    x_local[:A.num_owned] = x_owned
-    
-    # Distributed matvec with automatic halo exchange
-    y_local = A.matvec(x_local, exchange_halo=True)
-    
-    print(f"[Rank {rank}] y_owned = {y_local[:A.num_owned].tolist()[:3]}...")
-    
+        print(f"{'=' * 60}\nDistributed Matvec: y = A @ x  (world={world_size})\n{'=' * 60}")
+
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch_sla import DSparseTensor, SparseTensor
+
+    # One-line SPD tridiagonal -- diag=4, off=-1.
+    n = 200
+    A = SparseTensor.tridiagonal(n, diag=4.0, off_diag=-1.0)
+
+    # Row-shard across the device mesh.
+    mesh = init_device_mesh("cpu", (world_size,))
+    D = DSparseTensor.partition(A, mesh, partition_method="simple")
+
+    # Scatter a global x to Shard(0) DTensor, run matvec, gather.
+    torch.manual_seed(0)
+    x_global = torch.randn(n, dtype=torch.float64)
+    x_dt = D.scatter(x_global)
+    y_dt = D @ x_dt
+    y_global = y_dt.full_tensor()
+
+    # Collective reductions must run on EVERY rank.
+    global_nnz = D.global_nnz()
+    err = (A @ x_global - y_global).abs().max().item()
+
+    print(f"[rank {rank}] owned={D._spec.placement.partition.owned_nodes.numel()} "
+          f"local_nnz={D.nnz} max|y_dist - y_ref|={err:.2e}")
+
     if rank == 0:
-        print("\n" + "=" * 60)
-        print("Distributed matvec completed!")
-        print("=" * 60)
-    
+        assert err < 1e-12, f"distributed matvec diverged ({err:.2e})"
+        print(f"\nDistributed matvec completed. global nnz={global_nnz}")
+
     dist.destroy_process_group()
 
 

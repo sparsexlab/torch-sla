@@ -39,7 +39,7 @@ References: [PETSc GPU Support Roadmap](https://petsc.org/release/overview/gpu_r
 
 ## 3. Multi-GPU linear solvers + TensorMesh multi-GPU assembly
 
-Wire up torch-sla's multi-GPU / distributed linear solvers (see `torch_sla/distributed.py`, `DSparseMatrix`) with TensorMesh's multi-GPU assembly, so a domain-decomposed FEM problem can be assembled and solved across multiple GPUs end-to-end. **Status: still debugging.**
+Wire up torch-sla's multi-GPU / distributed linear solvers (see `torch_sla/distributed.py`, `DSparseTensor`) with TensorMesh's multi-GPU assembly, so a domain-decomposed FEM problem can be assembled and solved across multiple GPUs end-to-end. **Status: still debugging.**
 
 ## 4. Ginkgo backend
 

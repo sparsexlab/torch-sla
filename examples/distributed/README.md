@@ -1,60 +1,97 @@
-# Distributed Sparse Tensor Examples
+# Distributed sparse tensor examples
 
-True distributed sparse linear algebra with `DSparseMatrix`.
+Multi-process distributed sparse linear algebra via `DSparseTensor` —
+row-sharded matvec, Krylov solves, LOBPCG eigsh, and persistence.
 
-## Quick Start
+## Quick start
 
 ```bash
-# Run all examples with 4 processes
-./launch.sh all 4
+chmod +x launch.sh
+./launch.sh all 4          # run every example with 4 procs
 
-# Or individual examples
+# or one at a time
 torchrun --standalone --nproc_per_node=4 distributed_matvec.py
 torchrun --standalone --nproc_per_node=4 distributed_solve.py
 torchrun --standalone --nproc_per_node=4 distributed_eigsh.py
+torchrun --standalone --nproc_per_node=4 distributed_persistence.py
 ```
+
+The examples use `gloo` so they work on CPU-only machines. Swap to
+`nccl` (`dist.init_process_group(backend="nccl")`) for multi-GPU.
 
 ## Examples
 
-| File | Operation | API |
-|------|-----------|-----|
-| `distributed_matvec.py` | y = A @ x | `A.matvec(x)` |
-| `distributed_solve.py` | Ax = b | `A.solve(b)` |
-| `distributed_eigsh.py` | Av = λv | `A.eigsh(k)` |
+| File                          | Operation                       | Key API                                                  |
+|-------------------------------|---------------------------------|----------------------------------------------------------|
+| `distributed_matvec.py`       | `y = A @ x`                     | `DSparseTensor.partition` → `D.scatter` → `D @ x_dt`     |
+| `distributed_solve.py`        | `A x = b` (CG + Jacobi)         | `solve(D, b_dt)` under `SolverConfig`                    |
+| `distributed_eigsh.py`        | `A v = λ v` (LOBPCG)            | `D.eigsh(k, which="LM")`                                 |
+| `distributed_persistence.py`  | save → load → re-matvec         | `D.save(dir)` / `DSparseTensor.load(dir, mesh)`          |
 
-## API
+## API at a glance
 
 ```python
-from torch_sla.distributed import DSparseMatrix, partition_simple
+import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
+from torch_sla import DSparseTensor, SparseTensor, solve, SolverConfig
 
-# Each rank creates its local partition
-A = DSparseMatrix.from_global(
-    values, row, col, (n, n),
-    num_partitions=world_size,
-    my_partition=rank,
-    partition_ids=partition_simple(n, world_size)
-)
+dist.init_process_group(backend="gloo")
+rank, world = dist.get_rank(), dist.get_world_size()
 
-# Distributed operations (default: distributed=True)
-y = A.matvec(x, exchange_halo=True)  # Matvec with halo exchange
-x = A.solve(b)                        # Distributed CG
-λ, V = A.eigsh(k=5)                   # Distributed LOBPCG
+# Build (or load) a global SparseTensor on every rank.
+A = SparseTensor(values, row, col, shape=(N, N))
 
-# Local subdomain solve (no global communication)
-x = A.solve(b, distributed=False)
+# Row-shard across the device mesh.
+mesh = init_device_mesh("cpu", (world,))
+D = DSparseTensor.partition(A, mesh, partition_method="simple")  # or hilbert/metis/rcb
+
+# Distributed ops:
+y_dt   = D @ D.scatter(x_global)            # matvec, returns DTensor[Shard(0)]
+x_dt   = solve(D, D.scatter(b))             # unified Krylov dispatch
+λ, V   = D.eigsh(k=5, which="LM")           # distributed LOBPCG
+
+# Tensor-mirror props:
+D.shape, D.ndim, D.dtype, D.device, D.is_square, D.is_cuda
+D.nnz                # local
+D.global_nnz()       # all-rank reduce
+
+# Reductions / math:
+D.sum(); D.mean(); D.max(); D.min(); D.norm("fro")
+(D + 1.5) * 2.0 / D.norm("fro")             # element-wise, returns DSparseTensor
+
+# Persistence:
+D.save("path/")                              # per-rank shard + metadata.json
+D2 = DSparseTensor.load("path/", mesh)
 ```
 
 ## Architecture
 
 ```
-Global Matrix A (n×n) partitioned across P ranks:
+Global A (N×N) partitioned across P ranks:
 
-Rank 0: [owned_0 | halo_0]  ← neighbors: [1]
-Rank 1: [owned_1 | halo_1]  ← neighbors: [0, 2]
-Rank 2: [owned_2 | halo_2]  ← neighbors: [1, 3]
-Rank 3: [owned_3 | halo_3]  ← neighbors: [2]
+Rank 0:  [ owned rows 0..k_0    +  halo cols ]
+Rank 1:  [ owned rows k_0..k_1  +  halo cols ]
+Rank 2:  [ owned rows k_1..k_2  +  halo cols ]
+…
+
+Each rank holds only its own COO chunk in local coords + a Partition
+struct (owned_nodes / halo_nodes / send_indices / recv_indices /
+local_to_global). Communication:
+
+* Halo exchange    — point-to-point with neighbour ranks (NCCL/gloo P2P)
+* Global reductions— all_reduce for dot products, residual checks, eigsh RR
 ```
 
-Each rank only stores its partition. Communication:
-- **Halo exchange**: Point-to-point with neighbors
-- **Global reductions**: `all_reduce` for dot products
+## Partition methods
+
+* `"simple"`   — contiguous slices of row indices. Fast, no quality guarantees.
+* `"rcb"`      — Recursive Coordinate Bisection (needs `coords`).
+* `"hilbert"`  — Hilbert space-filling curve (needs 2-D / 3-D `coords`).
+* `"metis"`    — METIS graph partitioner via `pymetis` (falls back to `"simple"`).
+
+## See also
+
+* `tests/test_distributed_*_multiprocess.py` — production-style multiproc tests.
+* `docs/source/architecture.rst`             — full DSparseTensor architecture.
+* `benchmarks/benchmark_distributed.py`      — 2× A100 NCCL scaling numbers.

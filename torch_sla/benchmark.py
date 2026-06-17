@@ -1,0 +1,306 @@
+"""Sparse-solve benchmarking utilities.
+
+Exposes two pieces of API:
+
+* :class:`Benchmark` -- a container that bundles a sparse matrix ``A``
+  together with a list of ``(x_ref, b)`` test cases where
+  ``A @ x_ref == b`` by construction. Indexing yields a single case;
+  :meth:`Benchmark.evaluate` runs a user-supplied solver and returns
+  the error against the stored reference.
+
+* :class:`BenchmarkCollection` -- an abstract base for any lazy
+  ``Mapping[str, Benchmark]`` catalogue. The concrete catalogues live
+  in :mod:`torch_sla.datasets` (SuiteSparse / DIMACS10 / Synthetic) and
+  all subclass this ABC, so downstream code can type-annotate against
+  the common interface.
+
+A :func:`plot_errors` helper sits next to ``Benchmark`` for quick
+boxplot visualisation across multiple benchmarks.
+"""
+
+from __future__ import annotations
+
+import abc
+from collections.abc import Mapping
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+import numpy as np
+import torch
+from torch import Tensor
+
+# A solver takes the matrix CSR-or-COO triple + RHS and returns x.
+SolverFn = Callable[[Tensor, Tensor, Tensor, Tuple[int, int], Tensor], Tensor]
+
+_Metric = Union[str, Callable[[Tensor, Tensor], float]]
+
+
+def _rel_l2(x_hat: Tensor, x_ref: Tensor) -> float:
+    denom = x_ref.norm()
+    if denom.item() == 0.0:
+        return (x_hat - x_ref).norm().item()
+    return ((x_hat - x_ref).norm() / denom).item()
+
+
+def _max_abs(x_hat: Tensor, x_ref: Tensor) -> float:
+    return (x_hat - x_ref).abs().max().item()
+
+
+_METRICS = {"rel_l2": _rel_l2, "max_abs": _max_abs}
+
+
+class Benchmark:
+    """A sparse matrix ``A`` plus a list of ``(x_ref, b)`` reference cases.
+
+    Parameters
+    ----------
+    name : str
+        Identifier for the matrix (e.g. ``"Bai/mhd1280b"``). Used in
+        diagnostic output.
+    val, row, col : torch.Tensor
+        COO triple of ``A``.
+    shape : (int, int)
+        Square matrix shape.
+    cases : list of dict, optional
+        Pre-computed reference cases, each a dict with keys ``"x"`` and
+        ``"b"`` (both 1-D tensors). If omitted, three random cases are
+        generated via :meth:`_make_random_cases`.
+    n_cases : int, default 3
+        Number of random cases to generate when ``cases is None``.
+    seed : int, default 0
+        Base seed; case ``i`` uses ``seed + i``.
+    math_kind, detected_kind : str, optional
+        The matrix's true mathematical kind (e.g. ``"hpd"``) and the kind
+        the heuristic Gershgorin-based detector is expected to label
+        it as (may be more conservative). Both used by tests; users can
+        ignore.
+    """
+
+    __slots__ = (
+        "name", "val", "row", "col", "shape",
+        "math_kind", "detected_kind", "_cases",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        val: Tensor,
+        row: Tensor,
+        col: Tensor,
+        shape: Tuple[int, int],
+        *,
+        cases: Optional[Sequence[dict]] = None,
+        n_cases: int = 3,
+        seed: int = 0,
+        math_kind: Optional[str] = None,
+        detected_kind: Optional[str] = None,
+    ):
+        if shape[0] != shape[1]:
+            raise ValueError(f"Benchmark expects a square matrix; got {shape}")
+        self.name = name
+        self.val = val
+        self.row = row
+        self.col = col
+        self.shape = tuple(shape)
+        self.math_kind = math_kind
+        self.detected_kind = detected_kind
+        if cases is None:
+            cases = self._make_random_cases(n_cases=n_cases, seed=seed)
+        self._cases: List[dict] = list(cases)
+
+    # ------------------------------------------------------------------ #
+    # Trivial introspection
+    # ------------------------------------------------------------------ #
+    @property
+    def dtype(self) -> torch.dtype:
+        """Dtype of the matrix values (mirrors ``self.val.dtype``)."""
+        return self.val.dtype
+
+    @property
+    def is_complex(self) -> bool:
+        """``True`` if the matrix is stored in a complex dtype."""
+        return self.val.dtype.is_complex
+
+    # ------------------------------------------------------------------ #
+    # Sequence protocol
+    # ------------------------------------------------------------------ #
+    def __len__(self) -> int:
+        return len(self._cases)
+
+    def __getitem__(self, i: int) -> dict:
+        return self._cases[i]
+
+    def __iter__(self):
+        return iter(self._cases)
+
+    def __repr__(self) -> str:
+        n = self.shape[0]
+        nnz = self.val.numel()
+        kind = self.math_kind or "?"
+        return (f"Benchmark({self.name!r}, n={n}, nnz={nnz}, "
+                f"dtype={self.val.dtype}, kind={kind}, cases={len(self)})")
+
+    # ------------------------------------------------------------------ #
+    # Evaluation
+    # ------------------------------------------------------------------ #
+    def evaluate(
+        self,
+        solver: SolverFn,
+        indices: Optional[Union[int, Iterable[int]]] = None,
+        *,
+        metric: _Metric = "rel_l2",
+    ) -> Union[float, List[float]]:
+        """Run ``solver`` on the chosen cases, return error(s) vs reference.
+
+        Parameters
+        ----------
+        solver : callable
+            ``solver(val, row, col, shape, b) -> x_hat``. Matches
+            torch-sla's :func:`SparseTensor` constructor + ``solve(b)``.
+        indices : int or iterable of int, optional
+            Case indices to evaluate. ``None`` runs all cases.
+            ``int`` runs one and returns a scalar float; an iterable
+            returns a list of floats.
+        metric : ``'rel_l2'`` | ``'max_abs'`` | callable, default ``'rel_l2'``
+            ``'rel_l2'``  is ``||x_hat - x_ref||_2 / ||x_ref||_2``;
+            ``'max_abs'`` is ``max |x_hat - x_ref|``; or pass a callable
+            ``(x_hat, x_ref) -> float``.
+        """
+        metric_fn = _METRICS[metric] if isinstance(metric, str) else metric
+        scalar = isinstance(indices, int)
+        if indices is None:
+            idxs = list(range(len(self)))
+        elif scalar:
+            idxs = [indices]
+        else:
+            idxs = list(indices)
+
+        out: List[float] = []
+        for i in idxs:
+            case = self._cases[i]
+            x_hat = solver(self.val, self.row, self.col, self.shape, case["b"])
+            out.append(metric_fn(x_hat, case["x"]))
+        return out[0] if scalar else out
+
+    # ------------------------------------------------------------------ #
+    # Reference-case generation
+    # ------------------------------------------------------------------ #
+    def _make_random_cases(self, *, n_cases: int, seed: int) -> List[dict]:
+        """Generate ``n_cases`` reference cases by drawing random ``x_ref``
+        and computing ``b = A @ x_ref`` through :class:`SparseTensor`,
+        so dtype handling and matvec stay consistent with what the
+        solvers under test actually see.
+        """
+        # Local import to dodge the circular benchmark <-> SparseTensor edge
+        # at module-load time (datasets.py is the natural top-level dep).
+        from .sparse_tensor import SparseTensor
+
+        n = self.shape[0]
+        dtype = self.val.dtype
+        A = SparseTensor(self.val, self.row, self.col, self.shape)
+        real_dtype = (torch.float32 if dtype == torch.complex64
+                      else torch.float64 if dtype == torch.complex128
+                      else dtype)
+
+        cases: List[dict] = []
+        for i in range(n_cases):
+            g = torch.Generator().manual_seed(seed + i)
+            if dtype.is_complex:
+                x = (torch.randn(n, generator=g, dtype=real_dtype)
+                     + 1j * torch.randn(n, generator=g, dtype=real_dtype)).to(dtype)
+            else:
+                x = torch.randn(n, generator=g, dtype=dtype)
+            cases.append({"x": x, "b": A @ x, "seed": seed + i})
+        return cases
+
+
+# ---------------------------------------------------------------------- #
+# Plotting helper (kept separate from Benchmark)
+# ---------------------------------------------------------------------- #
+def plot_errors(
+    errors_by_benchmark: dict,
+    *,
+    title: str = "Solver error per SuiteSparse benchmark",
+    log_y: bool = True,
+    ax=None,
+):
+    """Box-plot error spread for a dict of ``{name: list_of_errors}``.
+
+    A thin convenience wrapper around matplotlib; only imported here so
+    matplotlib is not a hard runtime dep. Raises ``ImportError`` with a
+    hint if matplotlib is missing.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as e:  # pragma: no cover
+        raise ImportError(
+            "plot_errors requires matplotlib. Install with "
+            "`pip install matplotlib`."
+        ) from e
+
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(max(6, len(errors_by_benchmark) * 1.2), 4))
+
+    names = list(errors_by_benchmark.keys())
+    data = [list(errors_by_benchmark[k]) for k in names]
+    ax.boxplot(data, labels=names, showfliers=True)
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_ylabel("error")
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.tick_params(axis="x", rotation=30)
+    return ax
+
+
+# ====================================================================== #
+# Abstract base for any benchmark catalogue
+# ====================================================================== #
+class BenchmarkCollection(Mapping, abc.ABC):
+    """Abstract base for a lazy ``Mapping[str, Benchmark]`` catalogue.
+
+    Subclasses store a *catalogue* (static dict of keys -> metadata),
+    and materialise individual :class:`Benchmark` instances on demand
+    via ``__getitem__``. Iterating / ``len()`` only touches the
+    catalogue, never the network -- expensive work happens lazily, per
+    accessed key.
+
+    A concrete subclass must implement:
+
+    * :attr:`source_name` -- human display label (e.g. ``"SuiteSparse"``)
+    * :meth:`catalog` -- returns the static catalogue dict
+    * :meth:`notes` -- a one-line description per key
+    * the standard :meth:`__getitem__` / :meth:`__iter__` / :meth:`__len__`
+      from ``Mapping``
+
+    Concrete subclasses live in :mod:`torch_sla.datasets` (the three
+    module-level singletons :data:`~torch_sla.datasets.SuiteSparse`,
+    :data:`~torch_sla.datasets.DIMACS10`,
+    :data:`~torch_sla.datasets.Synthetic`).
+    """
+
+    @property
+    @abc.abstractmethod
+    def source_name(self) -> str:
+        """Human-readable name of the matrix source, e.g. ``'SuiteSparse'``."""
+
+    @abc.abstractmethod
+    def catalog(self) -> Dict[str, Any]:
+        """Static catalogue (no network). Maps key -> raw metadata tuple."""
+
+    @abc.abstractmethod
+    def notes(self, key: str) -> str:
+        """One-line description of the benchmark with this key."""
+
+    @abc.abstractmethod
+    def dtype_for(self, key: str) -> torch.dtype:
+        """Dtype the materialised :class:`Benchmark` will carry for
+        ``key`` -- read from the catalogue *without* triggering a
+        download. Lets callers split entries by dtype (e.g. real vs
+        complex) during test-collection without paying for the matrices.
+        """
+
+    def __repr__(self) -> str:
+        return f"{self.source_name}({len(self)} entries)"
+
+
+__all__ = ["Benchmark", "BenchmarkCollection", "plot_errors"]

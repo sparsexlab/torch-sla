@@ -49,7 +49,7 @@ Based on extensive benchmarks on 2D Poisson equations (tested up to **169M DOF**
      - **Iterative only**, ~1e-6 precision
    * - Very Large (> 169M DOF)
      - N/A
-     - ``DSparseMatrix`` multi-GPU
+     - ``DSparseTensor`` multi-GPU
      - Multi-GPU domain decomposition
 
 Key Insights
@@ -520,27 +520,55 @@ All operations support automatic differentiation via PyTorch autograd with **O(1
    * - ``D @ x``
      - ✓
      - ✓
-     - Distributed matvec with gradient
-   * - ``solve_distributed()``
+     - Distributed matvec (``VertexShard`` halo exchange / ``BatchShard`` zero-comm)
+   * - ``solve(D, b_dt)``
      - ✓
      - ✓
-     - Distributed CG with gradient
-   * - ``eigsh()`` / ``eigs()``
+     - Distributed CG / BiCGStab / GMRES / FGMRES / MINRES (``VertexShard``)
+   * - ``D.eigsh(k=)`` / ``eigs()``
      - ✓
      - ✓
-     - Distributed LOBPCG
-   * - ``svd()``
+     - Distributed LOBPCG (``VertexShard``); per-rank batched eigsh (``BatchShard``)
+   * - ``D.solve_batch_shard(b)``
      - ✓
      - ✓
-     - Distributed power iteration
+     - Per-rank batched solve (``BatchShard``, zero comm)
+   * - ``D.sum / .mean / .max / .min / .prod / .norm('fro' | 1 | inf)``
+     - ✓
+     - ✓
+     - Cross-rank ``all_reduce`` over stored values
+   * - ``D.is_symmetric / .is_hermitian / .is_positive_definite``
+     - ✓
+     - ✓
+     - Cached ``full_tensor()`` + single-process check
+   * - ``D.detect_matrix_type()``
+     - ✓
+     - ✓
+     - Used by ``solve(..., matrix_type='auto')``
+   * - ``D.T() / .H()``
+     - ✓
+     - ✓
+     - Allgather → transpose → repartition on same mesh
+   * - ``D + s``, ``D.abs()``, etc.
+     - ✓
+     - ✓
+     - Local elementwise, same spec
+   * - ``D.save / DSparseTensor.load``
+     - ✓
+     - ✓
+     - Per-rank ``partition_<rank>.safetensors`` + ``metadata.json``
+   * - ``D.full_tensor()``
+     - ✓
+     - ✓
+     - Allgather to a global ``SparseTensor``
+   * - ``D.det() / .lu() / .svd() / .condition_number()``
+     - ✓
+     - ✓
+     - Falls back to ``full_tensor()`` + single-process compute; emits ``ResourceWarning``
    * - ``nonlinear_solve()``
      - ✓
      - ✓
      - Distributed Newton-Krylov
-   * - ``norm('fro')``
-     - ✓
-     - ✓
-     - Distributed sum
    * - ``to_dense()``
      - ✓
      - ✓
@@ -561,7 +589,7 @@ Performance Tips
 3. **Use scipy+lu for CPU**: Best balance of speed and precision
 4. **Use cudss+cholesky for small CUDA problems**: Fastest direct solver (< 2M DOF)
 5. **Use pytorch+cg for large problems**: Memory efficient, scales to 169M+ DOF on single GPU
-6. **Use multi-GPU for very large problems**: DSparseMatrix supports domain decomposition, 3 GPUs can reach 500M+ DOF
+6. **Use multi-GPU for very large problems**: DSparseTensor supports domain decomposition, 3 GPUs can reach 500M+ DOF
 7. **Use cupy** for GPU iterative solvers (CG, GMRES) or as a direct solver fallback
 8. **Use LU factorization for repeated solves**: Cache with ``A.lu()``
 

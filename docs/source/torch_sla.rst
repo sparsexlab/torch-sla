@@ -53,16 +53,6 @@ Distributed sparse tensor with domain decomposition support. Uses halo exchange 
    :undoc-members:
    :show-inheritance:
 
-DSparseMatrix
-~~~~~~~~~~~~~
-
-Distributed sparse matrix designed for large-scale CFD/FEM computations. Provides domain decomposition with halo exchange.
-
-.. autoclass:: torch_sla.DSparseMatrix
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 Partition
 ~~~~~~~~~
 

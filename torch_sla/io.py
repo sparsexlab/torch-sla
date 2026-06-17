@@ -1,29 +1,17 @@
 """
-Persistence utilities for SparseTensor and DSparseTensor.
+Persistence utilities for SparseTensor.
 
-Supports:
-- safetensors format for efficient, safe serialization
-- Matrix Market (.mtx) format for interoperability with other tools
-- Distributed loading where different ranks load different partitions
+* ``safetensors`` format for efficient, safe serialisation.
+* Matrix Market (``.mtx``) for interop with SciPy and other tools.
 
-Example
--------
->>> from torch_sla import SparseTensor
->>> from torch_sla.io import save_sparse, load_sparse, save_distributed, load_partition
->>>
->>> # Save single SparseTensor
->>> A = SparseTensor(val, row, col, shape)
->>> save_sparse(A, "matrix.safetensors")
->>> A_loaded = load_sparse("matrix.safetensors")
->>>
->>> # Matrix Market format
->>> save_mtx(A, "matrix.mtx")
->>> A = load_mtx("matrix.mtx")
->>>
->>> # Save partitioned for distributed loading
->>> save_distributed(A, "matrix_dist", num_partitions=4)
->>> # Each rank loads its partition
->>> partition = load_partition("matrix_dist", rank=rank, world_size=4)
+::
+
+    from torch_sla import SparseTensor
+    from torch_sla.io import save_sparse, load_sparse
+
+    A = SparseTensor(val, row, col, shape)
+    save_sparse(A, "matrix.safetensors")
+    A = load_sparse("matrix.safetensors")
 """
 
 import os
@@ -34,7 +22,6 @@ from pathlib import Path
 
 if TYPE_CHECKING:
     from .sparse_tensor import SparseTensor
-    from .distributed import DSparseMatrix, DSparseTensor
 
 try:
     from safetensors.torch import save_file, load_file
@@ -387,337 +374,24 @@ def load_sparse(
     return SparseTensor(values, row_indices, col_indices, shape)
 
 
-def load_sparse_as_partition(
-    path: Union[str, Path],
-    rank: int,
-    world_size: int,
-    partition_method: str = "simple",
-    coords: Optional[torch.Tensor] = None,
-    device: Union[str, torch.device] = "cpu"
-) -> "DSparseMatrix":
-    """
-    Load a SparseTensor file and return only this rank's partition.
-    
-    This allows distributed reading of a single SparseTensor file,
-    where each rank loads the full file but only keeps its partition.
-    
-    For very large matrices, use save_distributed() instead to avoid
-    loading the full matrix on each rank.
-    
-    Parameters
-    ----------
-    path : str or Path
-        Path to SparseTensor file (.safetensors).
-    rank : int
-        Rank of this process.
-    world_size : int
-        Total number of processes.
-    partition_method : str
-        'simple', 'metis', or 'geometric'.
-    coords : torch.Tensor, optional
-        Node coordinates for geometric partitioning.
-    device : str or torch.device
-        Device to load partition to.
-    
-    Returns
-    -------
-    DSparseMatrix
-        This rank's partition of the matrix.
-    
-    Example
-    -------
-    >>> # Each rank calls this:
-    >>> rank = dist.get_rank()
-    >>> world_size = dist.get_world_size()
-    >>> partition = load_sparse_as_partition("matrix.safetensors", rank, world_size)
-    """
-    _ensure_safetensors()
-    from .sparse_tensor import SparseTensor
-    from .distributed import DSparseMatrix, partition_graph_metis, partition_coordinates, partition_simple
-    
-    # Load full matrix (could be optimized for very large matrices)
-    A = load_sparse(path, device="cpu")
-    
-    # Compute partition IDs locally (same on all ranks for determinism)
-    shape = A.sparse_shape
-    if coords is not None:
-        partition_ids = partition_coordinates(coords, world_size)
-    elif partition_method == 'metis':
-        partition_ids = partition_graph_metis(A.row_indices, A.col_indices, shape[0], world_size)
-    else:
-        partition_ids = partition_simple(shape[0], world_size)
-    
-    # Create partition for this rank
-    return DSparseMatrix.from_global(
-        A.values, A.row_indices, A.col_indices, shape,
-        world_size, rank,
-        partition_ids=partition_ids,
-        device=device,
-        verbose=(rank == 0)
-    )
-
-
 # =============================================================================
 # Distributed I/O - Save partitioned for multi-rank loading
 # =============================================================================
 
-def save_distributed(
-    tensor: "SparseTensor",
-    directory: Union[str, Path],
-    num_partitions: int,
-    partition_method: str = "simple",
-    coords: Optional[torch.Tensor] = None,
-    verbose: bool = False
-) -> None:
-    """
-    Save a SparseTensor as partitioned files for distributed loading.
-    
-    Creates a directory with:
-    - metadata.json: Global metadata and partition info
-    - partition_0.safetensors, partition_1.safetensors, ...: Per-partition data
-    
-    Parameters
-    ----------
-    tensor : SparseTensor
-        The global sparse tensor to partition and save.
-    directory : str or Path
-        Output directory path.
-    num_partitions : int
-        Number of partitions to create.
-    partition_method : str
-        Partitioning method: 'simple', 'metis', or 'geometric'.
-    coords : torch.Tensor, optional
-        Node coordinates for geometric partitioning.
-    verbose : bool
-        Print progress information.
-    
-    Example
-    -------
-    >>> A = SparseTensor(val, row, col, (1000, 1000))
-    >>> save_distributed(A, "matrix_dist", num_partitions=4)
-    # Creates:
-    #   matrix_dist/metadata.json
-    #   matrix_dist/partition_0.safetensors
-    #   matrix_dist/partition_1.safetensors
-    #   matrix_dist/partition_2.safetensors
-    #   matrix_dist/partition_3.safetensors
-    """
-    _ensure_safetensors()
-    from .sparse_tensor import SparseTensor
-    from .distributed import DSparseTensor
-    
-    if not isinstance(tensor, SparseTensor):
-        raise TypeError(f"Expected SparseTensor, got {type(tensor)}")
-    
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    
-    # Create DSparseTensor to get partitions
-    d_tensor = DSparseTensor(
-        tensor.values,
-        tensor.row_indices,
-        tensor.col_indices,
-        tensor.sparse_shape,
-        num_partitions=num_partitions,
-        coords=coords,
-        partition_method=partition_method,
-        verbose=verbose
-    )
-    
-    # Save global metadata
-    metadata = {
-        "version": "1.0",
-        "format": "distributed_sparse_tensor",
-        "shape": list(tensor.sparse_shape),
-        "dtype": str(tensor.dtype),
-        "nnz": int(tensor.nnz),
-        "num_partitions": num_partitions,
-        "partition_method": partition_method,
-        "sparse_dim": list(tensor.sparse_dim),
-    }
-    
-    # Collect partition metadata
-    partition_info = []
-    for i, partition in enumerate(d_tensor._partitions):
-        info = {
-            "partition_id": i,
-            "num_owned": int(partition.num_owned),
-            "num_halo": int(partition.num_halo),
-            "num_local": int(partition.num_local),
-            "nnz": int(partition.nnz),
-            "neighbors": partition.partition.neighbor_partitions,
-        }
-        partition_info.append(info)
-    
-    metadata["partitions"] = partition_info
-    
-    with open(directory / "metadata.json", "w") as f:
-        json.dump(metadata, f, indent=2)
-    
-    # Save each partition
-    for i, partition in enumerate(d_tensor._partitions):
-        tensors = {
-            "values": partition.local_values.contiguous().cpu(),
-            "row_indices": partition.local_row.contiguous().cpu(),
-            "col_indices": partition.local_col.contiguous().cpu(),
-            "owned_nodes": partition.partition.owned_nodes.contiguous().cpu(),
-            "halo_nodes": partition.partition.halo_nodes.contiguous().cpu(),
-            "local_nodes": partition.partition.local_nodes.contiguous().cpu(),
-            "global_to_local": partition.partition.global_to_local.contiguous().cpu(),
-            "local_to_global": partition.partition.local_to_global.contiguous().cpu(),
-        }
-        
-        # Save neighbor info
-        for neighbor_id in partition.partition.neighbor_partitions:
-            send_key = f"send_to_{neighbor_id}"
-            recv_key = f"recv_from_{neighbor_id}"
-            if neighbor_id in partition.partition.send_indices:
-                tensors[send_key] = partition.partition.send_indices[neighbor_id].contiguous().cpu()
-            if neighbor_id in partition.partition.recv_indices:
-                tensors[recv_key] = partition.partition.recv_indices[neighbor_id].contiguous().cpu()
-        
-        meta = {
-            "partition_id": str(i),
-            "num_owned": str(partition.num_owned),
-            "num_halo": str(partition.num_halo),
-            "neighbors": json.dumps(partition.partition.neighbor_partitions),
-        }
-        
-        save_file(tensors, str(directory / f"partition_{i}.safetensors"), metadata=meta)
-    
-    if verbose:
-        print(f"Saved {num_partitions} partitions to {directory}")
-
-
-def load_partition(
-    directory: Union[str, Path],
-    rank: int,
-    world_size: Optional[int] = None,
-    device: Union[str, torch.device] = "cpu"
-) -> "DSparseMatrix":
-    """
-    Load a single partition for the given rank.
-    
-    Each rank loads only its own partition, enabling efficient distributed loading.
-    
-    Parameters
-    ----------
-    directory : str or Path
-        Directory containing partitioned data.
-    rank : int
-        Rank of this process.
-    world_size : int, optional
-        Total number of processes (must match num_partitions).
-        If None, reads from metadata.
-    device : str or torch.device
-        Device to load tensors to.
-    
-    Returns
-    -------
-    DSparseMatrix
-        The partition for this rank.
-    
-    Example
-    -------
-    >>> # In distributed context
-    >>> rank = dist.get_rank()
-    >>> world_size = dist.get_world_size()
-    >>> partition = load_partition("matrix_dist", rank, world_size, device="cuda")
-    """
-    _ensure_safetensors()
-    from .distributed import DSparseMatrix, Partition
-    
-    directory = Path(directory)
-    
-    # Load metadata
-    with open(directory / "metadata.json", "r") as f:
-        metadata = json.load(f)
-    
-    num_partitions = metadata["num_partitions"]
-    global_shape = tuple(metadata["shape"])
-    
-    if world_size is not None and world_size != num_partitions:
-        raise ValueError(
-            f"world_size ({world_size}) must match num_partitions ({num_partitions})"
-        )
-    
-    if rank >= num_partitions:
-        raise ValueError(
-            f"rank ({rank}) must be < num_partitions ({num_partitions})"
-        )
-    
-    # Load partition file
-    tensors = load_file(str(directory / f"partition_{rank}.safetensors"), device=str(device))
-    
-    values = tensors["values"]
-    row_indices = tensors["row_indices"]
-    col_indices = tensors["col_indices"]
-    owned_nodes = tensors["owned_nodes"]
-    halo_nodes = tensors["halo_nodes"]
-    local_nodes = tensors["local_nodes"]
-    global_to_local = tensors["global_to_local"]
-    local_to_global = tensors["local_to_global"]
-    
-    # Reconstruct neighbor info
-    partition_meta = metadata["partitions"][rank]
-    neighbors = partition_meta["neighbors"]
-    
-    send_indices = {}
-    recv_indices = {}
-    for neighbor_id in neighbors:
-        send_key = f"send_to_{neighbor_id}"
-        recv_key = f"recv_from_{neighbor_id}"
-        if send_key in tensors:
-            send_indices[neighbor_id] = tensors[send_key]
-        if recv_key in tensors:
-            recv_indices[neighbor_id] = tensors[recv_key]
-    
-    # Create Partition object
-    partition = Partition(
-        partition_id=rank,
-        local_nodes=local_nodes,
-        owned_nodes=owned_nodes,
-        halo_nodes=halo_nodes,
-        neighbor_partitions=neighbors,
-        send_indices=send_indices,
-        recv_indices=recv_indices,
-        global_to_local=global_to_local,
-        local_to_global=local_to_global,
-    )
-    
-    # Create DSparseMatrix
-    num_owned = len(owned_nodes)
-    num_halo = len(halo_nodes)
-    num_local = num_owned + num_halo
-    local_shape = (num_local, num_local)
-    
-    return DSparseMatrix(
-        partition=partition,
-        local_values=values,
-        local_row=row_indices,
-        local_col=col_indices,
-        local_shape=local_shape,
-        global_shape=global_shape,
-        num_partitions=num_partitions,
-        device=device,
-        verbose=False,
-    )
-
-
 def load_metadata(directory: Union[str, Path]) -> Dict:
     """
     Load metadata from a distributed sparse tensor directory.
-    
+
     Parameters
     ----------
     directory : str or Path
         Directory containing partitioned data.
-    
+
     Returns
     -------
     dict
         Metadata including shape, dtype, num_partitions, etc.
-    
+
     Example
     -------
     >>> meta = load_metadata("matrix_dist")
@@ -728,343 +402,360 @@ def load_metadata(directory: Union[str, Path]) -> Dict:
         return json.load(f)
 
 
-def load_distributed_as_sparse(
-    directory: Union[str, Path],
-    device: Union[str, torch.device] = "cpu"
-) -> "SparseTensor":
-    """
-    Load a distributed/partitioned save as a single SparseTensor.
-    
-    This gathers all partitions into one SparseTensor.
-    Useful when you have partitioned data but want to use it on a single node.
-    
-    Parameters
-    ----------
-    directory : str or Path
-        Directory containing partitioned data (from save_distributed or DSparseTensor.save).
-    device : str or torch.device
-        Device to load to.
-    
-    Returns
-    -------
-    SparseTensor
-        The complete sparse tensor.
-    
-    Example
-    -------
-    >>> # Load partitioned data as single SparseTensor
-    >>> A = load_distributed_as_sparse("matrix_dist", device="cuda")
-    """
+# DSparseTensor persistence -- one safetensors file per rank +
+# metadata.json sidecar. Layout v2.0:
+#   directory/
+#     metadata.json
+#     partition_<rank>.safetensors    # COO + Partition fields + send/recv idx
+
+_DSPARSE_FORMAT_VERSION = "2.0"
+
+
+def _placement_axis(placement) -> int:
+    """Back-compat axis ID for a VertexShard / VertexShardReplicated /
+    legacy SparseShard placement, written into metadata.json."""
+    from .distributed import VertexShard, VertexShardReplicated
+    if isinstance(placement, VertexShard):
+        return 0
+    if isinstance(placement, VertexShardReplicated):
+        return 1
+    return int(getattr(placement, "axis", 0))
+
+
+def _partition_to_safetensors_dict(local_tensor, partition):
+    out = {
+        "values":          local_tensor.values.contiguous().cpu(),
+        "row_indices":     local_tensor.row_indices.contiguous().cpu(),
+        "col_indices":     local_tensor.col_indices.contiguous().cpu(),
+        "owned_nodes":     partition.owned_nodes.contiguous().cpu(),
+        "halo_nodes":      partition.halo_nodes.contiguous().cpu(),
+        "local_nodes":     partition.local_nodes.contiguous().cpu(),
+        "global_to_local": partition.global_to_local.contiguous().cpu(),
+        "local_to_global": partition.local_to_global.contiguous().cpu(),
+    }
+    for nid in partition.neighbor_partitions:
+        if nid in partition.send_indices:
+            out[f"send_to_{nid}"] = partition.send_indices[nid].contiguous().cpu()
+        if nid in partition.recv_indices:
+            out[f"recv_from_{nid}"] = partition.recv_indices[nid].contiguous().cpu()
+    return out
+
+
+def _safetensors_dict_to_partition(tensors, neighbor_partitions, partition_id, device):
+    from .partition import Partition
+    send_indices, recv_indices = {}, {}
+    for nid in neighbor_partitions:
+        if f"send_to_{nid}" in tensors:
+            send_indices[nid] = tensors[f"send_to_{nid}"].to(device)
+        if f"recv_from_{nid}" in tensors:
+            recv_indices[nid] = tensors[f"recv_from_{nid}"].to(device)
+    return Partition(
+        partition_id=partition_id,
+        local_nodes=tensors["local_nodes"].to(device),
+        owned_nodes=tensors["owned_nodes"].to(device),
+        halo_nodes=tensors["halo_nodes"].to(device),
+        neighbor_partitions=list(neighbor_partitions),
+        send_indices=send_indices,
+        recv_indices=recv_indices,
+        global_to_local=tensors["global_to_local"].to(device),
+        local_to_global=tensors["local_to_global"].to(device),
+    )
+
+
+def save_dsparse(tensor: "DSparseTensor", directory: Union[str, Path],
+                 rank: Optional[int] = None, verbose: bool = False) -> None:
+    """Save this rank's shard. Every rank calls; rank 0 also writes metadata.json."""
     _ensure_safetensors()
-    from .sparse_tensor import SparseTensor
-    from .distributed import Partition
-    
+    from .distributed import DSparseTensor
+
+    if not isinstance(tensor, DSparseTensor):
+        raise TypeError(f"Expected DSparseTensor, got {type(tensor).__name__}")
+
+    if rank is None:
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        except (RuntimeError, ImportError):
+            rank = 0
+
     directory = Path(directory)
-    
-    with open(directory / "metadata.json", "r") as f:
-        metadata = json.load(f)
-    
-    num_partitions = metadata["num_partitions"]
-    global_shape = tuple(metadata["shape"])
-    
-    # Collect all entries from partitions
-    all_values = []
-    all_rows = []
-    all_cols = []
-    
-    for i in range(num_partitions):
-        tensors = load_file(str(directory / f"partition_{i}.safetensors"), device="cpu")
-        
-        values = tensors["values"]
-        row_indices = tensors["row_indices"]
-        col_indices = tensors["col_indices"]
-        owned_nodes = tensors["owned_nodes"]
-        local_to_global = tensors["local_to_global"]
-        
-        num_owned = len(owned_nodes)
-        
-        # Only keep entries where row is owned (to avoid duplicates)
-        owned_mask = row_indices < num_owned
-        local_vals = values[owned_mask]
-        local_rows = row_indices[owned_mask]
-        local_cols = col_indices[owned_mask]
-        
-        # Convert local to global indices
-        global_rows = local_to_global[local_rows]
-        global_cols = local_to_global[local_cols]
-        
-        all_values.append(local_vals)
-        all_rows.append(global_rows)
-        all_cols.append(global_cols)
-    
-    global_values = torch.cat(all_values).to(device)
-    global_rows = torch.cat(all_rows).to(device)
-    global_cols = torch.cat(all_cols).to(device)
-    
-    return SparseTensor(global_values, global_rows, global_cols, global_shape)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    placement = tensor._spec.placement
+    partition = placement.partition
+    if partition is None:
+        raise ValueError("save_dsparse needs a Partition; got Replicated")
+
+    save_file(
+        _partition_to_safetensors_dict(tensor._local_tensor, partition),
+        str(directory / f"partition_{rank}.safetensors"),
+    )
+
+    if rank == 0:
+        metadata = {
+            "format":         "dsparse_tensor",
+            "version":        _DSPARSE_FORMAT_VERSION,
+            "shape":          list(tensor.shape),
+            "dtype":          str(tensor.dtype),
+            "num_partitions": int(tensor.num_partitions),
+            "placement_axis": _placement_axis(placement),
+            "partitions": [{
+                "partition_id": int(partition.partition_id),
+                "num_owned":    int(partition.owned_nodes.numel()),
+                "num_halo":     int(partition.halo_nodes.numel()),
+                "num_local":    int(partition.local_nodes.numel()),
+                "nnz":          int(tensor.nnz),
+                "neighbors":    list(partition.neighbor_partitions),
+            }],
+        }
+        with open(directory / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+        if verbose:
+            print(f"[save_dsparse] wrote partition_{rank}.safetensors + metadata.json to {directory}")
+    elif verbose:
+        print(f"[save_dsparse] rank {rank}: wrote partition_{rank}.safetensors")
 
 
-# =============================================================================
-# Alternative: Save as single file with partition index
-# =============================================================================
+def _resolve_target_world_size(explicit: Optional[int]) -> int:
+    """Decide the loader's target world_size.
 
-def save_sparse_sharded(
-    tensor: "SparseTensor",
-    path: Union[str, Path],
-    num_shards: int,
-    partition_method: str = "simple",
-    coords: Optional[torch.Tensor] = None,
-    metadata: Optional[Dict[str, str]] = None,
-    verbose: bool = False
-) -> None:
+    Precedence: explicit arg → live process group size → 1. Single-
+    process callers get ``1`` so they can read a sharded archive
+    without ``torchrun``.
     """
-    Save a SparseTensor with shard information embedded.
-    
-    This saves all shards in a single directory but with clear shard boundaries,
-    allowing selective loading.
-    
-    Parameters
-    ----------
-    tensor : SparseTensor
-        The global sparse tensor to save.
-    path : str or Path
-        Output directory path.
-    num_shards : int
-        Number of shards to create.
-    partition_method : str
-        Partitioning method.
-    coords : torch.Tensor, optional
-        Node coordinates for geometric partitioning.
-    metadata : dict, optional
-        Additional metadata.
-    verbose : bool
-        Print progress information.
+    if explicit is not None:
+        if explicit < 1:
+            raise ValueError(f"target_world_size must be >= 1, got {explicit}")
+        return int(explicit)
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            return int(dist.get_world_size())
+    except (RuntimeError, ImportError):
+        pass
+    return 1
+
+
+def _load_all_shards_collapsed(directory: Path,
+                                global_shape: Tuple[int, int],
+                                placement_axis: int,
+                                num_stored: int,
+                                device: Union[str, torch.device]) -> "DSparseTensor":
+    """Single-process inverse of ``save_sparse_sharded`` / collective
+    ``save_dsparse``: read every shard, stitch the owned-row slices
+    back into one global :class:`SparseTensor`, wrap as a
+    ``mesh=None`` (world_size=1) :class:`DSparseTensor` so callers
+    keep the symmetric API.
+
+    Only ``owned`` rows from each shard contribute -- halo rows are
+    placeholders (zero values) used for halo-exchange addressing on
+    the saving rank, not real entries.
     """
-    # Alias for save_distributed
-    save_distributed(tensor, path, num_shards, partition_method, coords, verbose)
+    from .distributed import DSparseTensor
+    from .partition import Partition
+    from .sparse_tensor import SparseTensor
+
+    device_ = torch.device(device)
+    all_vals, all_rows, all_cols = [], [], []
+    for pid in range(num_stored):
+        local_st, partition = load_sparse_shard(directory, pid, device=device_)
+        l2g = partition.local_to_global.to(device=device_, dtype=torch.int64)
+        num_owned = int(partition.owned_nodes.numel())
+        # Halo rows ([num_owned, num_local)) carry zero placeholder
+        # entries; drop them before stitching.
+        owned_mask = local_st.row_indices < num_owned
+        r_local = local_st.row_indices[owned_mask]
+        c_local = local_st.col_indices[owned_mask]
+        all_vals.append(local_st.values[owned_mask])
+        all_rows.append(l2g[r_local])
+        all_cols.append(l2g[c_local])
+
+    vals = torch.cat(all_vals) if all_vals else torch.empty(0, device=device_)
+    rows = (torch.cat(all_rows) if all_rows
+            else torch.empty(0, dtype=torch.int64, device=device_))
+    cols = (torch.cat(all_cols) if all_cols
+            else torch.empty(0, dtype=torch.int64, device=device_))
+    full = SparseTensor(vals, rows, cols, shape=global_shape)
+
+    # Trivial single-rank partition: every node owned, no halo,
+    # local==global. Mirrors ``DSparseTensor`` semantics so the
+    # returned object behaves as a ``world_size=1`` shard whose
+    # local tensor IS the global tensor.
+    n = int(global_shape[0])
+    arange = torch.arange(n, dtype=torch.int64, device=device_)
+    trivial = Partition(
+        partition_id=0,
+        local_nodes=arange.clone(),
+        owned_nodes=arange.clone(),
+        halo_nodes=torch.empty(0, dtype=torch.int64, device=device_),
+        neighbor_partitions=[],
+        send_indices={},
+        recv_indices={},
+        global_to_local=arange.clone(),
+        local_to_global=arange.clone(),
+    )
+    return DSparseTensor.from_sparse_local(full, mesh=None, partition=trivial,
+                                            axis=placement_axis,
+                                            global_shape=global_shape)
 
 
-def load_sparse_shard(
-    path: Union[str, Path],
-    shard_id: int,
-    device: Union[str, torch.device] = "cpu"
-) -> "DSparseMatrix":
-    """
-    Load a specific shard from sharded sparse tensor.
-    
-    Parameters
-    ----------
-    path : str or Path
-        Directory containing sharded data.
-    shard_id : int
-        Shard ID to load.
-    device : str or torch.device
-        Device to load to.
-    
-    Returns
-    -------
-    DSparseMatrix
-        The loaded shard.
-    """
-    # Alias for load_partition
-    meta = load_metadata(path)
-    return load_partition(path, shard_id, meta["num_partitions"], device)
+def load_dsparse(directory: Union[str, Path], mesh=None,
+                 rank: Optional[int] = None,
+                 target_world_size: Optional[int] = None,
+                 device: Union[str, torch.device] = "cpu") -> "DSparseTensor":
+    """Load a sharded archive into a :class:`DSparseTensor`.
 
+    Three modes, picked from ``target_world_size`` (or, if omitted,
+    a live process group, else ``1``):
 
-# =============================================================================
-# DSparseTensor I/O
-# =============================================================================
-
-def save_dsparse(
-    tensor: "DSparseTensor",
-    directory: Union[str, Path],
-    verbose: bool = False
-) -> None:
-    """
-    Save a DSparseTensor to disk.
-    
-    Parameters
-    ----------
-    tensor : DSparseTensor
-        The distributed sparse tensor to save.
-    directory : str or Path
-        Output directory.
-    verbose : bool
-        Print progress.
+    * ``stored_N == target_world_size`` -- fast path; this rank reads
+      ``partition_{rank}.safetensors`` directly. Original
+      :func:`save_dsparse` semantics.
+    * ``target_world_size == 1`` -- single-process gather: read every
+      shard from disk, stitch the owned rows into one global
+      :class:`SparseTensor`, return as a ``mesh=None`` trivial
+      DSparseTensor. Useful for inspection / single-node debug after
+      sharded training.
+    * otherwise -- explicit :class:`NotImplementedError`. True
+      re-partitioning on load (``stored_N != target != 1``) requires
+      a cross-rank shuffle; deferred to a future ``redistribute()``
+      pass. Workaround: load with ``target_world_size=1`` and call
+      ``.full_tensor()`` (or save again at the new world size).
     """
     _ensure_safetensors()
     from .distributed import DSparseTensor
-    
-    if not isinstance(tensor, DSparseTensor):
-        raise TypeError(f"Expected DSparseTensor, got {type(tensor)}")
-    
+    from .sparse_tensor import SparseTensor
+
+    directory = Path(directory)
+    metadata = load_metadata(directory)
+    if metadata.get("format") != "dsparse_tensor":
+        raise ValueError(f"not a DSparseTensor directory: {directory}")
+
+    global_shape = tuple(metadata["shape"])
+    placement_axis = int(metadata.get("placement_axis", 0))
+    num_stored = int(metadata["num_partitions"])
+    target_N = _resolve_target_world_size(target_world_size)
+
+    if num_stored != target_N:
+        if target_N == 1:
+            return _load_all_shards_collapsed(
+                directory, global_shape, placement_axis, num_stored, device)
+        raise NotImplementedError(
+            f"stored {num_stored} shards != target world_size {target_N}; "
+            "in-place repartitioning is not implemented yet. "
+            "Workaround: load with target_world_size=1, call "
+            ".full_tensor(), then save_sparse_sharded() at the new size."
+        )
+
+    if rank is None:
+        try:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        except (RuntimeError, ImportError):
+            rank = 0
+
+    shard_path = directory / f"partition_{rank}.safetensors"
+    if not shard_path.exists():
+        raise FileNotFoundError(f"missing shard for rank {rank}: {shard_path}")
+    tensors = load_file(str(shard_path), device=str(device))
+
+    # Neighbor list reconstructed from safetensors keys -- robust even
+    # if metadata.partitions was only written by rank 0.
+    neighbors = sorted({int(k.removeprefix("send_to_")) for k in tensors if k.startswith("send_to_")}
+                       | {int(k.removeprefix("recv_from_")) for k in tensors if k.startswith("recv_from_")})
+    partition = _safetensors_dict_to_partition(tensors, neighbors, rank, device)
+
+    n_local = int(partition.local_nodes.numel())
+    local_st = SparseTensor(tensors["values"], tensors["row_indices"],
+                            tensors["col_indices"], shape=(n_local, n_local))
+
+    if mesh is None:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            try:
+                from torch.distributed.device_mesh import init_device_mesh
+            except ImportError:
+                from torch.distributed._tensor.device_mesh import init_device_mesh
+            mesh = init_device_mesh(torch.device(device).type, (dist.get_world_size(),))
+
+    return DSparseTensor.from_sparse_local(local_st, mesh, partition,
+                                            axis=placement_axis,
+                                            global_shape=global_shape)
+
+
+def save_sparse_sharded(tensor: "SparseTensor", directory: Union[str, Path],
+                        num_partitions: int, partition_method: str = "simple",
+                        coords: Optional[torch.Tensor] = None,
+                        verbose: bool = False) -> None:
+    """Single-process partition + write all shards. Output is identical
+    to a collective ``save_dsparse`` and can be consumed under torchrun."""
+    _ensure_safetensors()
+    from .partition import resolve_partition_ids, build_partition
+
+    if tensor.is_batched:
+        raise ValueError("save_sparse_sharded does not support batched SparseTensor")
+
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    
-    # Save metadata
+
+    partition_ids = resolve_partition_ids(
+        tensor.row_indices, tensor.col_indices, int(tensor.shape[0]),
+        num_partitions, method=partition_method, coords=coords,
+    )
+
+    per_partition_meta = []
+    for pid in range(num_partitions):
+        partition = build_partition(
+            tensor.row_indices, tensor.col_indices, int(tensor.shape[0]),
+            partition_ids.cpu(), pid,
+        )
+        local_st = tensor.extract_partition(partition)
+        save_file(_partition_to_safetensors_dict(local_st, partition),
+                  str(directory / f"partition_{pid}.safetensors"))
+        per_partition_meta.append({
+            "partition_id": int(partition.partition_id),
+            "num_owned":    int(partition.owned_nodes.numel()),
+            "num_halo":     int(partition.halo_nodes.numel()),
+            "num_local":    int(partition.local_nodes.numel()),
+            "nnz":          int(local_st.nnz),
+            "neighbors":    list(partition.neighbor_partitions),
+        })
+
     metadata = {
-        "version": "1.0",
-        "format": "dsparse_tensor",
-        "shape": list(tensor.shape),
-        "dtype": str(tensor.dtype),
-        "num_partitions": tensor.num_partitions,
+        "format":           "dsparse_tensor",
+        "version":          _DSPARSE_FORMAT_VERSION,
+        "shape":            list(tensor.sparse_shape),
+        "dtype":            str(tensor.dtype),
+        "num_partitions":   int(num_partitions),
+        "placement_axis":   0,
+        "partition_method": partition_method,
+        "partitions":       per_partition_meta,
     }
-    
-    partition_info = []
-    for i, partition in enumerate(tensor._partitions):
-        info = {
-            "partition_id": i,
-            "num_owned": int(partition.num_owned),
-            "num_halo": int(partition.num_halo),
-            "num_local": int(partition.num_local),
-            "nnz": int(partition.nnz),
-            "neighbors": partition.partition.neighbor_partitions,
-        }
-        partition_info.append(info)
-    
-    metadata["partitions"] = partition_info
-    
     with open(directory / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
-    
-    # Save each partition
-    for i, partition in enumerate(tensor._partitions):
-        tensors = {
-            "values": partition.local_values.contiguous().cpu(),
-            "row_indices": partition.local_row.contiguous().cpu(),
-            "col_indices": partition.local_col.contiguous().cpu(),
-            "owned_nodes": partition.partition.owned_nodes.contiguous().cpu(),
-            "halo_nodes": partition.partition.halo_nodes.contiguous().cpu(),
-            "local_nodes": partition.partition.local_nodes.contiguous().cpu(),
-            "global_to_local": partition.partition.global_to_local.contiguous().cpu(),
-            "local_to_global": partition.partition.local_to_global.contiguous().cpu(),
-        }
-        
-        for neighbor_id in partition.partition.neighbor_partitions:
-            if neighbor_id in partition.partition.send_indices:
-                tensors[f"send_to_{neighbor_id}"] = partition.partition.send_indices[neighbor_id].contiguous().cpu()
-            if neighbor_id in partition.partition.recv_indices:
-                tensors[f"recv_from_{neighbor_id}"] = partition.partition.recv_indices[neighbor_id].contiguous().cpu()
-        
-        save_file(tensors, str(directory / f"partition_{i}.safetensors"))
-    
     if verbose:
-        print(f"Saved DSparseTensor with {tensor.num_partitions} partitions to {directory}")
+        print(f"[save_sparse_sharded] wrote {num_partitions} partitions + metadata.json to {directory}")
 
 
-def load_dsparse(
-    directory: Union[str, Path],
-    device: Union[str, torch.device] = "cpu"
-) -> "DSparseTensor":
-    """
-    Load a complete DSparseTensor from disk.
-    
-    Parameters
-    ----------
-    directory : str or Path
-        Directory containing saved data.
-    device : str or torch.device
-        Device to load to.
-    
-    Returns
-    -------
-    DSparseTensor
-        The loaded distributed sparse tensor.
-    """
+def load_sparse_shard(directory: Union[str, Path], rank: int,
+                      device: Union[str, torch.device] = "cpu") -> Tuple["SparseTensor", "object"]:
+    """Load one shard for inspection. Returns ``(local_tensor, partition)``."""
     _ensure_safetensors()
-    from .distributed import DSparseTensor, DSparseMatrix, Partition
-    
-    directory = Path(directory)
-    
-    with open(directory / "metadata.json", "r") as f:
-        metadata = json.load(f)
-    
-    num_partitions = metadata["num_partitions"]
-    global_shape = tuple(metadata["shape"])
-    
-    partitions = []
-    for i in range(num_partitions):
-        tensors = load_file(str(directory / f"partition_{i}.safetensors"), device=str(device))
-        
-        partition_meta = metadata["partitions"][i]
-        neighbors = partition_meta["neighbors"]
-        
-        send_indices = {}
-        recv_indices = {}
-        for neighbor_id in neighbors:
-            send_key = f"send_to_{neighbor_id}"
-            recv_key = f"recv_from_{neighbor_id}"
-            if send_key in tensors:
-                send_indices[neighbor_id] = tensors[send_key]
-            if recv_key in tensors:
-                recv_indices[neighbor_id] = tensors[recv_key]
-        
-        partition = Partition(
-            partition_id=i,
-            local_nodes=tensors["local_nodes"],
-            owned_nodes=tensors["owned_nodes"],
-            halo_nodes=tensors["halo_nodes"],
-            neighbor_partitions=neighbors,
-            send_indices=send_indices,
-            recv_indices=recv_indices,
-            global_to_local=tensors["global_to_local"],
-            local_to_global=tensors["local_to_global"],
-        )
-        
-        num_owned = len(tensors["owned_nodes"])
-        num_halo = len(tensors["halo_nodes"])
-        num_local = num_owned + num_halo
-        
-        dsm = DSparseMatrix(
-            partition=partition,
-            local_values=tensors["values"],
-            local_row=tensors["row_indices"],
-            local_col=tensors["col_indices"],
-            local_shape=(num_local, num_local),
-            global_shape=global_shape,
-            num_partitions=num_partitions,
-            device=device,
-            verbose=False,
-        )
-        partitions.append(dsm)
-    
-    # Create DSparseTensor from partitions
-    # We need to reconstruct global data from partitions for the gather method
-    # Collect values, rows, cols from all partitions (owned portion only)
-    all_values = []
-    all_rows = []
-    all_cols = []
-    
-    for p in partitions:
-        owned_mask = p.local_row < p.num_owned
-        local_vals = p.local_values[owned_mask]
-        local_rows = p.local_row[owned_mask]
-        local_cols = p.local_col[owned_mask]
-        
-        # Convert local to global indices
-        global_rows = p.partition.local_to_global[local_rows]
-        global_cols = p.partition.local_to_global[local_cols]
-        
-        all_values.append(local_vals)
-        all_rows.append(global_rows)
-        all_cols.append(global_cols)
-    
-    global_values = torch.cat(all_values)
-    global_rows = torch.cat(all_rows)
-    global_cols = torch.cat(all_cols)
-    
-    d_tensor = DSparseTensor.__new__(DSparseTensor)
-    d_tensor._partitions = partitions
-    d_tensor._shape = global_shape
-    d_tensor._device = torch.device(device)
-    d_tensor._values = global_values.to(device)
-    d_tensor._row_indices = global_rows.to(device)
-    d_tensor._col_indices = global_cols.to(device)
-    d_tensor._distributed_mode = False
-    d_tensor._num_partitions = num_partitions
-    d_tensor._coords = None
-    d_tensor._partition_method = 'loaded'
-    d_tensor._verbose = False
-    
-    return d_tensor
+    from .sparse_tensor import SparseTensor
 
+    directory = Path(directory)
+    metadata = load_metadata(directory)
+    if metadata.get("format") != "dsparse_tensor":
+        raise ValueError(f"not a DSparseTensor directory: {directory}")
+
+    shard_path = directory / f"partition_{rank}.safetensors"
+    if not shard_path.exists():
+        raise FileNotFoundError(f"missing shard for rank {rank}: {shard_path}")
+    tensors = load_file(str(shard_path), device=str(device))
+    neighbors = sorted({int(k.removeprefix("send_to_")) for k in tensors if k.startswith("send_to_")}
+                       | {int(k.removeprefix("recv_from_")) for k in tensors if k.startswith("recv_from_")})
+    partition = _safetensors_dict_to_partition(tensors, neighbors, rank, device)
+    n_local = int(partition.local_nodes.numel())
+    local_st = SparseTensor(tensors["values"], tensors["row_indices"],
+                            tensors["col_indices"], shape=(n_local, n_local))
+    return local_st, partition

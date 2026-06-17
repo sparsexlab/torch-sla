@@ -7,7 +7,7 @@ Launch with torchrun, e.g.:
 
 For each grid size n, builds a 2D Poisson 5-point stencil with
 N = n^2 unknowns, partitions it across world_size processes via
-``DSparseMatrix.from_global``, and runs distributed CG with NCCL.
+``DSparseTensor.partition``, and runs distributed CG with NCCL.
 Records wall time, peak memory per GPU, and final residual.
 
 All non-rank-0 processes are silent. Rank 0 writes a JSON record per
@@ -28,7 +28,12 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from torch_sla.distributed import DSparseMatrix
+try:
+    from torch.distributed.device_mesh import init_device_mesh
+except ImportError:
+    from torch.distributed._tensor.device_mesh import init_device_mesh
+
+from torch_sla import SparseTensor, DSparseTensor, solve
 
 
 def make_poisson_2d_global(n_grid, dtype):
@@ -140,31 +145,30 @@ def main():
 
         try:
             reset_mem(device)
-            dsparse = DSparseMatrix.from_global(
-                val_g, row_g, col_g, shape,
-                num_partitions=world_size, my_partition=rank,
-                device=device,
-            )
-            b = torch.ones(dsparse.num_owned, dtype=dtype, device=device)
+            mesh = init_device_mesh("cuda", (world_size,))
+            A_global = SparseTensor(val_g.to(device), row_g.to(device),
+                                     col_g.to(device), shape)
+            D = DSparseTensor.partition(A_global, mesh,
+                                         partition_method="simple")
+            b_global = torch.ones(shape[0], dtype=dtype, device=device)
+            b_dt = D.scatter(b_global)
 
-            # Warmup
+            solve_kw = dict(method="cg", preconditioner=args.preconditioner,
+                            atol=0.0, rtol=args.rtol, maxiter=args.maxiter)
+
             for _ in range(args.warmup):
-                _ = dsparse.solve(b, atol=0.0, rtol=args.rtol,
-                                  maxiter=args.maxiter,
-                                  preconditioner=args.preconditioner)
+                _ = solve(D, b_dt, **solve_kw)
             torch.cuda.synchronize(device)
             dist.barrier()
             torch.cuda.reset_peak_memory_stats(device)
 
             times = []
-            x = None
+            x_dt = None
             for _ in range(args.num_runs):
                 torch.cuda.synchronize(device)
                 dist.barrier()
                 t0 = time.perf_counter()
-                x = dsparse.solve(b, atol=0.0, rtol=args.rtol,
-                                  maxiter=args.maxiter,
-                                  preconditioner=args.preconditioner)
+                x_dt = solve(D, b_dt, **solve_kw)
                 torch.cuda.synchronize(device)
                 dist.barrier()
                 times.append((time.perf_counter() - t0) * 1000)
@@ -175,21 +179,12 @@ def main():
             peak_max_t = peak_t.clone()
             dist.all_reduce(peak_max_t, op=dist.ReduceOp.MAX)
 
-            # Distributed residual: r_owned = b - (A x)_owned ; ||r||^2 reduced
-            # matvec needs num_local input (owned + halo); pad and let
-            # the halo exchange fill in neighbor values.
-            x_local = torch.zeros(dsparse.num_local, dtype=dtype,
-                                  device=device)
-            x_local[:dsparse.num_owned] = x
-            Ax = dsparse.matvec(x_local, exchange_halo=True)[:dsparse.num_owned]
-            r = b - Ax
-            local_rr = torch.dot(r, r).detach()
-            local_bb = torch.dot(b, b).detach()
-            global_rr = local_rr.clone()
-            global_bb = local_bb.clone()
-            dist.all_reduce(global_rr, op=dist.ReduceOp.SUM)
-            dist.all_reduce(global_bb, op=dist.ReduceOp.SUM)
-            residual = float((global_rr / global_bb).sqrt().item())
+            # Distributed residual ||b - A x|| / ||b||, via public ops.
+            r_dt = b_dt - D @ x_dt
+            r_full = r_dt.full_tensor()
+            b_full = b_dt.full_tensor()
+            residual = float(
+                (r_full.norm() / (b_full.norm() + 1e-30)).item())
 
             if rank == 0:
                 row = {
@@ -214,7 +209,8 @@ def main():
                       f"mem_max/GPU={row['memory_max_mb_per_gpu']:.0f} MB  "
                       f"res={residual:.2e}", flush=True)
 
-            del dsparse, b, x, Ax, r, val_g, row_g, col_g
+            del D, A_global, b_global, b_dt, x_dt, r_dt, r_full, b_full
+            del val_g, row_g, col_g
             reset_mem(device)
             dist.barrier()
 

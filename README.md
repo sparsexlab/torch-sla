@@ -113,12 +113,12 @@ Based on benchmarks on 2D Poisson equations (tested up to **400M DOF** multi-GPU
 | **Small (< 100K DOF)** | `scipy+lu` | `cudss+cholesky` | Direct solvers, machine precision |
 | **Medium (100K - 2M DOF)** | `scipy+lu` | `cudss+cholesky` | cuDSS is fastest on GPU |
 | **Large (2M - 169M DOF)** | N/A | `pytorch+cg` | **Iterative only**, ~1e-6 precision |
-| **Very Large (> 169M DOF)** | N/A | `DSparseMatrix` multi-GPU | Multi-GPU domain decomposition |
+| **Very Large (> 169M DOF)** | N/A | `DSparseTensor` multi-GPU | Multi-GPU domain decomposition |
 
 ### Key Insights
 
 1. **PyTorch CG+Jacobi scales to 169M+ DOF** on single GPU with near-linear O(n^1.1) complexity
-2. **Multi-GPU scales to 400M+ DOF** with DSparseMatrix domain decomposition (3x H200)
+2. **Multi-GPU scales to 400M+ DOF** with DSparseTensor domain decomposition (3x H200)
 3. **Direct solvers limited to ~2M DOF** due to memory (O(n^1.5) fill-in)
 4. **Use float64** for best convergence with iterative solvers
 5. **Trade-off**: Direct = machine precision (~1e-14), Iterative = ~1e-6 but 100x faster
@@ -172,36 +172,33 @@ b = torch.randn(3, 5, dtype=torch.float64)  # 5 right-hand sides
 x = A.solve(b)  # Shape: [3, 5]
 ```
 
-## Distributed Computing (DSparseMatrix)
+## Distributed Computing (DSparseTensor)
 
-For large-scale problems across multiple GPUs, use domain decomposition:
+For large-scale problems across multiple GPUs, use domain decomposition.
+`DSparseTensor` mirrors `torch.distributed.tensor.DTensor`: each rank
+holds its own `SparseTensor` chunk plus a `Partition` map (owned rows +
+halo), and every operation stays in `Shard(0)` space.
 
 ```python
 import torch.distributed as dist
-from torch_sla.distributed import DSparseMatrix, partition_simple
+from torch.distributed.device_mesh import init_device_mesh
+from torch_sla import SparseTensor, DSparseTensor, solve, SolverConfig
 
-# Initialize distributed (each process runs this)
-dist.init_process_group(backend='nccl')  # or 'gloo' for CPU
-rank = dist.get_rank()
-world_size = dist.get_world_size()
+dist.init_process_group(backend="nccl")  # or "gloo" for CPU
+mesh = init_device_mesh("cuda", (dist.get_world_size(),))
 
-# Each rank creates its local partition
-A = DSparseMatrix.from_global(
-    val, row, col, shape,
-    num_partitions=world_size,
-    my_partition=rank,
-    partition_ids=partition_simple(n, world_size),
-    device=f'cuda:{rank}'
-)
+A    = SparseTensor(val, row, col, shape)
+D    = DSparseTensor.partition(A, mesh, partition_method="metis")
+b_dt = D.scatter(b_global)
 
-# Distributed CG solve (default: distributed=True)
-x_owned = A.solve(b_owned, atol=1e-10)
+# Distributed Krylov solve via the unified API. SolverConfig flows in;
+# x_dt is a DTensor[Shard(0)] composable with the rest of FSDP/TP.
+with SolverConfig(method="cg", atol=1e-10, rtol=1e-10, maxiter=2000):
+    x_dt = solve(D, b_dt)
 
-# Distributed LOBPCG eigenvalues
-eigenvalues, eigenvectors_owned = A.eigsh(k=5)
-
-# Local subdomain solve (no global communication)
-x_local = A.solve(b_owned, distributed=False)
+# Residual / global gather via public ops only.
+r_dt    = b_dt - D @ x_dt
+x_full  = x_dt.full_tensor()
 ```
 
 ```bash
@@ -243,58 +240,56 @@ print(b.grad)    # Gradient w.r.t. RHS
 | `norm()`, `sum()`, `mean()` | ✓ | ✓ | Standard autograd |
 | `to_dense()` | ✓ | ✓ | Standard autograd |
 
-#### DSparseTensor (Multi-GPU)
+#### DSparseTensor (Multi-GPU, `VertexShard`)
 
 | Operation | CPU (Gloo) | CUDA (NCCL) | Notes |
 |-----------|------------|-------------|-------|
-| `matvec()` | ✓ | ✓ | Halo exchange + local SpMV |
-| `solve()` | ✓ | ✓ | Distributed CG (default `distributed=True`) |
-| `det()` | ✓ | ✓ | Gathers all partitions, then computes (with warning) |
-| `eigsh()` | ✓ | ✓ | Distributed LOBPCG |
-| `halo_exchange()` | ✓ | ✓ | P2P communication with neighbors |
+| `D @ x_dt` | ✓ | ✓ | Halo exchange + local SpMV → `DTensor[Shard(0)]` |
+| `solve(D, b_dt)` | ✓ | ✓ | CG / BiCGStab / GMRES / FGMRES / MINRES |
+| `D.eigsh(k=)` | ✓ | ✓ | Distributed LOBPCG (sharded matvec, global RR) |
+| `D.sum / .mean / .max / .min / .prod` | ✓ | ✓ | Cross-rank `all_reduce` over stored values |
+| `D.norm('fro' / 1 / inf)` | ✓ | ✓ | Single `all_reduce`; `2` falls back to gather |
+| `D.is_symmetric / .is_hermitian / .is_positive_definite` | ✓ | ✓ | Cached `full_tensor` + single-process check |
+| `D.detect_matrix_type()` | ✓ | ✓ | Same; for `solve(..., matrix_type='auto')` |
+| `D.T() / .H()` | ✓ | ✓ | Allgather → transpose → repartition on same mesh |
+| `D + s`, `D * s`, `D.abs()`, etc. | ✓ | ✓ | Local elementwise, same `_spec` |
+| `D.save(dir) / DSparseTensor.load(dir, mesh)` | ✓ | ✓ | Per-rank `partition_<rank>.safetensors` + `metadata.json` |
+| `D.full_tensor()` | ✓ | ✓ | All-gather to a global `SparseTensor` |
+| `D.det() / .lu() / .svd() / .condition_number()` | ✓ | ✓ | Falls back to `full_tensor()` + single-proc; emits `ResourceWarning` |
 
-**Communication per iteration**:
-- `solve()`: Halo exchange + 2 all_reduce
-- `eigsh()`: Halo exchange + O(k²) all_reduce
+#### DSparseTensor (`BatchShard`, zero-comm matvec)
 
-> **Note**: DSparseMatrix uses true distributed algorithms that only require distributed matvec + global reductions. No data gather is needed for core operations.
+| Operation | CPU (Gloo) | CUDA (NCCL) | Notes |
+|-----------|------------|-------------|-------|
+| `D @ x` | ✓ | ✓ | Embarrassingly parallel — each rank multiplies its own batch slice |
+| `D.eigsh(k=)` | ✓ | ✓ | Per-rank batched LOBPCG on the local slice (zero comm) |
+| `D.solve_batch_shard(b)` | ✓ | ✓ | Per-rank batched solve via `SparseTensor.solve_batch` (zero comm) |
+| `D.sum / .mean / .max / .min / .norm('fro')` | ✓ | ✓ | Single `all_reduce` across batch ranks |
+| `D.full_tensor()` | ✓ | ✓ | Allgather padded values along the sharded batch axis |
+
+**Communication per Krylov iteration** (`VertexShard`): halo exchange + 1–2
+`all_reduce` (method-dependent). All vectors stay sharded; no global
+gather. **BatchShard** has zero inter-rank comm in the inner loop.
 
 ## Persistence (I/O)
 
-Save and load sparse tensors using `safetensors` format:
+Save and load `SparseTensor` instances using `safetensors`:
 
 ```python
-from torch_sla import SparseTensor, DSparseTensor, DSparseMatrix
-from torch_sla import load_sparse_as_partition, load_distributed_as_sparse
+from torch_sla import SparseTensor, save_sparse, load_sparse
 
-# Save SparseTensor
 A = SparseTensor(val, row, col, shape)
 A.save("matrix.safetensors")
-
-# Load SparseTensor
 A = SparseTensor.load("matrix.safetensors", device="cuda")
 
-# Save as partitioned (for distributed loading)
-A.save_distributed("matrix_dist", num_partitions=4)
-
-# Each rank loads only its partition
-rank = dist.get_rank()
-partition = DSparseMatrix.load("matrix_dist", rank, world_size)
-
-# Load partitioned data as single SparseTensor
-A = load_distributed_as_sparse("matrix_dist")
-
-# Load single file as partition (each rank reads full file, keeps its part)
-partition = load_sparse_as_partition("matrix.safetensors", rank, world_size)
+# Matrix Market interop
+from torch_sla import save_mtx, load_mtx
+save_mtx(A, "matrix.mtx")
+A = load_mtx("matrix.mtx")
 ```
 
-### Cross-Format Conversion
-
-| Save Format | Load as SparseTensor | Load as DSparseMatrix |
-|------------|---------------------|----------------------|
-| `A.save("file.safetensors")` | `SparseTensor.load("file")` | `load_sparse_as_partition("file", rank, world_size)` |
-| `A.save_distributed("dir", n)` | `load_distributed_as_sparse("dir")` | `DSparseMatrix.load("dir", rank, world_size)` |
-| `D.save("dir")` | `load_distributed_as_sparse("dir")` | `DSparseTensor.load("dir")` |
+Distributed (`DSparseTensor`) persistence: gather to a global
+`SparseTensor` via `D.full_tensor()` and save that.
 
 ## Nonlinear Solve (Adjoint Method)
 

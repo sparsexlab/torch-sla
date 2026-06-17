@@ -49,7 +49,7 @@
      - **仅迭代法**，~1e-6 精度
    * - 超大型 (> 1.69亿 DOF)
      - 不适用
-     - ``DSparseMatrix`` 多卡
+     - ``DSparseTensor`` 多卡
      - 多卡域分解并行
 
 核心发现
@@ -561,7 +561,7 @@ CUDA 用法
 3. **CPU 端推荐 scipy+lu**: 速度与精度兼顾
 4. **GPU 小规模问题用 cudss+cholesky**: 200万 DOF 以下最快的直接法
 5. **GPU 大规模问题用 pytorch+cg**: 单卡可达 1.69 亿 DOF
-6. **超大规模用多卡并行**: DSparseMatrix 支持域分解，3 卡可达 5 亿+ DOF
+6. **超大规模用多卡并行**: DSparseTensor 支持域分解，3 卡可达 5 亿+ DOF
 7. **推荐 cupy** 用于 GPU 迭代求解器 (CG, GMRES) 或作为直接求解器备选
 8. **重复求解缓存 LU 分解**: 用 ``A.lu()`` 复用分解结果
 

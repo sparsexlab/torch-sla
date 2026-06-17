@@ -51,13 +51,16 @@ from typing import Optional, List, Dict, Literal
 import torch
 
 # Type aliases
-BackendType = Literal['scipy', 'eigen', 'pytorch', 'cupy', 'cudss', 'auto']
+BackendType = Literal['scipy', 'eigen', 'pytorch', 'cupy', 'cudss', 'pyamg',
+                      'amgx', 'auto']
 MethodType = Literal[
     'auto',
     # Direct methods
     'lu', 'umfpack', 'cholesky', 'ldlt',
     # Iterative methods
-    'cg', 'cgs', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr', 'lsqr', 'lsmr'
+    'cg', 'cgs', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr', 'lsqr', 'lsmr',
+    # AMG variants (pyamg / amgx / petsc)
+    'amg', 'ruge_stuben', 'smoothed_aggregation', 'sa',
 ]
 
 # Backend -> supported methods mapping
@@ -67,6 +70,8 @@ BACKEND_METHODS: Dict[str, List[str]] = {
     'pytorch': ['cg', 'bicgstab'],  # PyTorch-native iterative with Jacobi preconditioning
     'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
     'cudss': ['lu', 'cholesky', 'ldlt'],
+    'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],
+    'amgx': ['amg', 'cg', 'pcg', 'bicgstab', 'pbicgstab', 'gmres', 'fgmres'],
 }
 
 # Default methods for each backend (based on benchmarks)
@@ -76,6 +81,8 @@ DEFAULT_METHODS: Dict[str, str] = {
     'pytorch': 'cg',         # Use CG for SPD (most common), with Jacobi preconditioning
     'cupy': 'lu',             # GPU direct solver via SuperLU
     'cudss': 'cholesky',     # Best for CUDA: fastest + high precision
+    'pyamg': 'ruge_stuben',   # Classical AMG; works for most PDE / SPD problems
+    'amgx':  'pbicgstab',     # AmgX's most robust default; AMG-preconditioned
 }
 
 # Threshold for switching from direct to iterative on CUDA (DOF)
@@ -152,6 +159,67 @@ def is_cudss_available() -> bool:
             except ImportError:
                 _cudss_available = False
     return _cudss_available
+
+
+_torch_spsolve_available = None
+def is_torch_spsolve_available() -> bool:
+    """Check if :func:`torch.sparse.spsolve` is dispatchable on the
+    default device. On PyTorch 2.12 the underlying ``aten::_spsolve``
+    op is only registered for MPS; CPU/CUDA raise ``NotImplementedError``
+    so this returns False on those devices.
+
+    When upstream PyTorch lands CPU/CUDA kernels for ``_spsolve``,
+    this will start returning True with no code change here.
+    """
+    global _torch_spsolve_available
+    if _torch_spsolve_available is None:
+        try:
+            from .torch_spsolve_backend import is_torch_spsolve_supported
+            # Probe on the default device (CPU is safest -- works as
+            # a "does the dispatch table have an entry" check).
+            _torch_spsolve_available = is_torch_spsolve_supported(
+                torch.device("cpu"))
+        except Exception:
+            _torch_spsolve_available = False
+    return _torch_spsolve_available
+
+
+_pyamg_available = None
+def is_pyamg_available() -> bool:
+    """Check if the PyAMG backend is available (CPU AMG; cross-platform)."""
+    global _pyamg_available
+    if _pyamg_available is None:
+        try:
+            import pyamg  # noqa: F401
+            _pyamg_available = True
+        except ImportError:
+            _pyamg_available = False
+    return _pyamg_available
+
+
+_amgx_available = None
+def is_amgx_available() -> bool:
+    """Check if the AmgX backend is available (Linux + Windows + NVIDIA CUDA).
+
+    The ``torch-amgx`` PyPI package (https://pypi.org/p/torch-amgx) bundles
+    the AmgX shared library inside its wheels for Linux + Windows. Install
+    via::
+
+        pip install torch-amgx                # or: pip install torch-sla[amgx]
+
+    macOS is not supported (NVIDIA does not ship CUDA on macOS).
+    """
+    global _amgx_available
+    if _amgx_available is None:
+        if not _check_cuda():
+            _amgx_available = False
+        else:
+            try:
+                import torch_amgx  # noqa: F401
+                _amgx_available = torch_amgx.is_available()
+            except ImportError:
+                _amgx_available = False
+    return _amgx_available
 
 
 def get_available_backends() -> List[str]:
