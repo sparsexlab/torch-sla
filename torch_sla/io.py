@@ -516,10 +516,112 @@ def save_dsparse(tensor: "DSparseTensor", directory: Union[str, Path],
         print(f"[save_dsparse] rank {rank}: wrote partition_{rank}.safetensors")
 
 
+def _resolve_target_world_size(explicit: Optional[int]) -> int:
+    """Decide the loader's target world_size.
+
+    Precedence: explicit arg → live process group size → 1. Single-
+    process callers get ``1`` so they can read a sharded archive
+    without ``torchrun``.
+    """
+    if explicit is not None:
+        if explicit < 1:
+            raise ValueError(f"target_world_size must be >= 1, got {explicit}")
+        return int(explicit)
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            return int(dist.get_world_size())
+    except (RuntimeError, ImportError):
+        pass
+    return 1
+
+
+def _load_all_shards_collapsed(directory: Path,
+                                global_shape: Tuple[int, int],
+                                placement_axis: int,
+                                num_stored: int,
+                                device: Union[str, torch.device]) -> "DSparseTensor":
+    """Single-process inverse of ``save_sparse_sharded`` / collective
+    ``save_dsparse``: read every shard, stitch the owned-row slices
+    back into one global :class:`SparseTensor`, wrap as a
+    ``mesh=None`` (world_size=1) :class:`DSparseTensor` so callers
+    keep the symmetric API.
+
+    Only ``owned`` rows from each shard contribute -- halo rows are
+    placeholders (zero values) used for halo-exchange addressing on
+    the saving rank, not real entries.
+    """
+    from .distributed import DSparseTensor
+    from .partition import Partition
+    from .sparse_tensor import SparseTensor
+
+    device_ = torch.device(device)
+    all_vals, all_rows, all_cols = [], [], []
+    for pid in range(num_stored):
+        local_st, partition = load_sparse_shard(directory, pid, device=device_)
+        l2g = partition.local_to_global.to(device=device_, dtype=torch.int64)
+        num_owned = int(partition.owned_nodes.numel())
+        # Halo rows ([num_owned, num_local)) carry zero placeholder
+        # entries; drop them before stitching.
+        owned_mask = local_st.row_indices < num_owned
+        r_local = local_st.row_indices[owned_mask]
+        c_local = local_st.col_indices[owned_mask]
+        all_vals.append(local_st.values[owned_mask])
+        all_rows.append(l2g[r_local])
+        all_cols.append(l2g[c_local])
+
+    vals = torch.cat(all_vals) if all_vals else torch.empty(0, device=device_)
+    rows = (torch.cat(all_rows) if all_rows
+            else torch.empty(0, dtype=torch.int64, device=device_))
+    cols = (torch.cat(all_cols) if all_cols
+            else torch.empty(0, dtype=torch.int64, device=device_))
+    full = SparseTensor(vals, rows, cols, shape=global_shape)
+
+    # Trivial single-rank partition: every node owned, no halo,
+    # local==global. Mirrors ``DSparseTensor`` semantics so the
+    # returned object behaves as a ``world_size=1`` shard whose
+    # local tensor IS the global tensor.
+    n = int(global_shape[0])
+    arange = torch.arange(n, dtype=torch.int64, device=device_)
+    trivial = Partition(
+        partition_id=0,
+        local_nodes=arange.clone(),
+        owned_nodes=arange.clone(),
+        halo_nodes=torch.empty(0, dtype=torch.int64, device=device_),
+        neighbor_partitions=[],
+        send_indices={},
+        recv_indices={},
+        global_to_local=arange.clone(),
+        local_to_global=arange.clone(),
+    )
+    return DSparseTensor.from_sparse_local(full, mesh=None, partition=trivial,
+                                            axis=placement_axis,
+                                            global_shape=global_shape)
+
+
 def load_dsparse(directory: Union[str, Path], mesh=None,
                  rank: Optional[int] = None,
+                 target_world_size: Optional[int] = None,
                  device: Union[str, torch.device] = "cpu") -> "DSparseTensor":
-    """Load this rank's shard. Inverse of :func:`save_dsparse`."""
+    """Load a sharded archive into a :class:`DSparseTensor`.
+
+    Three modes, picked from ``target_world_size`` (or, if omitted,
+    a live process group, else ``1``):
+
+    * ``stored_N == target_world_size`` -- fast path; this rank reads
+      ``partition_{rank}.safetensors`` directly. Original
+      :func:`save_dsparse` semantics.
+    * ``target_world_size == 1`` -- single-process gather: read every
+      shard from disk, stitch the owned rows into one global
+      :class:`SparseTensor`, return as a ``mesh=None`` trivial
+      DSparseTensor. Useful for inspection / single-node debug after
+      sharded training.
+    * otherwise -- explicit :class:`NotImplementedError`. True
+      re-partitioning on load (``stored_N != target != 1``) requires
+      a cross-rank shuffle; deferred to a future ``redistribute()``
+      pass. Workaround: load with ``target_world_size=1`` and call
+      ``.full_tensor()`` (or save again at the new world size).
+    """
     _ensure_safetensors()
     from .distributed import DSparseTensor
     from .sparse_tensor import SparseTensor
@@ -531,6 +633,19 @@ def load_dsparse(directory: Union[str, Path], mesh=None,
 
     global_shape = tuple(metadata["shape"])
     placement_axis = int(metadata.get("placement_axis", 0))
+    num_stored = int(metadata["num_partitions"])
+    target_N = _resolve_target_world_size(target_world_size)
+
+    if num_stored != target_N:
+        if target_N == 1:
+            return _load_all_shards_collapsed(
+                directory, global_shape, placement_axis, num_stored, device)
+        raise NotImplementedError(
+            f"stored {num_stored} shards != target world_size {target_N}; "
+            "in-place repartitioning is not implemented yet. "
+            "Workaround: load with target_world_size=1, call "
+            ".full_tensor(), then save_sparse_sharded() at the new size."
+        )
 
     if rank is None:
         try:

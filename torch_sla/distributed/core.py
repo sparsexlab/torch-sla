@@ -865,15 +865,26 @@ class DSparseTensor:
         directory: Any,
         mesh: Any = None,
         rank: Optional[int] = None,
+        target_world_size: Optional[int] = None,
         device: Union[str, torch.device] = "cpu",
     ) -> "DSparseTensor":
-        """Reconstruct this rank's :class:`DSparseTensor` from a
-        directory previously written by :meth:`save` /
-        :func:`save_dsparse`. Convenience for
-        :func:`torch_sla.io.load_dsparse(directory, mesh, rank, device)`.
+        """Reconstruct a :class:`DSparseTensor` from a directory
+        previously written by :meth:`save` / :func:`save_dsparse` /
+        :func:`save_sparse_sharded`.
+
+        Pass ``target_world_size=1`` (or call from a single process
+        with no live ``torch.distributed`` group) to gather all
+        shards into one trivial ``mesh=None`` DSparseTensor -- useful
+        for offline inspection of a sharded archive. If
+        ``stored_num_partitions != target_world_size`` and the
+        target is not 1, raises :class:`NotImplementedError` (true
+        cross-world-size repartition is deferred to a future
+        ``redistribute()``).
         """
         from ..io import load_dsparse
-        return load_dsparse(directory, mesh=mesh, rank=rank, device=device)
+        return load_dsparse(directory, mesh=mesh, rank=rank,
+                             target_world_size=target_world_size,
+                             device=device)
 
 
     # =========================================================================

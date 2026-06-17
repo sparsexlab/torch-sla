@@ -29,6 +29,13 @@ release** -- expect import-path and API changes if you were pinned to
 - **Distributed Krylov + preconditioner shard-space stack**:
   block-Jacobi, AMG (PyAMG + torch-amgx) on shards, gather-owned-to-global,
   vectorised scatter.
+- **Single-process load of a sharded archive**:
+  ``load_dsparse(dir, target_world_size=1)`` (and
+  ``DSparseTensor.load(..., target_world_size=1)``) stitches every
+  shard back into one ``mesh=None`` trivial DSparseTensor, no
+  process group required. Useful for offline inspection. True
+  ``stored != target != 1`` repartition raises ``NotImplementedError``
+  with a workaround hint (deferred to ``redistribute()`` in 0.4).
 - **Differentiable Hutchinson logdet** (single + distributed); SVD adjoint
   via Townsend's formula.
 - **CUDA backward for `det()`** via cuDSS chunked solve (drops the dense
