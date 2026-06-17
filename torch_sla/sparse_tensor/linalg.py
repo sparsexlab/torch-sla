@@ -799,7 +799,8 @@ def _qr_orthonormalize(Z: torch.Tensor) -> torch.Tensor:
     n=2000, m=36 -- because the current kernel doesn't do a reduced
     QR. The (n, m) round-trip CPU is 0.9 ms; ~70x faster. Same
     workaround pattern as :func:`_eigh_with_mps_fallback` used by
-    the example bench.
+    the example bench. Upstream PyTorch issue:
+    https://github.com/pytorch/pytorch/issues/187567
 
     Replaces an earlier hand-written Python-loop CGS2 (twice-iterated
     classical Gram-Schmidt). Profiling on CPU SPD problems showed
