@@ -3,6 +3,48 @@
 All notable changes to this project are documented in this file. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.1] - 2026-06-17
+
+Patch release — `eigsh` correctness + perf fixes on top of v0.3.0.
+
+### Fixed
+
+- **eigsh convergence criterion** now measures the true Ritz residual
+  `‖A x_i - λ_i x_i‖ < tol·|λ_i|` instead of the eigvals-diff heuristic
+  `|λᵢⁿ⁺¹ - λᵢⁿ| < tol·|λᵢ|`. On clustered or near-degenerate spectra
+  the old test fired early; eigenpairs returned with Ritz residual
+  `1e-5..1e-3` for `tol=1e-8`. Found via @TrinitroCat's draft in #32 (#45).
+
+### Changed
+
+- **eigsh reorthogonalisation** switched from a Python-loop CGS2 to a
+  single `torch.linalg.qr` call (LAPACK `GEQRF` on CPU, cuSOLVER on
+  CUDA). Same orthonormality (~1e-16 machine ε), 3-10× faster on CPU
+  at typical block sizes, and end-to-end **2-3.5× faster than
+  `torch.lobpcg`** on CUDA at correct precision. PR #43's "batched
+  CGS2 is GPU-friendlier" hypothesis was right in theory but the
+  Python loop wasn't batched (#45).
+- **`load_dsparse`** gained a `target_world_size` kwarg. When set to
+  `1` (or when no live process group is detected) the loader reads
+  every shard on disk and stitches them into one `mesh=None` trivial
+  `DSparseTensor` — useful for single-node debugging / inspection of
+  a sharded archive. `stored_N != target_N != 1` raises a clear
+  `NotImplementedError` with a workaround hint (in-place repartition
+  deferred to 0.4) (#45).
+
+### Notes
+
+- `eigsh` now emits a `RuntimeWarning` on MPS device — PyTorch's MPS
+  backend forces float32 (caps Ritz residual at `~1e-4..1e-3` on
+  PDE-like operators) and is missing native `linalg.eigh` /
+  efficient tall-skinny `linalg.qr` kernels. The code falls back to
+  CPU round-trips for both, but most of the LOBPCG work then runs
+  on CPU anyway. Filed upstream:
+  [pytorch/pytorch#187567](https://github.com/pytorch/pytorch/issues/187567).
+- Bench / fix-verification scripts moved out of `examples/` (which is
+  user-facing) into `tests/lobpcg/` (internal); user-facing LOBPCG
+  perf demo now lives at `examples/lobpcg/convergence_benchmark.py`.
+
 ## [0.3.0] - 2026-06-17
 
 First minor release after the v0.2.1 baseline. This is a **breaking
@@ -47,7 +89,11 @@ release** -- expect import-path and API changes if you were pinned to
   (no `torch.cat` per iter), CGS2 reorthogonalisation in place of
   full QR. Shared `_lobpcg_core` between single-device and
   distributed `eigsh`. ~8.5× fewer matvecs on clustered spectra
-  (see `examples/lobpcg_convergence_benchmark.py`).
+  (see `examples/lobpcg_convergence_benchmark.py`). Convergence
+  criterion and reorthogonalisation further refined in PR #45 —
+  switched to LAPACK QR for the inner reorth (~2× faster than
+  `torch.lobpcg` on CUDA at correct precision); MPS is now flagged
+  not-recommended due to upstream gaps.
 - **Complex dtype support** + Wirtinger adjoint; Hermitian / HPD matrix
   types auto-detected.
 - **Benchmark API** + SuiteSparse / Synthetic PDE / DIMACS10 datasets.
