@@ -7,7 +7,7 @@ is available.
 
 Usage::
 
-    python examples/lobpcg_convergence_benchmark.py
+    python examples/lobpcg/convergence_benchmark.py
 
 The "old" algorithm is the previous block-steepest-descent (BSD)
 formulation: two-block subspace [X | R], full QR each iteration, no
@@ -253,9 +253,9 @@ def main():
         import os
         here = os.path.dirname(os.path.abspath(__file__))
         out_dir = os.path.normpath(os.path.join(
-            here, "..", "assets", "examples"))
+            here, "..", "..", "assets", "examples", "lobpcg"))
         os.makedirs(out_dir, exist_ok=True)
-        out = os.path.join(out_dir, "lobpcg_convergence.png")
+        out = os.path.join(out_dir, "convergence.png")
         fig.tight_layout()
         fig.savefig(out, dpi=120)
         print(f"\nplot saved to {out}")

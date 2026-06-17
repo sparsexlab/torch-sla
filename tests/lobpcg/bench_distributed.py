@@ -26,7 +26,7 @@ Usage::
 
     NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=0 NCCL_IB_DISABLE=1 \\
         torchrun --nproc-per-node=2 \\
-        examples/lobpcg_fix_comparison_distributed.py
+        tests/lobpcg/bench_distributed.py
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ import torch.distributed as dist
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..")))
+sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "..")))
 
 
 # --------------------------------------------------------------------- #

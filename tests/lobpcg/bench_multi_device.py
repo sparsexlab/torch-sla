@@ -20,7 +20,7 @@ import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from lobpcg_fix_comparison import (  # noqa: E402
+from bench_v1_vs_v2 import (  # noqa: E402
     _cgs2_python_loop,
     _qr_orthonormalize,
     lobpcg_param,
@@ -156,10 +156,10 @@ def main():
     # Persist raw data so multiple runs (different machines) can be
     # combined into one figure later.
     import json
-    out_dir = os.path.normpath(os.path.join(HERE, "..", "assets", "examples"))
+    out_dir = os.path.join(HERE, "data")
     os.makedirs(out_dir, exist_ok=True)
     devs_tag = "_".join(per_device.keys())
-    json_path = os.path.join(out_dir, f"lobpcg_fix_comparison_data_{devs_tag}.json")
+    json_path = os.path.join(out_dir, f"{devs_tag}.json")
     with open(json_path, "w") as f:
         json.dump(per_device, f, indent=2)
     print(f"raw data: {json_path}")
@@ -200,9 +200,9 @@ def main():
             ax_e.legend(loc="upper left", fontsize=9)
             ax_e.grid(True, alpha=0.3, which="both")
 
-        out_dir = os.path.normpath(os.path.join(HERE, "..", "assets", "examples"))
+        out_dir = os.path.join(HERE, "assets")
         os.makedirs(out_dir, exist_ok=True)
-        out = os.path.join(out_dir, "lobpcg_fix_comparison_all.png")
+        out = os.path.join(out_dir, "comparison_all.png")
         fig.tight_layout()
         fig.savefig(out, dpi=120)
         print(f"\ncombined plot: {out}")

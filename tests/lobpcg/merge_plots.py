@@ -22,14 +22,14 @@ import matplotlib.pyplot as plt
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ASSETS = os.path.normpath(os.path.join(HERE, "..", "assets", "examples"))
+DATA = os.path.join(HERE, "data")
+ASSETS = os.path.join(HERE, "assets")
 
 
 def main():
-    files = sorted(glob.glob(os.path.join(
-        ASSETS, "lobpcg_fix_comparison_data_*.json")))
+    files = sorted(glob.glob(os.path.join(DATA, "*.json")))
     if not files:
-        raise SystemExit("no data files found in {ASSETS}")
+        raise SystemExit(f"no data files found in {DATA}")
 
     merged = {}
     for path in files:
@@ -84,7 +84,8 @@ def main():
         ax_e.legend(loc="upper left", fontsize=9)
         ax_e.grid(True, alpha=0.3, which="both")
 
-    out = os.path.join(ASSETS, "lobpcg_fix_comparison_all.png")
+    os.makedirs(ASSETS, exist_ok=True)
+    out = os.path.join(ASSETS, "comparison_all.png")
     fig.tight_layout()
     fig.savefig(out, dpi=120)
     print(f"\ncombined plot ({n_devs} devices): {out}")

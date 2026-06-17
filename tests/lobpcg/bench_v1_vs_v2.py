@@ -19,7 +19,7 @@ We bench three variants against ``torch.lobpcg`` on a banded SPD:
   ref  = torch.lobpcg(sparse_coo)
 
 Prints a tabular summary. The headline plot lives in
-``assets/examples/lobpcg_fix_comparison_all.png``, produced by
+``tests/lobpcg/assets/comparison_all.png``, produced by
 ``lobpcg_fix_comparison_multi_device.py`` (multi-device sweep) +
 ``lobpcg_fix_comparison_merge.py`` (merge per-device JSON dumps).
 """
@@ -236,9 +236,9 @@ def main():
         print()
 
     print("\nFor the headline CPU + CUDA combined plot, run:")
-    print("  python examples/lobpcg_fix_comparison_multi_device.py   # collect")
-    print("  python examples/lobpcg_fix_comparison_merge.py          # render")
-    print("Plot lands at assets/examples/lobpcg_fix_comparison_all.png")
+    print("  python tests/lobpcg/bench_multi_device.py   # collect")
+    print("  python tests/lobpcg/merge_plots.py          # render")
+    print("Plot lands at tests/lobpcg/assets/comparison_all.png")
 
 
 if __name__ == "__main__":
