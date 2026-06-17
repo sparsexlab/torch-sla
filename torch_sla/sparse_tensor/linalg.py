@@ -437,8 +437,17 @@ def eigsh(
     
     Notes
     -----
+    **Device support:** CPU and CUDA are first-class. MPS is not
+    recommended: PyTorch's MPS backend forces float32 (caps Ritz
+    residual at ~1e-4..1e-3 on PDE-like operators) and is missing
+    native ``linalg.eigh`` / efficient tall-skinny ``linalg.qr``
+    kernels, so the core internally round-trips both to CPU as a
+    workaround. The fallback works but most of the LOBPCG work
+    actually happens on CPU; a ``RuntimeWarning`` fires on every
+    MPS call to point users at ``device='cpu'`` or ``'cuda'``.
+
     **Gradient Support:**
-    
+
     - Both CPU and CUDA: Fully differentiable via adjoint method
     - Uses O(1) graph nodes regardless of iteration count
     - Gradient computed as: ∂L/∂A = Σ_i (∂L/∂λ_i) * v_i @ v_i.T
@@ -889,6 +898,19 @@ def _lobpcg_core(
         raise ValueError(f"k={k} exceeds matrix dimension n={n}")
     k = max(k, 1)
     m = min(max(2 * k, k + 2), n)
+
+    if device.type == "mps":
+        warnings.warn(
+            "LOBPCG on MPS is not recommended: PyTorch's MPS backend "
+            "forces float32 (Ritz residual caps at ~1e-4..1e-3 for "
+            "PDE-like operators) and is missing native kernels for "
+            "linalg.eigh and tall-skinny linalg.qr -- we round-trip "
+            "both to CPU as a workaround, so most of the work "
+            "actually runs on CPU anyway. Prefer device='cpu' or "
+            "'cuda'. This warning fires once per call.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     # Reproducible random init when a seed is given. ``mps`` doesn't
     # support a typed generator; fall back to CPU sampling + transfer.

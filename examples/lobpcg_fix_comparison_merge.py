@@ -42,8 +42,17 @@ def main():
             merged[dev] = payload
         print(f"loaded {path}: devices = {list(data.keys())}")
 
-    # Preferred column order: CPU, MPS, CUDA
-    order = [d for d in ("cpu", "mps", "cuda") if d in merged]
+    # Skip MPS in the published plot. Even with our CPU-roundtrip
+    # workarounds for the MPS-missing eigh / O(n^2) qr kernels, MPS
+    # forces float32 which caps the achievable Ritz residual at
+    # ~1e-4..1e-3 on PDE-like operators -- the precision panel
+    # would compress against the y-axis ceiling and bias readers
+    # against the algorithm. ``_lobpcg_core`` now emits a
+    # ``RuntimeWarning`` on MPS to point users at CPU/CUDA. Raw MPS
+    # data still lives in the JSON if anyone wants to plot it.
+    include_mps = os.environ.get("INCLUDE_MPS") == "1"
+    devs = ("cpu", "mps", "cuda") if include_mps else ("cpu", "cuda")
+    order = [d for d in devs if d in merged]
     n_devs = len(order)
 
     fig, axes = plt.subplots(2, n_devs, figsize=(6 * n_devs, 9),
