@@ -18,8 +18,10 @@ We bench three variants against ``torch.lobpcg`` on a banded SPD:
   v2   = convergence fix + QR swap (this PR)
   ref  = torch.lobpcg(sparse_coo)
 
-Saves ``assets/examples/lobpcg_fix_comparison.png`` (wall-clock +
-precision vs matrix size).
+Prints a tabular summary. The headline plot lives in
+``assets/examples/lobpcg_fix_comparison_all.png``, produced by
+``lobpcg_fix_comparison_multi_device.py`` (multi-device sweep) +
+``lobpcg_fix_comparison_merge.py`` (merge per-device JSON dumps).
 """
 from __future__ import annotations
 
@@ -233,49 +235,10 @@ def main():
             print(f"{n:>5d}  {label:22s}  {t*1000:>9.2f} {err:>10.2e}")
         print()
 
-    # Plot
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import os
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
-
-        colors = {"v1 (pre-fix)": "#d62728",
-                  "v1.5 (conv. fix only)": "#ff7f0e",
-                  "v2 (this PR)": "#2ca02c",
-                  "torch.lobpcg": "#1f77b4"}
-
-        for label in ["v1 (pre-fix)", "v1.5 (conv. fix only)",
-                      "v2 (this PR)", "torch.lobpcg"]:
-            style = "o-" if label != "torch.lobpcg" else "s--"
-            ax1.plot(sizes, times[label], style, label=label,
-                     color=colors[label], markersize=7, linewidth=2)
-            ax2.semilogy(sizes, errs[label], style, label=label,
-                         color=colors[label], markersize=7, linewidth=2)
-        ax1.set_xlabel("matrix size n")
-        ax1.set_ylabel("wall-clock (ms)")
-        ax1.set_title("Speed: PR #45 fixes vs torch.lobpcg baseline")
-        ax1.legend(loc="upper left")
-        ax1.grid(True, alpha=0.3)
-
-        ax2.set_xlabel("matrix size n")
-        ax2.set_ylabel(r"$\max_i\, |\lambda_i - \lambda_i^{\rm true}|$")
-        ax2.set_title("Precision: convergence-criterion fix gives true tol=1e-8")
-        ax2.axhline(1e-8, color="gray", linestyle=":", label="tol = 1e-8")
-        ax2.legend(loc="upper left")
-        ax2.grid(True, alpha=0.3, which="both")
-
-        out_dir = os.path.normpath(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "assets", "examples"))
-        os.makedirs(out_dir, exist_ok=True)
-        out = os.path.join(out_dir, "lobpcg_fix_comparison.png")
-        fig.tight_layout()
-        fig.savefig(out, dpi=120)
-        print(f"\nplot saved to {out}")
-    except ImportError:
-        print("\n(matplotlib not installed; skipping plot)")
+    print("\nFor the headline CPU + CUDA combined plot, run:")
+    print("  python examples/lobpcg_fix_comparison_multi_device.py   # collect")
+    print("  python examples/lobpcg_fix_comparison_merge.py          # render")
+    print("Plot lands at assets/examples/lobpcg_fix_comparison_all.png")
 
 
 if __name__ == "__main__":
