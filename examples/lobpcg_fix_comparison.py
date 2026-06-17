@@ -75,6 +75,17 @@ def _cgs2_python_loop(Z: torch.Tensor) -> torch.Tensor:
 
 
 def _qr_orthonormalize(Z: torch.Tensor) -> torch.Tensor:
+    # MPS torch.linalg.qr on tall-skinny (n, m) blocks scales as
+    # O(n^2) -- 62 ms at n=2000, m=36. CPU round-trip is 0.9 ms,
+    # ~70x faster. Same pattern as _eigh_with_mps_fallback.
+    if Z.device.type == "mps":
+        Q_cpu, R_cpu = torch.linalg.qr(Z.cpu())
+        diag = R_cpu.diagonal().abs()
+        eps = torch.finfo(Z.dtype).eps * 100 * diag.max().clamp(min=1)
+        keep = diag > eps
+        if not bool(keep.all()):
+            Q_cpu = Q_cpu[:, keep]
+        return Q_cpu.to(Z.device)
     Q, R = torch.linalg.qr(Z)
     diag = R.diagonal().abs()
     eps = torch.finfo(Z.dtype).eps * 100 * diag.max().clamp(min=1)

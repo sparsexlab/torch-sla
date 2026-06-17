@@ -91,9 +91,15 @@ def main():
             times["torch.lobpcg"] = []
             errs["torch.lobpcg"] = []
 
-        # MPS forces float32; CPU/CUDA stay float64
+        # MPS forces float32; CPU/CUDA stay float64. Tolerance is
+        # device-appropriate: tol=1e-8 is below float32 machine
+        # epsilon (~1e-7), so all variants would hit maxiter and
+        # the comparison would degenerate to "300 iter × per-iter
+        # cost". Loosen to 1e-5 on MPS so convergence-judge actually
+        # fires.
         use_float32 = (dev_name == "mps")
         dtype = torch.float32 if use_float32 else torch.float64
+        device_tol = 1e-5 if use_float32 else 1e-8
 
         for n in sizes:
             A_coo_cpu, A_dense_cpu = make_sparse_spd(n)
@@ -112,7 +118,7 @@ def main():
                     torch.cuda.synchronize()
                 t0 = time.perf_counter()
                 vals_t, _ = torch.lobpcg(A_coo, k=k, largest=True,
-                                          niter=300, tol=1e-8)
+                                          niter=300, tol=device_tol)
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 t = time.perf_counter() - t0
@@ -130,7 +136,7 @@ def main():
                     vals, _ = lobpcg_param(
                         matvec, n, k,
                         dtype=dtype, device=device,
-                        largest=True, maxiter=300, tol=1e-8, seed=0,
+                        largest=True, maxiter=300, tol=device_tol, seed=0,
                         **opts,
                     )
                     if device.type == "cuda":

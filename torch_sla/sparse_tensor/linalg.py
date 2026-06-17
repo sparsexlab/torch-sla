@@ -785,6 +785,13 @@ def lu(self) -> "LUFactorization":
 def _qr_orthonormalize(Z: torch.Tensor) -> torch.Tensor:
     """Orthonormalise the columns of ``Z`` via a single LAPACK QR.
 
+    Special case for MPS: empirically the Metal ``torch.linalg.qr``
+    on tall-skinny ``(n, m)`` blocks scales as O(n²) -- 62 ms at
+    n=2000, m=36 -- because the current kernel doesn't do a reduced
+    QR. The (n, m) round-trip CPU is 0.9 ms; ~70x faster. Same
+    workaround pattern as :func:`_eigh_with_mps_fallback` used by
+    the example bench.
+
     Replaces an earlier hand-written Python-loop CGS2 (twice-iterated
     classical Gram-Schmidt). Profiling on CPU SPD problems showed
     that loop dominated the LOBPCG per-iter cost: at n=200, m=18
@@ -803,6 +810,14 @@ def _qr_orthonormalize(Z: torch.Tensor) -> torch.Tensor:
     epsilon -- happens for rank-deficient ``[X | R | P]`` near
     convergence.
     """
+    if Z.device.type == "mps":
+        Q_cpu, R_cpu = torch.linalg.qr(Z.cpu())
+        diag = R_cpu.diagonal().abs()
+        eps = torch.finfo(Z.dtype).eps * 100 * diag.max().clamp(min=1)
+        keep = diag > eps
+        if not bool(keep.all()):
+            Q_cpu = Q_cpu[:, keep]
+        return Q_cpu.to(Z.device)
     Q, R = torch.linalg.qr(Z)
     diag = R.diagonal().abs()
     eps = torch.finfo(Z.dtype).eps * 100 * diag.max().clamp(min=1)
