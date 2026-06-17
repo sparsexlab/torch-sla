@@ -89,33 +89,43 @@ def main():
             print("ERROR: launch with torchrun --nproc-per-node>=2",
                   file=sys.stderr)
         return
-    if not torch.cuda.is_available():
-        if rank == 0:
-            print("ERROR: CUDA required for NCCL", file=sys.stderr)
-        return
-
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-    dist.init_process_group(backend="nccl", init_method="env://",
+    # Backend / device pick:
+    #   - NCCL + CUDA when both are available (best fidelity to real
+    #     multi-GPU distributed)
+    #   - gloo + CPU otherwise (Windows PyTorch ships without NCCL;
+    #     v1-vs-v2 ratio is the question of interest, and collective
+    #     overhead applies equally to both variants either way)
+    if dist.is_nccl_available() and torch.cuda.is_available():
+        backend = "nccl"
+        n_cuda = torch.cuda.device_count()
+        dev_idx = local_rank % max(n_cuda, 1)
+        torch.cuda.set_device(dev_idx)
+        device = torch.device(f"cuda:{dev_idx}")
+        mesh_device = "cuda"
+    else:
+        backend = "gloo"
+        device = torch.device("cpu")
+        mesh_device = "cpu"
+    dist.init_process_group(backend=backend, init_method="env://",
                             rank=rank, world_size=world_size)
 
     try:
-        from torch.distributed.device_mesh import init_device_mesh
-        from torch_sla import DSparseTensor, SparseTensor
+        from torch_sla import SparseTensor
         import torch_sla.sparse_tensor.linalg as linalg_module
 
         if rank == 0:
-            print(f"world_size={world_size}, device={device}")
-            print(f"NCCL_P2P_DISABLE={os.environ.get('NCCL_P2P_DISABLE','unset')}")
-            print(f"NCCL_SHM_DISABLE={os.environ.get('NCCL_SHM_DISABLE','unset')}")
-            print(f"GPU: {torch.cuda.get_device_name(local_rank)}")
+            print(f"world_size={world_size}, device={device}, backend={backend}")
+            if device.type == "cuda":
+                print(f"GPU: {torch.cuda.get_device_name(local_rank)}")
             print()
             print(f"{'n':>5s}  {'variant':18s}  {'time_ms':>9s} {'max_err':>10s}")
 
-        mesh = init_device_mesh("cuda", (world_size,))
+        # Use partition_for_rank (the same API the existing
+        # test_dsparse_eigsh_multiprocess.py uses) so we don't
+        # need a DeviceMesh and so we work on backends that don't
+        # expose NCCL (Windows native PyTorch).
         sizes = [200, 400, 700, 1000]
         k = 6
-
         original_orth = linalg_module._cgs2_inplace
 
         for n in sizes:
@@ -127,17 +137,18 @@ def main():
                                 idx[1].to(device),
                                 shape=(n, n))
             gt = sorted(np.linalg.eigvalsh(A_dense.numpy()), reverse=True)[:k]
-
-            D = DSparseTensor.partition(A_st, mesh, partition_method="simple")
+            D = A_st.partition_for_rank(rank=rank, world_size=world_size)
 
             for label, orth_fn in [("v1 (Py CGS2)", _cgs2_python_loop),
                                     ("v2 (LAPACK QR)", original_orth)]:
                 linalg_module._cgs2_inplace = orth_fn
-                torch.cuda.synchronize()
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
                 dist.barrier()
                 t0 = time.perf_counter()
                 vals_d, _ = D.eigsh(k=k, which="LM", maxiter=300, tol=1e-8)
-                torch.cuda.synchronize()
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
                 dist.barrier()
                 t = time.perf_counter() - t0
                 err = max(abs(g - e) for g, e in zip(gt, vals_d.tolist()))
