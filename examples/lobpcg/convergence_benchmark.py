@@ -248,6 +248,11 @@ def main():
                      f"(n={n}, k={k}, kappa=1e4)")
         ax.legend()
         ax.grid(True, which="both", alpha=0.3)
+        fig.text(0.99, 0.01,
+                 "rewrite prompted by @TrinitroCat -- "
+                 "sparsexlab/torch-sla#32",
+                 ha="right", va="bottom", fontsize=8,
+                 color="gray", style="italic")
         # Save next to the other example plots in the repo so PR
         # descriptions and docs can reference it by relative path.
         import os
