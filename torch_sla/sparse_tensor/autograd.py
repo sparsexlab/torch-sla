@@ -610,6 +610,13 @@ def _sparse_sparse_matmul_with_sparse_grad(
 # LOBPCG and Power Iteration for CUDA
 # =============================================================================
 
+
+# Thin shim: the LOBPCG algorithmic core lives in
+# :mod:`torch_sla.sparse_tensor.linalg` so both the autograd path
+# (``EigshAdjoint`` below) and the distributed wrapper
+# (``torch_sla.distributed.eigsh.eigsh_shard``) share one
+# implementation.
+
 def _lobpcg_eigsh(
     A_matvec,
     n: int,
@@ -618,73 +625,16 @@ def _lobpcg_eigsh(
     device: torch.device,
     largest: bool = True,
     maxiter: int = 1000,
-    tol: float = 1e-8
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    LOBPCG eigenvalue solver for sparse matrices on any device.
-    
-    Uses subspace iteration with Rayleigh-Ritz procedure to find
-    the k largest or smallest eigenvalues.
-    
-    Parameters
-    ----------
-    A_matvec : callable
-        Function that computes A @ x for input x of shape [n] or [n, m].
-    n : int
-        Matrix dimension.
-    k : int
-        Number of eigenvalues to compute.
-    dtype : torch.dtype
-        Data type.
-    device : torch.device
-        Device to compute on.
-    largest : bool, optional
-        If True, compute largest eigenvalues. Default: True.
-    maxiter : int, optional
-        Maximum iterations. Default: 1000.
-    tol : float, optional
-        Convergence tolerance. Default: 1e-8.
-    
-    Returns
-    -------
-    Tuple[torch.Tensor, torch.Tensor]
-        (eigenvalues, eigenvectors) with shapes [k] and [n, k].
-    """
-    m = min(2 * k, n)
-    X = torch.randn(n, m, dtype=dtype, device=device)
-    X, _ = torch.linalg.qr(X)
-    
-    eigenvalues_prev = None
-    
-    for iteration in range(maxiter):
-        AX = A_matvec(X)
-        H = X.T @ AX
-        eigenvalues, eigenvectors = torch.linalg.eigh(H)
-        
-        if largest:
-            idx = eigenvalues.argsort(descending=True)
-        else:
-            idx = eigenvalues.argsort()
-        
-        eigenvalues = eigenvalues[idx]
-        eigenvectors = eigenvectors[:, idx]
-        X = X @ eigenvectors
-        
-        if eigenvalues_prev is not None:
-            diff = (eigenvalues[:k] - eigenvalues_prev[:k]).abs()
-            if (diff < tol * eigenvalues[:k].abs().clamp(min=1e-10)).all():
-                break
-        eigenvalues_prev = eigenvalues.clone()
-        
-        if iteration < maxiter - 1:
-            AX = A_matvec(X)
-            residual = AX - X * eigenvalues.unsqueeze(0)
-            combined = torch.cat([X[:, :k], residual[:, :k]], dim=1)
-            X, _ = torch.linalg.qr(combined)
-            if X.size(1) < m:
-                extra = torch.randn(n, m - X.size(1), dtype=dtype, device=device)
-                X = torch.cat([X, extra], dim=1)
-                X, _ = torch.linalg.qr(X)
-    
-    return eigenvalues[:k], X[:, :k]
+    tol: float = 1e-8,
+    T_apply=None,
+    seed: Optional[int] = None,
+):
+    """LOBPCG eigsh -- delegates to :func:`linalg._lobpcg_core`."""
+    from .linalg import _lobpcg_core
+    return _lobpcg_core(
+        A_matvec, n, k,
+        dtype=dtype, device=device,
+        largest=largest, maxiter=maxiter, tol=tol,
+        T_apply=T_apply, seed=seed,
+    )
 
