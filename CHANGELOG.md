@@ -42,11 +42,12 @@ release** -- expect import-path and API changes if you were pinned to
   `O(n^2)` inverse).
 - **`sampled_addmm` fast path** for `SparseSparseMatmul` backward (no
   `to_dense`).
-- **LOBPCG rewrite** (#43): proper 3-block `[X | R | P]` subspace,
-  pre-allocated buffers (no `torch.cat` per iter), CGS2 reorthogonalisation
-  in place of full QR. Shared `_lobpcg_core` between single-device and
-  distributed `eigsh`. ~8.5× fewer matvecs on clustered spectra (see
-  `examples/lobpcg_convergence_benchmark.py`).
+- **LOBPCG rewrite** (#43, in response to @TrinitroCat's review in
+  #32): proper 3-block `[X | R | P]` subspace, pre-allocated buffers
+  (no `torch.cat` per iter), CGS2 reorthogonalisation in place of
+  full QR. Shared `_lobpcg_core` between single-device and
+  distributed `eigsh`. ~8.5× fewer matvecs on clustered spectra
+  (see `examples/lobpcg_convergence_benchmark.py`).
 - **Complex dtype support** + Wirtinger adjoint; Hermitian / HPD matrix
   types auto-detected.
 - **Benchmark API** + SuiteSparse / Synthetic PDE / DIMACS10 datasets.
