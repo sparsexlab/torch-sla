@@ -437,8 +437,17 @@ def eigsh(
     
     Notes
     -----
+    **Device support:** CPU and CUDA are first-class. MPS is not
+    recommended: PyTorch's MPS backend forces float32 (caps Ritz
+    residual at ~1e-4..1e-3 on PDE-like operators) and is missing
+    native ``linalg.eigh`` / efficient tall-skinny ``linalg.qr``
+    kernels, so the core internally round-trips both to CPU as a
+    workaround. The fallback works but most of the LOBPCG work
+    actually happens on CPU; a ``RuntimeWarning`` fires on every
+    MPS call to point users at ``device='cpu'`` or ``'cuda'``.
+
     **Gradient Support:**
-    
+
     - Both CPU and CUDA: Fully differentiable via adjoint method
     - Uses O(1) graph nodes regardless of iteration count
     - Gradient computed as: ∂L/∂A = Σ_i (∂L/∂λ_i) * v_i @ v_i.T
@@ -782,35 +791,56 @@ def lu(self) -> "LUFactorization":
 # ====================================================================== #
 
 
-def _cgs2_inplace(Z: torch.Tensor) -> torch.Tensor:
-    """Twice-iterated classical Gram-Schmidt orthonormalisation in-place.
+def _qr_orthonormalize(Z: torch.Tensor) -> torch.Tensor:
+    """Orthonormalise the columns of ``Z`` via a single LAPACK QR.
 
-    Two CGS sweeps give numerical reliability competitive with
-    Householder QR (Giraud et al., 2005) at a fraction of the cost
-    when the input is already mostly orthonormal -- the case in every
-    LOBPCG iteration after the first. Cheaper than a full
-    ``torch.linalg.qr(Z)`` because CGS2 stays in level-2 BLAS / matmul
-    territory (GPU-friendlier).
+    Special case for MPS: empirically the Metal ``torch.linalg.qr``
+    on tall-skinny ``(n, m)`` blocks scales as O(n²) -- 62 ms at
+    n=2000, m=36 -- because the current kernel doesn't do a reduced
+    QR. The (n, m) round-trip CPU is 0.9 ms; ~70x faster. Same
+    workaround pattern as :func:`_eigh_with_mps_fallback` used by
+    the example bench.
 
-    Drops trailing zero columns (rank deficiency in [X | R | P] near
-    convergence).
+    Replaces an earlier hand-written Python-loop CGS2 (twice-iterated
+    classical Gram-Schmidt). Profiling on CPU SPD problems showed
+    that loop dominated the LOBPCG per-iter cost: at n=200, m=18
+    the loop took 448 us while ``torch.linalg.qr`` returned in 46 us
+    -- a ~10x gap with identical orthonormality (both at machine
+    epsilon, ~1e-16). The PR #43 hypothesis that "CGS2 is GPU-
+    friendlier" requires a batched (matrix-matrix) CGS2; a Python
+    for-loop pays per-column interpreter overhead that erases the
+    win on both CPU and GPU.
+
+    ``torch.linalg.qr`` dispatches to LAPACK ``GEQRF`` on CPU and
+    cuSOLVER on CUDA, both of which are heavily tuned for tall-skinny
+    matrices like the (n, 3m) subspace we feed in here.
+
+    Drops columns whose normalised diagonal of R is below machine
+    epsilon -- happens for rank-deficient ``[X | R | P]`` near
+    convergence.
     """
-    eps = torch.finfo(Z.dtype).eps * 100
-    for _ in range(2):
-        for j in range(Z.shape[1]):
-            if j > 0:
-                coeff = Z[:, :j].T @ Z[:, j]
-                Z[:, j] -= Z[:, :j] @ coeff
-            nrm = Z[:, j].norm()
-            if nrm > eps:
-                Z[:, j] /= nrm
-            else:
-                Z[:, j].zero_()
-    col_norms = Z.norm(dim=0)
-    valid = col_norms > 0.5
-    if not bool(valid.all()):
-        Z = Z[:, valid]
-    return Z
+    if Z.device.type == "mps":
+        Q_cpu, R_cpu = torch.linalg.qr(Z.cpu())
+        diag = R_cpu.diagonal().abs()
+        eps = torch.finfo(Z.dtype).eps * 100 * diag.max().clamp(min=1)
+        keep = diag > eps
+        if not bool(keep.all()):
+            Q_cpu = Q_cpu[:, keep]
+        return Q_cpu.to(Z.device)
+    Q, R = torch.linalg.qr(Z)
+    diag = R.diagonal().abs()
+    eps = torch.finfo(Z.dtype).eps * 100 * diag.max().clamp(min=1)
+    keep = diag > eps
+    if not bool(keep.all()):
+        Q = Q[:, keep]
+    return Q
+
+
+# Kept under the old name for callers that already imported it (none
+# in-tree besides ``_lobpcg_core``, but the name shows up in the
+# convergence-benchmark example). New code should call
+# ``_qr_orthonormalize`` directly.
+_cgs2_inplace = _qr_orthonormalize
 
 
 def _lobpcg_core(
@@ -841,19 +871,46 @@ def _lobpcg_core(
        ``AZ`` allocated once; the hot loop allocates only the small
        (3m x 3m) Hessian.
 
-    3. **CGS2 instead of full QR**. ``_cgs2_inplace`` runs classical
-       Gram-Schmidt twice; matches Householder QR for stability when
-       inputs are already mostly orthonormal.
+    3. **LAPACK QR for re-orthonormalisation**. A single
+       ``torch.linalg.qr`` call (dispatches to LAPACK ``GEQRF`` on CPU,
+       cuSOLVER on CUDA). Earlier code used a Python-loop CGS2 which
+       was ~10x slower than QR on CPU at typical block sizes (m ~ 12-36)
+       with identical orthonormality, because the per-column interpreter
+       overhead erased the level-2-BLAS advantage CGS2 has in theory.
 
     Internal block size is ``m = min(max(2k, k+2), n)`` (matches
     scipy.sparse.linalg.lobpcg) to give buffer columns that resolve
     closely-clustered extreme eigenvalues; the final return slices
     back to the requested ``k``.
+
+    Convergence is judged on the **Ritz residual norm**
+    ``||A x_i - lambda_i x_i||`` vs ``tol * |lambda_i|`` for
+    i = 1..k. The earlier eigvals-diff test (
+    ``|lambda_i^{n+1} - lambda_i^n| < tol``) tripped early on
+    clustered or near-degenerate spectra because successive
+    Rayleigh-Ritz steps could re-pick the same Ritz coordinate
+    without actually reducing the residual -- the eigenvalue
+    looked stable while the eigenvector was still wrong by
+    1e-3..1e-5. The residual-norm check is the true Ritz quality
+    metric.
     """
     if k > n:
         raise ValueError(f"k={k} exceeds matrix dimension n={n}")
     k = max(k, 1)
     m = min(max(2 * k, k + 2), n)
+
+    if device.type == "mps":
+        warnings.warn(
+            "LOBPCG on MPS is not recommended: PyTorch's MPS backend "
+            "forces float32 (Ritz residual caps at ~1e-4..1e-3 for "
+            "PDE-like operators) and is missing native kernels for "
+            "linalg.eigh and tall-skinny linalg.qr -- we round-trip "
+            "both to CPU as a workaround, so most of the work "
+            "actually runs on CPU anyway. Prefer device='cpu' or "
+            "'cuda'. This warning fires once per call.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     # Reproducible random init when a seed is given. ``mps`` doesn't
     # support a typed generator; fall back to CPU sampling + transfer.
@@ -867,7 +924,6 @@ def _lobpcg_core(
     P = torch.zeros_like(X)
     Z = torch.empty(n, 3 * m, dtype=dtype, device=device)
     eigenvalues = torch.empty(m, dtype=dtype, device=device)
-    eigenvalues_prev = None
 
     # Initial Rayleigh-Ritz step.
     AX.copy_(matvec(X))
@@ -887,6 +943,18 @@ def _lobpcg_core(
         torch.mul(X, eigenvalues.unsqueeze(0), out=R)
         R.neg_()
         R.add_(AX)
+
+        # Convergence on the TRUE Ritz residual (pre-preconditioner).
+        # ``T_apply`` rescales the residual to be a useful search
+        # direction, but ||T R|| is not the actual eigenpair error --
+        # checking it would let preconditioned LOBPCG report bogus
+        # convergence whenever T happens to map the residual to a
+        # small vector.
+        res_norms = R[:, :k].norm(dim=0)
+        denom = eigenvalues[:k].abs().clamp(min=1e-10)
+        if (res_norms < tol * denom).all():
+            break
+
         if T_apply is not None:
             R = T_apply(R)
 
@@ -918,19 +986,7 @@ def _lobpcg_core(
         X.copy_(X_new)
         AX.copy_(AX_new)
         P.copy_(P_new)
-        new_eigvals = eigvals[:m]
-
-        if eigenvalues_prev is not None:
-            diff = (new_eigvals[:k] - eigenvalues_prev[:k]).abs()
-            denom = new_eigvals[:k].abs().clamp(min=1e-10)
-            if (diff < tol * denom).all():
-                eigenvalues.copy_(new_eigvals)
-                break
-        if eigenvalues_prev is None:
-            eigenvalues_prev = new_eigvals.clone()
-        else:
-            eigenvalues_prev.copy_(new_eigvals)
-        eigenvalues.copy_(new_eigvals)
+        eigenvalues.copy_(eigvals[:m])
 
     return eigenvalues[:k], X[:, :k]
 

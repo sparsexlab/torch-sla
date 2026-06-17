@@ -88,6 +88,44 @@ def test_lobpcg_converges_in_fewer_matvecs_than_steepest_descent():
         f"too many matvecs: {matvec_count[0]} (regression vs LOBPCG bound)"
 
 
+def test_lobpcg_true_residual_below_tol():
+    """Regression guard: the convergence criterion must measure the
+    true Ritz residual ``||A x - lambda x||``, not the eigvals diff
+    between successive iterations. On a clustered spectrum the
+    earlier eigvals-diff test reported "converged" while the actual
+    residual was still 1e-3..1e-5.
+
+    For tol=1e-8, the returned eigenpair's Ritz residual must be
+    below ``tol * |lambda|``."""
+    n, k = 400, 6
+    rng = np.random.default_rng(123)
+    Q, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    # Spectrum with near-degenerate top 4 -- the case that tripped
+    # the old eigvals-diff test.
+    eig = np.geomspace(1.0, 1e4, n)
+    eig[-4:] = eig[-5] * np.array([1.0, 1.001, 1.002, 1.003])
+    A_np = Q @ np.diag(eig) @ Q.T
+    A_np = 0.5 * (A_np + A_np.T)
+    A = torch.from_numpy(A_np)
+
+    torch.manual_seed(0)
+    tol = 1e-8
+    ev, V = _lobpcg_eigsh(
+        lambda X: A @ X, n, k, torch.float64, torch.device("cpu"),
+        largest=True, maxiter=300, tol=tol,
+    )
+
+    # Each Ritz pair's residual norm must respect the requested tol.
+    R = A @ V - V * ev.unsqueeze(0)
+    res_norms = R.norm(dim=0)
+    denom = ev.abs().clamp(min=1e-10)
+    rel = (res_norms / denom).max().item()
+    assert rel < 10 * tol, (
+        f"true Ritz residual {rel:.2e} > 10*tol={10*tol:.2e}: "
+        "convergence criterion is lying about the eigenpair quality"
+    )
+
+
 def test_lobpcg_accepts_preconditioner():
     """T_apply hook is a no-op-by-default, plug in identity to check
     the signature path still produces the right answer."""
