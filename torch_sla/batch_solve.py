@@ -65,13 +65,26 @@ class BatchSparseLinearSolveSameLayout(Function):
         
         batch_size = val_batch.size(0)
         m, n = shape
-        
-        # Solve each system
+
+        # Fast path: CG is *truly* batched (single scatter matvec over the shared
+        # pattern, all systems iterate together) -- no Python loop. Device-agnostic.
+        if method == 'cg':
+            from .backends.pytorch_backend import batched_cg_same_pattern
+            u_batch = batched_cg_same_pattern(
+                val_batch, row, col, (m, n), b_batch, atol=atol, maxiter=maxiter)
+            ctx.save_for_backward(val_batch, row, col, u_batch)
+            ctx.A_shape = shape
+            ctx.method = method
+            ctx.atol = atol
+            ctx.maxiter = maxiter
+            return u_batch
+
+        # Other methods: solve each system independently (no batched kernel yet).
         results = []
         for i in range(batch_size):
             val = val_batch[i]
             b = b_batch[i]
-            
+
             if method in _PYTORCH_METHODS:
                 # device-agnostic: CPU / CUDA / ROCm
                 from .backends.pytorch_backend import pytorch_solve
@@ -114,10 +127,20 @@ class BatchSparseLinearSolveSameLayout(Function):
         maxiter = ctx.maxiter
         
         batch_size = val_batch.size(0)
-        
+
+        # Fast path: batched adjoint. Solve A_i^T gradb_i = gradu_i for all i at
+        # once (transpose = swap row/col), then the COO-value gradient is a single
+        # batched gather: dL/dval_i = -gradb_i[row] * u_i[col].
+        if method == 'cg':
+            from .backends.pytorch_backend import batched_cg_same_pattern
+            gradb_batch = batched_cg_same_pattern(
+                val_batch, col, row, (n, m), gradu_batch, atol=atol, maxiter=maxiter)
+            gradval_batch = -gradb_batch[:, row] * u_batch[:, col]
+            return gradval_batch, None, None, None, gradb_batch, None, None, None
+
         gradval_list = []
         gradb_list = []
-        
+
         for i in range(batch_size):
             val = val_batch[i]
             u = u_batch[i]
@@ -167,13 +190,12 @@ def spsolve_batch_same_layout(
     """
     Batch solve sparse linear systems with the SAME sparsity pattern.
     
-    .. deprecated::
-        Use SparseTensor.decompose().solve() instead for a more Pythonic interface:
-        
-        >>> A = SparseTensor(val, row, col, shape)
-        >>> decomp = A.decompose(method='lu')
-        >>> x_batch = decomp.solve(val_batch, b_batch)
-    
+    .. note::
+        ``method='cg'`` runs a **truly batched** solver (one scatter matvec over
+        the shared pattern, all systems iterate together) -- this is the fast
+        path on GPU / ROCm. Other methods (bicgstab/gmres/minres/lsqr/lsmr,
+        strumpack, cudss_*) currently solve each system in a Python loop.
+
     All matrices A_i share the same (row, col) structure but have different values.
     This is efficient when the sparsity pattern is fixed (e.g., FEM with fixed mesh).
     

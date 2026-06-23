@@ -2570,3 +2570,69 @@ def batched_cg_solve(
         A, B, X0=X0, atol=atol, rtol=rtol, maxiter=maxiter,
         preconditioner=M_batched, check_interval=check_interval
     )
+
+
+def batched_cg_same_pattern(
+    val_batch: Tensor,   # [B, nnz]
+    row: Tensor,         # [nnz]   (shared across the batch)
+    col: Tensor,         # [nnz]   (shared across the batch)
+    shape: Tuple[int, int],
+    b_batch: Tensor,     # [B, n]
+    atol: float = 1e-10,
+    rtol: float = 1e-6,
+    maxiter: int = 10000,
+) -> Tensor:
+    """Truly *batched* CG for a batch of SPD matrices that share a sparsity
+    pattern ``(row, col)`` but have different values.
+
+    Solves ``A_i x_i = b_i`` for every i **simultaneously** -- the batch lives
+    on dim 0 throughout, so there is no Python loop over matrices. The matvec is
+    a single batched scatter (``index_add_`` over the shared pattern) and every
+    CG scalar (alpha, beta, rho) is a length-B vector. Jacobi-preconditioned.
+
+    Pure torch ops only -> device-agnostic (CPU / CUDA / ROCm). Returns ``x``
+    of shape ``[B, n]``. Intended to be called inside an autograd ``Function``
+    that supplies gradients analytically (this routine itself does not track
+    grad).
+    """
+    m, n = shape
+    assert m == n, "CG requires square systems"
+    Bn = val_batch.shape[0]
+    device, dtype = val_batch.device, val_batch.dtype
+    row = row.to(device)
+    col = col.to(device)
+
+    def matvec(X):  # [B, n] -> [B, n] :  Y_i = A_i X_i
+        Y = torch.zeros(Bn, n, device=device, dtype=dtype)
+        Y.index_add_(1, row, val_batch * X[:, col])
+        return Y
+
+    # Per-matrix Jacobi diagonal D_i (gather the diagonal entries of each A_i)
+    D = torch.zeros(Bn, n, device=device, dtype=dtype)
+    diag = row == col
+    D.index_add_(1, row[diag], val_batch[:, diag])
+    D_inv = torch.where(D.abs() > 0, 1.0 / D, torch.ones_like(D))
+
+    X = torch.zeros(Bn, n, device=device, dtype=dtype)
+    R = b_batch.clone()                 # b - A·0
+    Z = D_inv * R
+    P = Z.clone()
+    rz_old = (R * Z).sum(dim=1)         # [B]
+    bnorm = torch.linalg.vector_norm(b_batch, dim=1).clamp_min(1e-30)
+    tol = torch.clamp(rtol * bnorm, min=atol)   # per-batch stopping threshold
+
+    tiny = torch.tensor(1e-30, dtype=dtype, device=device)
+    for _ in range(maxiter):
+        AP = matvec(P)
+        pAp = (P * AP).sum(dim=1)
+        alpha = rz_old / torch.where(pAp.abs() > 0, pAp, tiny)
+        X = X + alpha.unsqueeze(1) * P
+        R = R - alpha.unsqueeze(1) * AP
+        if bool((torch.linalg.vector_norm(R, dim=1) <= tol).all()):
+            break
+        Z = D_inv * R
+        rz_new = (R * Z).sum(dim=1)
+        beta = rz_new / torch.where(rz_old.abs() > 0, rz_old, tiny)
+        P = Z + beta.unsqueeze(1) * P
+        rz_old = rz_new
+    return X

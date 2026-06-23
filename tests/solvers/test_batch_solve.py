@@ -302,3 +302,46 @@ def test_batch_same_layout_pytorch_methods(method):
 
     g = torch.autograd.grad(x.sum(), val_batch)[0]
     assert torch.isfinite(g).all()
+
+
+def test_batched_cg_same_pattern_is_vectorized_and_differentiable():
+    """The CG path solves a batch of DIFFERENT SPD matrices (shared pattern) in
+    one vectorized kernel (no per-matrix Python loop). Check forward + gradients
+    against dense autograd, to the CG tolerance (rtol 1e-6)."""
+    n, B = 30, 6
+    rows, cols = [], []
+    for i in range(n):
+        rows.append(i); cols.append(i)
+        if i + 1 < n:
+            rows += [i, i + 1]; cols += [i + 1, i]
+    row, col = torch.tensor(rows), torch.tensor(cols)
+
+    torch.manual_seed(0)
+    vb = torch.empty(B, len(rows), dtype=torch.float64)
+    for j in range(B):
+        k = 0
+        for i in range(n):
+            vb[j, k] = 2.0 + 0.5 * torch.rand(()); k += 1
+            if i + 1 < n:
+                o = -0.3 - 0.4 * torch.rand(()); vb[j, k] = o; k += 1; vb[j, k] = o; k += 1
+    b = torch.randn(B, n, dtype=torch.float64)
+
+    vbg = vb.clone().requires_grad_(True); bg = b.clone().requires_grad_(True)
+    x = spsolve_batch_same_layout(vbg, row, col, (n, n), bg, method='cg',
+                                  atol=1e-14, maxiter=3000)
+    loss = (x * torch.arange(1., n + 1)).sum()
+    gv, gb = torch.autograd.grad(loss, [vbg, bg])
+
+    # dense reference (forward + autograd grads)
+    vbg2 = vb.clone().requires_grad_(True); bg2 = b.clone().requires_grad_(True)
+    xs = []
+    for j in range(B):
+        A = torch.zeros(n, n, dtype=torch.float64).index_put((row, col), vbg2[j], accumulate=True)
+        xs.append(torch.linalg.solve(A, bg2[j]))
+    xref = torch.stack(xs)
+    loss2 = (xref * torch.arange(1., n + 1)).sum()
+    gv2, gb2 = torch.autograd.grad(loss2, [vbg2, bg2])
+
+    assert (x.detach() - xref.detach()).abs().max() < 1e-5
+    assert (gv - gv2).abs().max() < 1e-3
+    assert (gb - gb2).abs().max() < 1e-3
