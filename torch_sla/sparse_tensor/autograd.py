@@ -86,7 +86,10 @@ def _det_backward_cuda_cudss(val, row, col, shape, det_val, grad_output):
         matrix_type="general",
     )
 
-    return det_val * gathered * grad_output
+    # ``.conj()`` on the geometric factor (det * A^{-T} entries) makes the
+    # adjoint correct for complex A; it is a no-op on real tensors. The
+    # upstream ``grad_output`` is NOT conjugated (PyTorch VJP convention).
+    return (det_val * gathered).conj() * grad_output
 
 
 class DetAdjoint(Function):
@@ -180,8 +183,8 @@ class DetAdjoint(Function):
                     indices, val, shape, device=device)
                 dense = sparse_coo.to_dense()
                 A_inv = torch.linalg.inv(dense)
-                grad_val = det_val * A_inv[col.to(torch.int64),
-                                             row.to(torch.int64)] * grad_output
+                grad_val = (det_val * A_inv[col.to(torch.int64),
+                                            row.to(torch.int64)]).conj() * grad_output
                 return grad_val, None, None, None, None, None
 
         # CPU sparse path -- single SuperLU, chunked batched solve.
@@ -236,7 +239,10 @@ class DetAdjoint(Function):
             gathered_np[order[nnz_lo:nnz_hi]] = Y[sub_row, sub_inv]
 
         gathered = torch.from_numpy(gathered_np).to(dtype=val.dtype, device=device)
-        grad_val = det_val * gathered * grad_output
+        # ``.conj()`` on the geometric factor (det * A^{-T} entries) makes the
+        # adjoint correct for complex A; no-op on real. ``grad_output`` is not
+        # conjugated (PyTorch VJP convention).
+        grad_val = (det_val * gathered).conj() * grad_output
         return grad_val, None, None, None, None, None
 
 
@@ -264,7 +270,8 @@ class EigshAdjoint(Function):
         A @ v = λ * v
     
     The gradient is:
-        ∂λ/∂A = v @ v.T  (outer product)
+        ∂λ/∂A = conj(v) @ v.T  (outer product; v vᴴ for Hermitian A,
+                                v vᵀ for real symmetric A)
         ∂v/∂A requires solving a linear system (more complex)
     """
     
@@ -334,10 +341,12 @@ class EigshAdjoint(Function):
         """
         Backward pass using adjoint method.
         
-        For eigenvalue λ_i with eigenvector v_i:
-            ∂L/∂A[j,k] = Σ_i (∂L/∂λ_i) * v_i[j] * v_i[k]
-        
-        This gives us O(1) graph nodes.
+        For eigenvalue λ_i with eigenvector v_i (Hermitian A):
+            ∂L/∂A[j,k] = Σ_i (∂L/∂λ_i) * conj(v_i[j]) * v_i[k]
+
+        ``.conj()`` is a no-op on real tensors (recovers v_i[j] * v_i[k]) and
+        makes the gradient correct -- and global-phase invariant -- for
+        complex Hermitian A. This gives us O(1) graph nodes.
         """
         val, eigenvalues, eigenvectors = ctx.saved_tensors
         row = ctx.row
@@ -348,16 +357,17 @@ class EigshAdjoint(Function):
             return None, None, None, None, None, None, None, None
         
         # Compute gradient w.r.t. values
-        # ∂L/∂A[i,j] = Σ_m (∂L/∂λ_m) * v_m[i] * v_m[j]
-        # For sparse format: ∂L/∂val[idx] = Σ_m (∂L/∂λ_m) * v_m[row[idx]] * v_m[col[idx]]
-        
+        # ∂L/∂A[i,j] = Σ_m (∂L/∂λ_m) * conj(v_m[i]) * v_m[j]
+        # For sparse: ∂L/∂val[idx] = Σ_m (∂L/∂λ_m) * conj(v_m[row]) * v_m[col]
+
         grad_val = torch.zeros_like(val)
-        
+
         for m in range(k):
             if grad_eigenvalues[m] != 0:
-                # v_m[row] * v_m[col] for each sparse entry
+                # conj(v_m[row]) * v_m[col] -- no-op on real, correct +
+                # phase-invariant for complex Hermitian.
                 v_m = eigenvectors[:, m]
-                grad_val += grad_eigenvalues[m] * v_m[row] * v_m[col]
+                grad_val += grad_eigenvalues[m] * v_m[row].conj() * v_m[col]
         
         # Handle eigenvector gradients if needed (more complex, skip for now)
         # The eigenvector gradient requires solving (A - λI) @ dv = ...

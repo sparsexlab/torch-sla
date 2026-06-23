@@ -43,7 +43,6 @@ import math
 
 from ..backends import (
     is_scipy_available,
-    is_eigen_available,
     is_cupy_available,
     is_cudss_available,
     select_backend,
@@ -795,7 +794,20 @@ class SparseTensor:
 
     def det(self, *args, **kwargs):
         from .linalg import det as _impl
-        return _impl(self, *args, **kwargs)
+        out = _impl(self, *args, **kwargs)
+        # The determinant magnitude grows ~exponentially with n and overflows
+        # the dtype's range -- much sooner in float32 (max ~3.4e38) than
+        # float64. A silent +/-inf is a common foot-gun; point users to logdet.
+        if torch.is_tensor(out) and out.dtype in (torch.float32, torch.complex64) \
+                and not torch.isfinite(out).all():
+            import warnings
+            warnings.warn(
+                "det() overflowed to inf/nan in float32 -- the determinant "
+                "magnitude exceeds float32 range. Use float64, or prefer "
+                "logdet() (numerically stable; no overflow).",
+                RuntimeWarning, stacklevel=2,
+            )
+        return out
 
     def logdet(self, *args, **kwargs):
         from .linalg import logdet as _impl

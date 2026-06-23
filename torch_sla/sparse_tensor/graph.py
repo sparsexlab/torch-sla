@@ -7,26 +7,102 @@ from .core import SparseTensor  # noqa: E402  # cross-module use
 from .list import SparseTensorList
 
 
-def connected_components(self) -> Tuple[torch.Tensor, int]:
-    """
-    Find connected components of the graph represented by this sparse matrix.
-    
-    Uses union-find algorithm for efficiency. Treats the matrix as an
-    undirected graph adjacency matrix.
-    
+def _connected_components_labels(
+    row: torch.Tensor,
+    col: torch.Tensor,
+    N: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, int]:
+    """Parallel, pure-torch connected components via label propagation.
+
+    Shiloach-Vishkin style iterative ``scatter_reduce(amin)`` + pointer
+    jumping. Fully vectorized: no Python per-edge loop, no ``.cpu()``
+    round-trip, so it stays on ``device`` and runs on GPU. Converges in
+    O(log N) rounds.
+
+    Parameters
+    ----------
+    row, col : torch.Tensor
+        Edge endpoint indices, shape [nnz], on ``device``.
+    N : int
+        Number of nodes.
+    device : torch.device
+        Device to keep all tensors on.
+
     Returns
     -------
     labels : torch.Tensor
-        Component label for each node, shape [N]. Labels are in range [0, num_components).
+        Contiguous component id per node in ``[0, num_components)``, long,
+        on ``device``. Component ids follow ``torch.unique`` ordering of the
+        propagated min-labels, i.e. the component containing the smallest
+        node index gets id 0, matching the original union-find convention.
     num_components : int
-        Number of connected components.
-        
+    """
+    if N == 0:
+        return torch.empty(0, dtype=torch.long, device=device), 0
+
+    row = row.to(device=device, dtype=torch.long)
+    col = col.to(device=device, dtype=torch.long)
+
+    # Treat as undirected: consider both edge directions. Drop self-loops
+    # (they never connect distinct nodes and just waste work).
+    non_self = row != col
+    src = torch.cat([row[non_self], col[non_self]])
+    dst = torch.cat([col[non_self], row[non_self]])
+
+    labels = torch.arange(N, device=device, dtype=torch.long)
+
+    if src.numel() == 0:
+        # No edges -> every node is its own component.
+        unique, inverse = torch.unique(labels, return_inverse=True)
+        return inverse.to(torch.long), unique.numel()
+
+    while True:
+        prev = labels
+        # Propagate the minimum label across every (undirected) edge.
+        new_labels = labels.clone()
+        new_labels.scatter_reduce_(
+            0, dst, labels[src], reduce="amin", include_self=True
+        )
+        # Pointer jumping: compress chains so a node adopts its label's label.
+        labels = new_labels[new_labels]
+        if torch.equal(labels, prev):
+            break
+
+    # Relabel to contiguous 0..num_components-1 (unique sorts ascending, so
+    # the component with the smallest node index becomes id 0).
+    unique, inverse = torch.unique(labels, return_inverse=True)
+    return inverse.to(torch.long), unique.numel()
+
+
+def connected_components(self) -> Tuple[torch.Tensor, int]:
+    """
+    Find connected components of the graph represented by this sparse matrix.
+
+    Uses a parallel, pure-torch label-propagation / pointer-jumping
+    (Shiloach-Vishkin style) algorithm: device-agnostic, GPU-ready, with no
+    Python per-edge loop and no ``.cpu()`` round-trip. Treats the matrix as
+    an undirected graph adjacency matrix.
+
+    Returns
+    -------
+    labels : torch.Tensor
+        Component label for each node, shape [N] (or [*batch, N] for batched
+        input). Labels are in range [0, num_components), long, on
+        ``self.device``.
+    num_components : int
+        Number of connected components. For batched input every batch item
+        shares the same sparsity pattern, so the partition is identical
+        across the batch and a single int is returned.
+
     Notes
     -----
-    - Only works for non-batched 2D matrices
     - Matrix is treated as undirected (edges in either direction count)
     - Self-loops are ignored for connectivity
-    
+    - Batched: all batch items share row/col indices (same structure), so
+      the component partition is the same for every batch item. The returned
+      ``labels`` is broadcast to shape [*batch, N].
+
     Examples
     --------
     >>> # Block diagonal matrix with 3 components
@@ -34,63 +110,21 @@ def connected_components(self) -> Tuple[torch.Tensor, int]:
     >>> labels, num_comp = A.connected_components()
     >>> print(f"Found {num_comp} components")
     """
-    if self.is_batched:
-        raise NotImplementedError("connected_components not supported for batched tensors")
-    
     M, N = self.sparse_shape
     if M != N:
         raise ValueError("connected_components requires square matrix")
-    
-    # Union-Find with path compression and union by rank
-    parent = torch.arange(N, device=self.device, dtype=torch.long)
-    rank = torch.zeros(N, device=self.device, dtype=torch.long)
-    
-    def find(x: int) -> int:
-        """Find root with path compression."""
-        root = x
-        while parent[root].item() != root:
-            root = parent[root].item()
-        # Path compression
-        while parent[x].item() != root:
-            next_x = parent[x].item()
-            parent[x] = root
-            x = next_x
-        return root
-    
-    def union(x: int, y: int):
-        """Union by rank."""
-        rx, ry = find(x), find(y)
-        if rx == ry:
-            return
-        if rank[rx] < rank[ry]:
-            rx, ry = ry, rx
-        parent[ry] = rx
-        if rank[rx] == rank[ry]:
-            rank[rx] += 1
-    
-    # Process all edges
-    row = self.row_indices.cpu()
-    col = self.col_indices.cpu()
-    
-    for i in range(len(row)):
-        r, c = row[i].item(), col[i].item()
-        if r != c:  # Skip self-loops
-            union(r, c)
-    
-    # Find all roots and relabel
-    labels = torch.zeros(N, dtype=torch.long, device=self.device)
-    for i in range(N):
-        labels[i] = find(i)
-    
-    # Relabel to consecutive integers starting from 0
-    unique_labels = labels.unique()
-    num_components = len(unique_labels)
-    
-    label_map = torch.zeros(N, dtype=torch.long, device=self.device)
-    for new_label, old_label in enumerate(unique_labels):
-        label_map[labels == old_label] = new_label
-    
-    return label_map, num_components
+
+    labels, num_components = _connected_components_labels(
+        self.row_indices, self.col_indices, N, self.device
+    )
+
+    if self.is_batched:
+        # Same structure across the batch -> same partition. Broadcast to
+        # [*batch, N] so the output has a per-batch row.
+        batch_shape = self.batch_shape
+        labels = labels.reshape(*([1] * len(batch_shape)), N).expand(*batch_shape, N).contiguous()
+
+    return labels, num_components
 
 def has_isolated_components(self) -> bool:
     """

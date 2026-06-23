@@ -81,6 +81,10 @@ cudss = [
 amgx = [
     "torch-amgx>=0.1.0a1",
 ]
+# STRUMPACK sparse direct backend (CPU / CUDA / ROCm; portable, incl. AMD)
+strumpack = [
+    "torch-strumpack",
+]
 # Full installation with all runtime backends (does not include dev/docs)
 all = [
     "pytest>=6.0",

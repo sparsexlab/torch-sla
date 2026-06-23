@@ -7,6 +7,8 @@ It's especially useful for large-scale problems where direct solvers run out of 
 Methods:
 - 'cg': Conjugate Gradient (for SPD matrices)
 - 'bicgstab': BiCGStab (for general matrices)
+- 'gmres': restarted GMRES (general / non-symmetric matrices)
+- 'minres': MINRES (symmetric / Hermitian, possibly indefinite; needs SPD preconditioner)
 
 Preconditioners (ordered by effectiveness):
 - 'ic0': Incomplete Cholesky (zero fill-in) - BEST for SPD
@@ -1339,6 +1341,243 @@ def pbicgstab_solve(
 
 
 # ============================================================================
+# GMRES (right-preconditioned, restarted) -- general / non-symmetric systems
+# ============================================================================
+
+def _conj_scalar(z):
+    """Conjugate a Python scalar (complex or real)."""
+    return z.conjugate() if isinstance(z, complex) else z
+
+
+def _givens(a, b):
+    """Complex-safe Givens rotation.
+
+    Returns ``(c, s, r)`` with ``c`` real, ``s`` (possibly complex) such that
+    ``[[c, s], [-conj(s), c]] @ [a, b]^T == [r, 0]^T``. Here ``b`` is the
+    sub-diagonal entry, which in our Arnoldi loop is always a real, non-negative
+    norm, but the general complex form is used so ``a`` may be complex.
+    """
+    if b == 0:
+        return 1.0, (0j if isinstance(a, complex) else 0.0), a
+    if a == 0:
+        ab = abs(b)
+        s = (b.conjugate() / ab) if isinstance(b, complex) else (b / ab)
+        return 0.0, s, ab
+    aa = abs(a)
+    nrm = math.sqrt(aa * aa + abs(b) * abs(b))
+    c = aa / nrm
+    if isinstance(a, complex) or isinstance(b, complex):
+        alpha = a / aa  # unit-modulus phase of a
+        bconj = b.conjugate() if isinstance(b, complex) else b
+        return c, alpha * bconj / nrm, alpha * nrm
+    sgn = a / aa  # +/-1
+    return c, sgn * b / nrm, sgn * nrm
+
+
+def pgmres_solve(
+    val: Tensor,
+    row: Tensor,
+    col: Tensor,
+    shape: Tuple[int, int],
+    b: Tensor,
+    x0: Optional[Tensor] = None,
+    atol: float = 1e-10,
+    rtol: float = 1e-6,
+    maxiter: int = 10000,
+    preconditioner: str = 'auto',
+    restart: int = 30,
+) -> Tuple[Tensor, int, float]:
+    """Right-preconditioned restarted GMRES(``restart``).
+
+    Solves ``A x = b`` for a general (non-symmetric, possibly complex) sparse
+    ``A`` on CPU or CUDA. Right preconditioning keeps the monitored quantity the
+    *true* residual ``b - A x`` (not the preconditioned residual), so the
+    convergence test is honest regardless of ``M``.
+
+    ``maxiter`` bounds the total number of inner Arnoldi steps across restarts.
+    """
+    A = CachedSparseMatrix(val, row, col, shape)
+    M = get_preconditioner(A, preconditioner, method='gmres')
+    device, dtype, n = A.device, A.dtype, A.n
+    is_complex = torch.is_complex(b)
+
+    if x0 is None:
+        x = torch.zeros(n, dtype=dtype, device=device)
+        r = b.clone()
+    else:
+        x = x0.clone()
+        r = b - A.matvec(x)
+
+    b_norm = torch.norm(b).item()
+    if b_norm == 0:
+        b_norm = 1.0
+    tol = max(atol, rtol * b_norm)
+
+    r_norm = torch.norm(r).item()
+    if r_norm <= tol:
+        return x, 0, r_norm
+
+    m = min(int(restart), n)
+    zero = 0j if is_complex else 0.0
+    total = 0
+    while total < maxiter:
+        # Arnoldi basis (n x m+1) + Hessenberg / Givens kept as host scalars
+        V = torch.zeros(n, m + 1, dtype=dtype, device=device)
+        H = [[zero] * m for _ in range(m + 1)]
+        cs = [0.0] * m
+        sn = [zero] * m
+        g = [zero] * (m + 1)
+
+        beta = torch.norm(r).item()
+        V[:, 0] = r / beta
+        g[0] = beta
+        k = 0
+        for j in range(m):
+            total += 1
+            w = A.matvec(M(V[:, j]))              # right preconditioning
+            for i in range(j + 1):
+                hij = torch.vdot(V[:, i], w).item()
+                H[i][j] = hij
+                w = w - V[:, i] * hij
+            hjp = torch.norm(w).item()
+            H[j + 1][j] = hjp
+            if hjp > 1e-30:
+                V[:, j + 1] = w / hjp
+            # apply previous rotations to the new column
+            for i in range(j):
+                t = cs[i] * H[i][j] + sn[i] * H[i + 1][j]
+                H[i + 1][j] = -_conj_scalar(sn[i]) * H[i][j] + cs[i] * H[i + 1][j]
+                H[i][j] = t
+            # eliminate H[j+1][j]
+            c, s, rr = _givens(H[j][j], H[j + 1][j])
+            cs[j], sn[j] = c, s
+            H[j][j] = rr
+            H[j + 1][j] = zero
+            g[j + 1] = -_conj_scalar(s) * g[j]
+            g[j] = c * g[j]
+            k = j + 1
+            if abs(g[j + 1]) <= tol or total >= maxiter or hjp <= 1e-30:
+                break
+        # back-substitution: H[:k,:k] y = g[:k]
+        y = [zero] * k
+        for i in range(k - 1, -1, -1):
+            acc = g[i]
+            for jj in range(i + 1, k):
+                acc -= H[i][jj] * y[jj]
+            y[i] = acc / H[i][i]
+        yv = torch.tensor(y, dtype=dtype, device=device)
+        x = x + M(V[:, :k] @ yv)                  # undo right preconditioner
+        r = b - A.matvec(x)
+        r_norm = torch.norm(r).item()
+        if r_norm <= tol:
+            return x, total, r_norm
+
+    warnings.warn(f"GMRES did not converge in {total} iterations (residual={r_norm:.2e})")
+    return x, total, r_norm
+
+
+# ============================================================================
+# MINRES (preconditioned) -- symmetric / Hermitian, possibly indefinite
+# ============================================================================
+
+def minres_solve(
+    val: Tensor,
+    row: Tensor,
+    col: Tensor,
+    shape: Tuple[int, int],
+    b: Tensor,
+    x0: Optional[Tensor] = None,
+    atol: float = 1e-10,
+    rtol: float = 1e-6,
+    maxiter: int = 10000,
+    preconditioner: str = 'auto',
+) -> Tuple[Tensor, int, float]:
+    """Preconditioned MINRES for symmetric/Hermitian (possibly indefinite) ``A``.
+
+    Follows the Paige-Saunders formulation (Stanford SOL ``minres``). Requires an
+    **SPD preconditioner** ``M``; for a Hermitian system the Lanczos tridiagonal
+    is real, so all recurrence scalars stay real even though the vectors may be
+    complex. Short 3-term recurrence -> constant memory (unlike GMRES).
+    """
+    A = CachedSparseMatrix(val, row, col, shape)
+    M = get_preconditioner(A, preconditioner, method='minres')
+    device, dtype, n = A.device, A.dtype, A.n
+
+    if x0 is None:
+        x = torch.zeros(n, dtype=dtype, device=device)
+        r1 = b.clone()
+    else:
+        x = x0.clone()
+        r1 = b - A.matvec(x)
+
+    y = M(r1)
+    beta_start = torch.vdot(r1, y).real.item()    # r1^H M^{-1} r1
+    if beta_start < 0:
+        raise ValueError("MINRES requires an SPD preconditioner (got <r,M r> < 0)")
+    beta = math.sqrt(beta_start)
+
+    b_norm = torch.norm(b).item()
+    if b_norm == 0:
+        b_norm = 1.0
+    tol = max(atol, rtol * b_norm)
+    if beta == 0:
+        return x, 0, 0.0
+
+    # rotation + recurrence state (all real for a Hermitian system)
+    oldb = 0.0
+    dbar = 0.0
+    epsln = 0.0
+    phibar = beta
+    cs = -1.0
+    sn = 0.0
+    w = torch.zeros(n, dtype=dtype, device=device)
+    w2 = torch.zeros(n, dtype=dtype, device=device)
+    r2 = r1.clone()
+
+    residual = beta
+    for itn in range(1, maxiter + 1):
+        v = (1.0 / beta) * y                       # Lanczos vector
+        y = A.matvec(v)
+        if itn >= 2:
+            y = y - (beta / oldb) * r1
+        alfa = torch.vdot(v, y).real.item()
+        y = y - (alfa / beta) * r2
+        r1 = r2
+        r2 = y
+        y = M(r2)
+        oldb = beta
+        beta_sq = torch.vdot(r2, y).real.item()
+        if beta_sq < 0:
+            raise ValueError("MINRES requires an SPD preconditioner (got <r,M r> < 0)")
+        beta = math.sqrt(beta_sq)
+
+        # apply previous rotation, then build the next one
+        oldeps = epsln
+        delta = cs * dbar + sn * alfa
+        gbar = sn * dbar - cs * alfa
+        epsln = sn * beta
+        dbar = -cs * beta
+        gamma = math.sqrt(gbar * gbar + beta * beta)
+        gamma = max(gamma, 1e-30)
+        cs = gbar / gamma
+        sn = beta / gamma
+        phi = cs * phibar
+        phibar = sn * phibar
+
+        # solution update (short recurrence)
+        w1, w2 = w2, w
+        w = (v - oldeps * w1 - delta * w2) * (1.0 / gamma)
+        x = x + phi * w
+
+        residual = abs(phibar)
+        if residual <= tol:
+            return x, itn, residual
+
+    warnings.warn(f"MINRES did not converge in {maxiter} iterations (residual={residual:.2e})")
+    return x, maxiter, residual
+
+
+# ============================================================================
 # Legacy interfaces for backward compatibility
 # ============================================================================
 
@@ -1439,7 +1678,7 @@ def pytorch_solve(
     b : Tensor
         Right-hand side
     method : str
-        'cg' or 'bicgstab'
+        'cg', 'bicgstab', 'gmres', or 'minres'
     atol : float
         Absolute tolerance
     rtol : float
@@ -1492,8 +1731,32 @@ def pytorch_solve(
         x, _, _ = pbicgstab_solve(val, row, col, shape, b, x0=x0, atol=atol, rtol=rtol,
                                   maxiter=maxiter, preconditioner=preconditioner)
         return x
+    elif method == 'gmres':
+        if b.dim() == 2:
+            cols = []
+            for k in range(b.shape[1]):
+                x_k, _, _ = pgmres_solve(val, row, col, shape, b[:, k], x0=None,
+                                         atol=atol, rtol=rtol, maxiter=maxiter,
+                                         preconditioner=preconditioner)
+                cols.append(x_k)
+            return torch.stack(cols, dim=1)
+        x, _, _ = pgmres_solve(val, row, col, shape, b, x0=x0, atol=atol, rtol=rtol,
+                               maxiter=maxiter, preconditioner=preconditioner)
+        return x
+    elif method == 'minres':
+        if b.dim() == 2:
+            cols = []
+            for k in range(b.shape[1]):
+                x_k, _, _ = minres_solve(val, row, col, shape, b[:, k], x0=None,
+                                         atol=atol, rtol=rtol, maxiter=maxiter,
+                                         preconditioner=preconditioner)
+                cols.append(x_k)
+            return torch.stack(cols, dim=1)
+        x, _, _ = minres_solve(val, row, col, shape, b, x0=x0, atol=atol, rtol=rtol,
+                               maxiter=maxiter, preconditioner=preconditioner)
+        return x
     else:
-        raise ValueError(f"Unknown method: {method}. Available: cg, bicgstab")
+        raise ValueError(f"Unknown method: {method}. Available: cg, bicgstab, gmres, minres")
 
 
 # ============================================================================

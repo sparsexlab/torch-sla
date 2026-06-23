@@ -1,6 +1,3 @@
-# Include C++ source files
-recursive-include csrc *.cpp *.cu *.h *.cuh
-
 # Include documentation
 include README.md
 include LICENSE
