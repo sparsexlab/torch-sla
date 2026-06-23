@@ -145,9 +145,9 @@ torch-sla 支持哪些稀疏求解器？
 
 torch-sla 支持多种后端:
 
-- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES)、PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、STRUMPACK (LU, Cholesky, LDLt 直接法)
-- **GPU — NVIDIA (CUDA)**: PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、cuDSS (LU, Cholesky, LDLT 直接法)、STRUMPACK (LU, Cholesky, LDLt 直接法)
-- **GPU — AMD (ROCm)**: PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、STRUMPACK (LU, Cholesky, LDLt 直接法)。cuDSS 仅支持 NVIDIA，在 ROCm 上不可用。
+- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES)、PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、STRUMPACK (多波前 LU 直接法)
+- **GPU — NVIDIA (CUDA)**: PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、cuDSS (LU, Cholesky, LDLT 直接法)、STRUMPACK (多波前 LU 直接法)
+- **GPU — AMD (ROCm)**: PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、STRUMPACK (多波前 LU 直接法)。cuDSS 仅支持 NVIDIA，在 ROCm 上不可用。
 
 库会根据硬件和矩阵属性自动选择最佳求解器。
 

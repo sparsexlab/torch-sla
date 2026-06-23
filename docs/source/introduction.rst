@@ -139,7 +139,7 @@ Backends
      - **CUDA direct**
    * - ``strumpack``
      - CPU/CUDA/ROCm
-     - STRUMPACK multifrontal sparse direct solver (LU, Cholesky, LDLt; real + complex; full autograd). Portable across CPU/CUDA/ROCm via ``torch-strumpack``.
+     - STRUMPACK multifrontal sparse direct solver (multifrontal LU; real + complex; full autograd). Portable across CPU/CUDA/ROCm via ``torch-strumpack``.
      - **Direct on AMD ROCm / portable direct**
    * - ``pytorch``
      - CPU/CUDA/ROCm
@@ -591,7 +591,7 @@ Performance Tips
 4. **Use cudss+cholesky for small CUDA problems**: Fastest direct solver (< 2M DOF)
 5. **Use pytorch+cg for large problems**: Memory efficient, scales to 169M+ DOF on single GPU
 6. **Use multi-GPU for very large problems**: DSparseTensor supports domain decomposition, 3 GPUs can reach 500M+ DOF
-7. **Use strumpack for a portable GPU direct solve**: LU / Cholesky / LDLt on CPU/CUDA/ROCm — the direct-solver choice on AMD ROCm where cuDSS is unavailable
+7. **Use strumpack for a portable GPU direct solve**: multifrontal LU on CPU/CUDA/ROCm — the direct-solver choice on AMD ROCm where cuDSS is unavailable
 8. **Use LU factorization for repeated solves**: Cache with ``A.lu()``
 
 Citation
