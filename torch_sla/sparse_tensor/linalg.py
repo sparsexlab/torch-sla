@@ -36,11 +36,10 @@ def solve(
         Right-hand side vector(s). Shape:
         - Non-batched: [M] or [M, K] for multiple RHS
         - Batched: [...batch, M] or [...batch, M, K]
-    backend : {"auto", "scipy", "eigen", "cupy", "cudss"}, optional
+    backend : {"auto", "scipy", "pytorch", "cudss"}, optional
         Solver backend. Default: "auto" (selects based on device).
         - "scipy": Uses SciPy's sparse solvers (CPU only)
-        - "eigen": Uses Eigen C++ library (CPU only)
-        - "cupy": Uses CuPy's sparse solvers (CUDA only)
+        - "pytorch": PyTorch-native iterative solvers (CPU & CUDA)
         - "cudss": Uses NVIDIA cuDSS (CUDA only)
     method : str, optional
         Solver method. Default: "auto" (selects based on matrix properties).
@@ -151,7 +150,7 @@ def solve_batch(
         All matrices share the same row_indices and col_indices.
     b : torch.Tensor
         Right-hand side. Shape [...batch, M].
-    backend : {"auto", "scipy", "eigen", "cupy", "cudss"}, optional
+    backend : {"auto", "scipy", "pytorch", "cudss"}, optional
         Solver backend. See solve() for details. Default: "auto".
     method : str, optional
         Solver method. See solve() for details. Default: "auto".
@@ -219,14 +218,15 @@ def nonlinear_solve(
     residual_fn,
     u0: torch.Tensor,
     *params,
-    method: Literal['newton', 'picard', 'anderson'] = 'newton',
-    tol: float = 1e-6,
-    atol: float = 1e-10,
+    jac_fn=None,
+    method: Literal['newton'] = 'newton',
+    tol: float = 1e-8,
+    atol: float = 1e-12,
     max_iter: int = 50,
     line_search: bool = True,
     verbose: bool = False,
-    linear_solver: BackendType = 'pytorch',
-    linear_method: MethodType = 'cg',
+    linear_solver: BackendType = 'auto',
+    linear_method: MethodType = 'auto',
 ) -> torch.Tensor:
     """
     Solve nonlinear equation F(u, A, θ) = 0 with adjoint-based gradients.
@@ -246,15 +246,18 @@ def nonlinear_solve(
     *params : torch.Tensor
         Additional parameters (e.g., boundary conditions, coefficients).
         Tensors with requires_grad=True will receive gradients.
-    method : {'newton', 'picard', 'anderson'}, optional
-        Nonlinear solver method:
-        - 'newton': Newton-Raphson with line search (default, fast)
-        - 'picard': Fixed-point iteration (simple, slow)
-        - 'anderson': Anderson acceleration (memory efficient)
+    jac_fn : Callable, optional
+        Optional explicit Jacobian ``J(u, A, *params) -> (val, row, col, shape)``
+        returning the sparse dF/du in COO form. If ``None`` (default) the
+        Jacobian is obtained via ``torch.autograd.functional.jacobian``.
+    method : {'newton'}, optional
+        Nonlinear solver method. Only Newton-Raphson (with implicit-diff
+        gradients) is supported; each step solves the sparse Jacobian
+        system via ``spsolve``.
     tol : float, optional
-        Relative convergence tolerance. Default: 1e-6.
+        Relative convergence tolerance on ``||F||``. Default: 1e-8.
     atol : float, optional
-        Absolute convergence tolerance. Default: 1e-10.
+        Absolute convergence tolerance on ``||F||``. Default: 1e-12.
     max_iter : int, optional
         Maximum nonlinear iterations. Default: 50.
     line_search : bool, optional
@@ -262,9 +265,11 @@ def nonlinear_solve(
     verbose : bool, optional
         Print convergence information. Default: False.
     linear_solver : str, optional
-        Backend for linear solves. Default: 'pytorch'.
+        Backend for the linear (Jacobian) solves. Default: 'auto'.
     linear_method : str, optional
-        Method for linear solves. Default: 'cg'.
+        Method for the linear (Jacobian) solves. Default: 'auto'. Note: the
+        Jacobian of a general nonlinear residual is NOT symmetric, so a
+        direct method (e.g. 'lu') is recommended over 'cg'.
     
     Returns
     -------
@@ -296,25 +301,39 @@ def nonlinear_solve(
     ...
     >>> u = K.nonlinear_solve(residual_elasticity, u0, F, material)
     """
-    from ..nonlinear_solve import nonlinear_solve as _nonlinear_solve
-    
-    # Wrap residual_fn to pass SparseTensor as matvec
+    if method != 'newton':
+        raise ValueError(
+            f"nonlinear_solve only supports method='newton', got {method!r}")
+    if self.is_batched:
+        raise NotImplementedError(
+            "nonlinear_solve not supported for batched SparseTensors")
+
+    from .autograd import NonlinearSolveFunction
+
     M, N = self.sparse_shape
-    
-    def wrapped_residual(u, *all_params):
-        # First param is the values tensor, rest are user params
-        # Reconstruct sparse matvec capability
-        return residual_fn(u, self, *all_params)
-    
-    # Include self.values in params if it requires grad
-    all_params = params
-    
-    return _nonlinear_solve(
-        wrapped_residual, u0, *all_params,
-        method=method, tol=tol, atol=atol, max_iter=max_iter,
-        line_search=line_search, verbose=verbose,
-        linear_solver=linear_solver, linear_method=linear_method,
-        )
+    row, col = self.row_indices, self.col_indices
+
+    # Residual seen by the autograd Function takes A's *values* as an
+    # explicit tensor argument so gradients can flow back to A. We rebuild
+    # the SparseTensor (sharing row/col/shape) inside the closure so the
+    # user still writes ``residual_fn(u, A, *params)``.
+    def residual_with_val(u, val, *user_params):
+        A = SparseTensor(val, row, col, (M, N))
+        return residual_fn(u, A, *user_params)
+
+    jac_with_val = None
+    if jac_fn is not None:
+        def jac_with_val(u, val, *user_params):
+            A = SparseTensor(val.detach(), row, col, (M, N))
+            return jac_fn(u, A, *user_params)
+
+    return NonlinearSolveFunction.apply(
+        u0, len(params), residual_with_val, jac_with_val,
+        row, col, (M, N),
+        tol, atol, max_iter, line_search, verbose,
+        linear_solver, linear_method,
+        self.values, *params,
+    )
 
 def eigs(
     self,
@@ -926,10 +945,14 @@ def _lobpcg_core(
     Z = torch.empty(n, 3 * m, dtype=dtype, device=device)
     eigenvalues = torch.empty(m, dtype=dtype, device=device)
 
-    # Initial Rayleigh-Ritz step.
+    # Initial Rayleigh-Ritz step.  Use conjugate transpose (.mH) so the Gram
+    # matrix X^H A X is genuinely Hermitian for complex A -- plain .T gives a
+    # non-Hermitian matrix and torch.linalg.eigh's behaviour on that is
+    # undefined (LAPACK on CPU and cuSOLVER on GPU disagree -> complex eigsh
+    # converged on CPU but NOT on GPU). .mH == .T on real tensors.
     AX.copy_(matvec(X))
-    H = X.T @ AX
-    H = 0.5 * (H + H.T)
+    H = X.mH @ AX
+    H = 0.5 * (H + H.mH)
     eigvals, V = torch.linalg.eigh(H)
     idx = eigvals.argsort(descending=largest)
     eigvals, V = eigvals[idx], V[:, idx]
@@ -970,24 +993,49 @@ def _lobpcg_core(
         ncols_eff = Z_active.shape[1]
 
         AZ_active = matvec(Z_active)
-        H = Z_active.T @ AZ_active
-        H = 0.5 * (H + H.T)
+        H = Z_active.mH @ AZ_active       # conjugate transpose: Hermitian Gram
+        H = 0.5 * (H + H.mH)
         eigvals, V = torch.linalg.eigh(H)
         idx = eigvals.argsort(descending=largest)
         eigvals, V = eigvals[idx], V[:, idx]
-        Vk = V[:, :m]
+
+        # fp32 rank-deficiency guard. In low precision the subspace
+        # ``[X | R | P]`` can become (near-)rank-deficient -- e.g. R
+        # collapses into span(X) near convergence, or clustered Ritz
+        # vectors in X turn collinear. ``_qr_orthonormalize`` then drops
+        # the offending columns and returns ``ncols_eff < ncols``, which
+        # can even fall below the block size ``m``. When that happens the
+        # projected problem only yields ``ncols_eff`` Ritz pairs, so
+        # ``H``, ``eigvals`` and ``V`` are ``ncols_eff``-sized. The
+        # buffers ``X``/``AX``/``P``/``eigenvalues`` are all sized ``m``,
+        # so we must clamp every update to the number of pairs that
+        # actually survive (``m_eff``); writing an ``ncols_eff``-wide
+        # slice into the ``m``-wide buffers (the old unconditional
+        # ``X.copy_(X_new)`` etc.) raised a shape-mismatch RuntimeError.
+        # In fp64 the block stays full rank, so ``m_eff == m`` and this is
+        # a no-op -- behaviour and convergence are unchanged.
+        m_eff = min(m, ncols_eff)
+        Vk = V[:, :m_eff]
 
         X_new = Z_active @ Vk
         AX_new = AZ_active @ Vk
-        if ncols_eff > m:
-            P_new = Z_active[:, m:] @ Vk[m:, :]
+        # Conjugate-direction P from the (R, P) coordinates, only when the
+        # active subspace is wider than the kept block (otherwise there is
+        # no extra direction and P resets to zero).
+        if ncols_eff > m_eff:
+            P_new = Z_active[:, m_eff:] @ Vk[m_eff:, :]
         else:
-            P_new = torch.zeros_like(X)
+            P_new = torch.zeros(n, m_eff, dtype=dtype, device=device)
 
-        X.copy_(X_new)
-        AX.copy_(AX_new)
-        P.copy_(P_new)
-        eigenvalues.copy_(eigvals[:m])
+        # Update only the leading ``m_eff`` columns / entries; the trailing
+        # ``m - m_eff`` columns keep their previous (already orthonormal,
+        # already-Ritz) values so the buffers stay well-defined and the
+        # next residual/Gram step remains consistent.
+        X[:, :m_eff].copy_(X_new)
+        AX[:, :m_eff].copy_(AX_new)
+        P[:, :m_eff].copy_(P_new)
+        P[:, m_eff:].zero_()
+        eigenvalues[:m_eff].copy_(eigvals[:m_eff])
 
     return eigenvalues[:k], X[:, :k]
 

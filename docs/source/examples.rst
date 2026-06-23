@@ -348,12 +348,12 @@ Choose solver backend and method explicitly.
    * - ``scipy``
      - CPU
      - ``lu``, ``umfpack``, ``cg``, ``bicgstab``, ``gmres``
-   * - ``eigen``
-     - CPU
-     - ``cg``, ``bicgstab``
-   * - ``cupy``
-     - CUDA
-     - ``lu``, ``cg``, ``cgs``, ``gmres``, ``minres``
+   * - ``pytorch``
+     - CPU/CUDA/ROCm
+     - ``cg``, ``bicgstab``, ``gmres``, ``minres``
+   * - ``strumpack``
+     - CPU/CUDA/ROCm
+     - ``lu``, ``cholesky``, ``ldlt``
    * - ``cudss``
      - CUDA
      - ``lu``, ``cholesky``, ``ldlt``
@@ -825,7 +825,15 @@ Move to CUDA
 
 Transfer to GPU for CUDA-accelerated solving.
 
-**Performance:** cuDSS/CuPy can be 10-100× faster for large systems.
+**Performance:** cuDSS can be 10-100× faster for large systems.
+
+.. note::
+
+   The same code runs unchanged on **AMD ROCm**: a ROCm PyTorch build
+   exposes AMD GPUs through ``device='cuda'``, so ``A.cuda()`` /
+   ``b.cuda()`` move tensors onto the AMD GPU. The PyTorch-native
+   iterative solvers and the ``strumpack`` direct solver both work on
+   ROCm; ``cudss`` does **not** (it is NVIDIA-only).
 
 **Code:**
 
@@ -835,7 +843,7 @@ Transfer to GPU for CUDA-accelerated solving.
 
    A = SparseTensor(val, row, col, shape)
    A_cuda = A.cuda()
-   
+
    x = A_cuda.solve(b.cuda())
 
 ----
@@ -843,15 +851,17 @@ Transfer to GPU for CUDA-accelerated solving.
 Backend Selection on CUDA
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Auto Selection:** cuDSS (preferred) → CuPy (fallback)
+**Auto Selection (NVIDIA):** cuDSS (preferred) → pytorch (iterative fallback)
+
+**Auto Selection (AMD ROCm):** strumpack (direct) / pytorch (iterative) — cuDSS is NVIDIA-only
 
 **Code:**
 
 .. code-block:: python
 
-   x = A_cuda.solve(b_cuda, backend='cudss', method='lu')
-   x = A_cuda.solve(b_cuda, backend='cudss', method='cholesky')  # For SPD
-   x = A_cuda.solve(b_cuda, backend='cupy', method='lu')
+   x = A_cuda.solve(b_cuda, backend='cudss', method='lu')        # NVIDIA only
+   x = A_cuda.solve(b_cuda, backend='cudss', method='cholesky')  # For SPD, NVIDIA only
+   x = A_cuda.solve(b_cuda, backend='strumpack', method='lu')    # CUDA or ROCm direct solve
 
 ----
 

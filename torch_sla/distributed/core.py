@@ -34,8 +34,6 @@ import warnings
 
 from ..backends import (
     is_scipy_available,
-    is_eigen_available,
-    is_cupy_available,
     is_cudss_available,
     select_backend,
     select_method,

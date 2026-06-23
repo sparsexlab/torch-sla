@@ -7,6 +7,8 @@ It's especially useful for large-scale problems where direct solvers run out of 
 Methods:
 - 'cg': Conjugate Gradient (for SPD matrices)
 - 'bicgstab': BiCGStab (for general matrices)
+- 'gmres': restarted GMRES (general / non-symmetric matrices)
+- 'minres': MINRES (symmetric / Hermitian, possibly indefinite; needs SPD preconditioner)
 
 Preconditioners (ordered by effectiveness):
 - 'ic0': Incomplete Cholesky (zero fill-in) - BEST for SPD
@@ -410,6 +412,256 @@ def ic0_preconditioner(A: CachedSparseMatrix, num_sweeps: int = 2) -> Callable[[
     return apply
 
 
+def ilu0_preconditioner(A: CachedSparseMatrix) -> Callable[[Tensor], Tensor]:
+    """
+    ILU(0): incomplete LU with **zero fill-in** on A's existing sparsity pattern.
+
+    Factors ``A ~= L U`` where ``L`` (unit lower) and ``U`` (upper) are confined
+    to the nonzero pattern of ``A`` (classic IKJ Gaussian elimination, dropping
+    every entry outside the pattern). The apply solves ``M^{-1} r = U^{-1}(L^{-1} r)``
+    with sparse triangular forward/back substitution.
+
+    Real + complex Hermitian/general safe (no conjugation is applied; the IKJ
+    recurrence works directly on the stored values). Falls back to
+    ``scipy.sparse.linalg.spilu`` only if the pure-Python factorization fails.
+
+    Convergence: typically 2-5x fewer iterations than Jacobi on anisotropic /
+    ill-conditioned problems.
+    Cost: O(nnz * avg_bandwidth) setup, O(nnz) per apply.
+    """
+    import numpy as np
+    from scipy.sparse import csr_matrix
+
+    n = A.n
+    device = A.device
+    dtype = A.dtype
+
+    # Assemble A on CPU as a CSR matrix (summing duplicate COO entries).
+    row_np = A.row.cpu().numpy()
+    col_np = A.col.cpu().numpy()
+    val_np = A.val.detach().cpu().numpy()
+    A_csr = csr_matrix((val_np, (row_np, col_np)), shape=(n, n))
+    A_csr.sum_duplicates()
+    A_csr.sort_indices()
+
+    indptr = A_csr.indptr
+    indices = A_csr.indices
+    if np.iscomplexobj(val_np):
+        data = A_csr.data.astype(np.complex128).copy()
+    else:
+        data = A_csr.data.astype(np.float64).copy()
+
+    # Map (i, j) -> position in the flat data array for each row, so the IKJ
+    # update can test "is (i,k)/(k,j) in the pattern?" in O(1).
+    # diag_pos[i] = index into data for the diagonal of row i (-1 if missing).
+    diag_pos = np.full(n, -1, dtype=np.int64)
+    for i in range(n):
+        for p in range(indptr[i], indptr[i + 1]):
+            if indices[p] == i:
+                diag_pos[i] = p
+                break
+
+    try:
+        # IKJ in-place ILU(0). col_index_of[j] holds the data position of
+        # column j in the current row i, or -1 if not in the pattern.
+        col_index_of = np.full(n, -1, dtype=np.int64)
+        tiny = 1e-14
+        for i in range(n):
+            row_start, row_end = indptr[i], indptr[i + 1]
+            for p in range(row_start, row_end):
+                col_index_of[indices[p]] = p
+            # eliminate columns k < i that are in the pattern
+            for p in range(row_start, row_end):
+                k = indices[p]
+                if k >= i:
+                    continue
+                dk = diag_pos[k]
+                if dk < 0:
+                    continue
+                ukk = data[dk]
+                if abs(ukk) < tiny:
+                    ukk = tiny
+                lik = data[p] / ukk
+                data[p] = lik  # store multiplier in L part
+                # a[i, j] -= lik * u[k, j]  for j > k, only where (i,j) in pattern
+                for q in range(dk + 1, indptr[k + 1]):
+                    j = indices[q]
+                    pj = col_index_of[j]
+                    if pj >= 0:
+                        data[pj] -= lik * data[q]
+            for p in range(row_start, row_end):
+                col_index_of[indices[p]] = -1
+        factored = True
+    except Exception:
+        factored = False
+
+    if factored:
+        # Split combined LU into unit-lower L (strict + implicit unit diag) and
+        # upper U as torch CSR tensors for fast triangular solves.
+        L_rows, L_cols, L_vals = [], [], []
+        U_rows, U_cols, U_vals = [], [], []
+        for i in range(n):
+            for p in range(indptr[i], indptr[i + 1]):
+                j = indices[p]
+                if j < i:
+                    L_rows.append(i); L_cols.append(j); L_vals.append(data[p])
+                else:
+                    U_rows.append(i); U_cols.append(j); U_vals.append(data[p])
+
+        torch_real = torch.empty(0, dtype=dtype).real.dtype
+        complex_problem = dtype.is_complex
+
+        def _to_tensor(vals):
+            arr = np.asarray(vals)
+            if complex_problem:
+                return torch.tensor(arr, dtype=dtype, device=device)
+            return torch.tensor(arr.real.astype(np.float64), dtype=dtype, device=device)
+
+        # Precompute U diagonal (with the same tiny guard used in elimination).
+        Udiag = np.empty(n, dtype=data.dtype)
+        for i in range(n):
+            dp = diag_pos[i]
+            ud = data[dp] if dp >= 0 else 0.0
+            if abs(ud) < tiny:
+                ud = tiny
+            Udiag[i] = ud
+        Udiag_t = _to_tensor(Udiag)
+
+        # CSR row pointers for sequential triangular solves.
+        L_indptr = [0] * (n + 1)
+        for r in L_rows:
+            L_indptr[r + 1] += 1
+        for i in range(n):
+            L_indptr[i + 1] += L_indptr[i]
+        U_indptr = [0] * (n + 1)
+        for r in U_rows:
+            U_indptr[r + 1] += 1
+        for i in range(n):
+            U_indptr[i + 1] += U_indptr[i]
+
+        # Reorder L/U entries by row into flat CSR-style python lists.
+        L_col_by_row = [[] for _ in range(n)]
+        L_val_by_row = [[] for _ in range(n)]
+        for r, c, vv in zip(L_rows, L_cols, L_vals):
+            L_col_by_row[r].append(c); L_val_by_row[r].append(vv)
+        # Upper without the diagonal (diagonal handled separately).
+        U_col_by_row = [[] for _ in range(n)]
+        U_val_by_row = [[] for _ in range(n)]
+        for r, c, vv in zip(U_rows, U_cols, U_vals):
+            if c == r:
+                continue
+            U_col_by_row[r].append(c); U_val_by_row[r].append(vv)
+
+        # Move per-row index/value lists to tensors for vectorized gather.
+        L_cols_t = [torch.tensor(cs, dtype=torch.long, device=device) if cs else None
+                    for cs in L_col_by_row]
+        L_vals_t = [_to_tensor(vs) if vs else None for vs in L_val_by_row]
+        U_cols_t = [torch.tensor(cs, dtype=torch.long, device=device) if cs else None
+                    for cs in U_col_by_row]
+        U_vals_t = [_to_tensor(vs) if vs else None for vs in U_val_by_row]
+
+        def apply(r: Tensor) -> Tensor:
+            # Forward solve L y = r  (unit lower diagonal).
+            y = r.clone()
+            for i in range(n):
+                cols = L_cols_t[i]
+                if cols is not None:
+                    y[i] = y[i] - torch.dot(L_vals_t[i], y[cols])
+            # Back solve U x = y.
+            xsol = y.clone()
+            for i in range(n - 1, -1, -1):
+                cols = U_cols_t[i]
+                if cols is not None:
+                    xsol[i] = xsol[i] - torch.dot(U_vals_t[i], xsol[cols])
+                xsol[i] = xsol[i] / Udiag_t[i]
+            return xsol
+
+        return apply
+
+    # Fallback: scipy spilu restricted to ~zero fill.
+    from scipy.sparse.linalg import spilu
+    A_csc = A_csr.tocsc()
+    lu = spilu(A_csc, drop_tol=0.0, fill_factor=1.0)
+    complex_problem = dtype.is_complex
+
+    def apply(r: Tensor) -> Tensor:
+        r_np = r.detach().cpu().numpy()
+        z = lu.solve(r_np)
+        if complex_problem:
+            return torch.tensor(z, dtype=dtype, device=device)
+        return torch.tensor(z.real, dtype=dtype, device=device)
+
+    return apply
+
+
+def additive_schwarz_preconditioner(
+    A: CachedSparseMatrix, block_size: int = 32, overlap: int = 0
+) -> Callable[[Tensor], Tensor]:
+    """
+    Additive Schwarz (ASM) preconditioner.
+
+    Partitions the rows into contiguous subdomains of ``block_size`` (optionally
+    overlapping by ``overlap`` rows on each side). Each subdomain is solved
+    exactly via a dense LU of its diagonal block; the local corrections are
+    **summed** with the standard (symmetric) additive-Schwarz weighting
+    ``M^{-1} = sum_i R_i^T A_i^{-1} R_i``.
+
+    Keeping the restriction/prolongation symmetric (no per-row averaging) means
+    ``M`` stays symmetric -> usable as a CG/MINRES preconditioner when ``A`` is
+    SPD; the overlap lets neighboring blocks exchange information and converges
+    faster than plain block-Jacobi. Real + complex safe.
+
+    Convergence: better than Jacobi (and, with overlap, than plain block-Jacobi).
+    Cost: O(sum block^3) setup, O(sum block^2) per apply.
+    """
+    n = A.n
+    device = A.device
+    dtype = A.dtype
+
+    num_blocks = (n + block_size - 1) // block_size
+
+    blocks = []  # (start, end, lu_solver_factors)
+
+    for b in range(num_blocks):
+        core_start = b * block_size
+        core_end = min((b + 1) * block_size, n)
+        start = max(0, core_start - overlap)
+        end = min(n, core_end + overlap)
+        size = end - start
+
+        mask = (A.row >= start) & (A.row < end) & (A.col >= start) & (A.col < end)
+        local_row = A.row[mask] - start
+        local_col = A.col[mask] - start
+        local_val = A.val[mask]
+
+        block = torch.zeros((size, size), dtype=dtype, device=device)
+        block.index_put_((local_row, local_col), local_val, accumulate=True)
+        block += torch.eye(size, dtype=dtype, device=device) * 1e-10
+
+        try:
+            LU, piv = torch.linalg.lu_factor(block)
+            blocks.append((start, end, ('lu', LU, piv)))
+        except Exception:
+            diag = torch.diagonal(block)
+            blocks.append((start, end, ('diag', 1.0 / (diag + 1e-10), None)))
+
+    def apply(r: Tensor) -> Tensor:
+        # Standard additive Schwarz: M^{-1} r = sum_i R_i^T A_i^{-1} R_i r.
+        # Symmetric restriction/prolongation -> M stays symmetric (SPD if A is).
+        z = torch.zeros_like(r)
+        for start, end, fac in blocks:
+            r_loc = r[start:end]
+            kind = fac[0]
+            if kind == 'lu':
+                sol = torch.linalg.lu_solve(fac[1], fac[2], r_loc.unsqueeze(-1)).squeeze(-1)
+            else:
+                sol = fac[1] * r_loc
+            z[start:end] += sol
+        return z
+
+    return apply
+
+
 def amg_preconditioner(A: CachedSparseMatrix, num_smooth: int = 1, omega: float = 0.8) -> Callable[[Tensor], Tensor]:
     """
     Lightweight 2-level Algebraic Multigrid (AMG) preconditioner.
@@ -609,6 +861,8 @@ def get_preconditioner(A: CachedSparseMatrix, name: str = 'jacobi',
     Available preconditioners (roughly ordered by effectiveness for SPD):
     - 'auto': Automatically select based on matrix properties (RECOMMENDED)
     - 'ic0': Incomplete Cholesky (best for SPD)
+    - 'ilu': ILU(0) incomplete LU, zero fill-in (general matrices)
+    - 'asm': Additive Schwarz (overlapping block solves)
     - 'amg': Algebraic Multigrid (good for Poisson-like)
     - 'polynomial': Chebyshev polynomial (degree 5)
     - 'block_jacobi': Block Jacobi (block_size=32)
@@ -641,6 +895,10 @@ def get_preconditioner(A: CachedSparseMatrix, name: str = 'jacobi',
         precond = polynomial_preconditioner(A, degree=5)
     elif name == 'ic0':
         precond = ic0_preconditioner(A)
+    elif name in ('ilu', 'ilu0'):
+        precond = ilu0_preconditioner(A)
+    elif name == 'asm':
+        precond = additive_schwarz_preconditioner(A, block_size=32, overlap=4)
     elif name == 'amg':
         # Prefer real PyAMG hierarchy when available; otherwise the
         # original 2-level stub. Both expose the same callable shape.
@@ -661,7 +919,7 @@ def get_preconditioner(A: CachedSparseMatrix, name: str = 'jacobi',
         raise ValueError(
             f"Unknown preconditioner: {name}. "
             f"Available: auto, jacobi, ssor, block_jacobi, polynomial, "
-            f"ic0, amg, pyamg, none"
+            f"ic0, ilu, asm, amg, pyamg, none"
         )
     
     if mixed_precision and A.dtype == torch.float64:
@@ -1339,6 +1597,556 @@ def pbicgstab_solve(
 
 
 # ============================================================================
+# GMRES (right-preconditioned, restarted) -- general / non-symmetric systems
+# ============================================================================
+
+def _conj_scalar(z):
+    """Conjugate a Python scalar (complex or real)."""
+    return z.conjugate() if isinstance(z, complex) else z
+
+
+def _givens(a, b):
+    """Complex-safe Givens rotation.
+
+    Returns ``(c, s, r)`` with ``c`` real, ``s`` (possibly complex) such that
+    ``[[c, s], [-conj(s), c]] @ [a, b]^T == [r, 0]^T``. Here ``b`` is the
+    sub-diagonal entry, which in our Arnoldi loop is always a real, non-negative
+    norm, but the general complex form is used so ``a`` may be complex.
+    """
+    if b == 0:
+        return 1.0, (0j if isinstance(a, complex) else 0.0), a
+    if a == 0:
+        ab = abs(b)
+        s = (b.conjugate() / ab) if isinstance(b, complex) else (b / ab)
+        return 0.0, s, ab
+    aa = abs(a)
+    nrm = math.sqrt(aa * aa + abs(b) * abs(b))
+    c = aa / nrm
+    if isinstance(a, complex) or isinstance(b, complex):
+        alpha = a / aa  # unit-modulus phase of a
+        bconj = b.conjugate() if isinstance(b, complex) else b
+        return c, alpha * bconj / nrm, alpha * nrm
+    sgn = a / aa  # +/-1
+    return c, sgn * b / nrm, sgn * nrm
+
+
+def pgmres_solve(
+    val: Tensor,
+    row: Tensor,
+    col: Tensor,
+    shape: Tuple[int, int],
+    b: Tensor,
+    x0: Optional[Tensor] = None,
+    atol: float = 1e-10,
+    rtol: float = 1e-6,
+    maxiter: int = 10000,
+    preconditioner: str = 'auto',
+    restart: int = 30,
+) -> Tuple[Tensor, int, float]:
+    """Right-preconditioned restarted GMRES(``restart``).
+
+    Solves ``A x = b`` for a general (non-symmetric, possibly complex) sparse
+    ``A`` on CPU or CUDA. Right preconditioning keeps the monitored quantity the
+    *true* residual ``b - A x`` (not the preconditioned residual), so the
+    convergence test is honest regardless of ``M``.
+
+    ``maxiter`` bounds the total number of inner Arnoldi steps across restarts.
+    """
+    A = CachedSparseMatrix(val, row, col, shape)
+    M = get_preconditioner(A, preconditioner, method='gmres')
+    device, dtype, n = A.device, A.dtype, A.n
+    is_complex = torch.is_complex(b)
+
+    if x0 is None:
+        x = torch.zeros(n, dtype=dtype, device=device)
+        r = b.clone()
+    else:
+        x = x0.clone()
+        r = b - A.matvec(x)
+
+    b_norm = torch.norm(b).item()
+    if b_norm == 0:
+        b_norm = 1.0
+    tol = max(atol, rtol * b_norm)
+
+    r_norm = torch.norm(r).item()
+    if r_norm <= tol:
+        return x, 0, r_norm
+
+    m = min(int(restart), n)
+    zero = 0j if is_complex else 0.0
+    total = 0
+    while total < maxiter:
+        # Arnoldi basis (n x m+1) + Hessenberg / Givens kept as host scalars
+        V = torch.zeros(n, m + 1, dtype=dtype, device=device)
+        H = [[zero] * m for _ in range(m + 1)]
+        cs = [0.0] * m
+        sn = [zero] * m
+        g = [zero] * (m + 1)
+
+        beta = torch.norm(r).item()
+        V[:, 0] = r / beta
+        g[0] = beta
+        k = 0
+        for j in range(m):
+            total += 1
+            w = A.matvec(M(V[:, j]))              # right preconditioning
+            for i in range(j + 1):
+                hij = torch.vdot(V[:, i], w).item()
+                H[i][j] = hij
+                w = w - V[:, i] * hij
+            hjp = torch.norm(w).item()
+            H[j + 1][j] = hjp
+            if hjp > 1e-30:
+                V[:, j + 1] = w / hjp
+            # apply previous rotations to the new column
+            for i in range(j):
+                t = cs[i] * H[i][j] + sn[i] * H[i + 1][j]
+                H[i + 1][j] = -_conj_scalar(sn[i]) * H[i][j] + cs[i] * H[i + 1][j]
+                H[i][j] = t
+            # eliminate H[j+1][j]
+            c, s, rr = _givens(H[j][j], H[j + 1][j])
+            cs[j], sn[j] = c, s
+            H[j][j] = rr
+            H[j + 1][j] = zero
+            g[j + 1] = -_conj_scalar(s) * g[j]
+            g[j] = c * g[j]
+            k = j + 1
+            if abs(g[j + 1]) <= tol or total >= maxiter or hjp <= 1e-30:
+                break
+        # back-substitution: H[:k,:k] y = g[:k]
+        y = [zero] * k
+        for i in range(k - 1, -1, -1):
+            acc = g[i]
+            for jj in range(i + 1, k):
+                acc -= H[i][jj] * y[jj]
+            y[i] = acc / H[i][i]
+        yv = torch.tensor(y, dtype=dtype, device=device)
+        x = x + M(V[:, :k] @ yv)                  # undo right preconditioner
+        r = b - A.matvec(x)
+        r_norm = torch.norm(r).item()
+        if r_norm <= tol:
+            return x, total, r_norm
+
+    warnings.warn(f"GMRES did not converge in {total} iterations (residual={r_norm:.2e})")
+    return x, total, r_norm
+
+
+# ============================================================================
+# MINRES (preconditioned) -- symmetric / Hermitian, possibly indefinite
+# ============================================================================
+
+def minres_solve(
+    val: Tensor,
+    row: Tensor,
+    col: Tensor,
+    shape: Tuple[int, int],
+    b: Tensor,
+    x0: Optional[Tensor] = None,
+    atol: float = 1e-10,
+    rtol: float = 1e-6,
+    maxiter: int = 10000,
+    preconditioner: str = 'auto',
+) -> Tuple[Tensor, int, float]:
+    """Preconditioned MINRES for symmetric/Hermitian (possibly indefinite) ``A``.
+
+    Follows the Paige-Saunders formulation (Stanford SOL ``minres``). Requires an
+    **SPD preconditioner** ``M``; for a Hermitian system the Lanczos tridiagonal
+    is real, so all recurrence scalars stay real even though the vectors may be
+    complex. Short 3-term recurrence -> constant memory (unlike GMRES).
+    """
+    A = CachedSparseMatrix(val, row, col, shape)
+    M = get_preconditioner(A, preconditioner, method='minres')
+    device, dtype, n = A.device, A.dtype, A.n
+
+    if x0 is None:
+        x = torch.zeros(n, dtype=dtype, device=device)
+        r1 = b.clone()
+    else:
+        x = x0.clone()
+        r1 = b - A.matvec(x)
+
+    y = M(r1)
+    beta_start = torch.vdot(r1, y).real.item()    # r1^H M^{-1} r1
+    if beta_start < 0:
+        raise ValueError("MINRES requires an SPD preconditioner (got <r,M r> < 0)")
+    beta = math.sqrt(beta_start)
+
+    b_norm = torch.norm(b).item()
+    if b_norm == 0:
+        # b == 0  =>  x == 0 is the exact solution
+        return torch.zeros(n, dtype=dtype, device=device), 0, 0.0
+    beta1 = beta
+    if beta == 0:
+        return x, 0, 0.0
+
+    # Machine epsilon for the (real) working precision. For complex dtypes use
+    # the precision of the underlying real scalars, which is what the recurrence
+    # actually runs in.
+    real_dtype = torch.empty(0, dtype=dtype).real.dtype
+    eps = float(torch.finfo(real_dtype).eps)
+
+    # rotation + recurrence state (all real for a Hermitian system)
+    oldb = 0.0
+    dbar = 0.0
+    epsln = 0.0
+    phibar = beta
+    cs = -1.0
+    sn = 0.0
+    w = torch.zeros(n, dtype=dtype, device=device)
+    w2 = torch.zeros(n, dtype=dtype, device=device)
+    r2 = r1.clone()
+
+    # Paige-Saunders normalized-test running estimates (mirrors scipy.minres):
+    #   test1 = ||r|| / (||A|| ||x||)   relative residual
+    #   test2 = ||Ar|| / (||A|| ||r||)  least-squares residual
+    # with Anorm from a running Frobenius-like estimate, Acond = gmax/gmin.
+    tnorm2 = 0.0
+    gmax = 0.0
+    gmin = float(torch.finfo(real_dtype).max)
+    rhs1 = beta1
+    rhs2 = 0.0
+    Anorm = 0.0
+    ynorm = 0.0
+    rnorm = beta1
+    istop = 0
+
+    for itn in range(1, maxiter + 1):
+        v = (1.0 / beta) * y                       # Lanczos vector
+        y = A.matvec(v)
+        if itn >= 2:
+            y = y - (beta / oldb) * r1
+        alfa = torch.vdot(v, y).real.item()
+        y = y - (alfa / beta) * r2
+        r1 = r2
+        r2 = y
+        y = M(r2)
+        oldb = beta
+        beta_sq = torch.vdot(r2, y).real.item()
+        if beta_sq < 0:
+            raise ValueError("MINRES requires an SPD preconditioner (got <r,M r> < 0)")
+        beta = math.sqrt(beta_sq)
+        tnorm2 += alfa * alfa + oldb * oldb + beta * beta
+
+        # apply previous rotation, then build the next one
+        oldeps = epsln
+        delta = cs * dbar + sn * alfa
+        gbar = sn * dbar - cs * alfa
+        epsln = sn * beta
+        dbar = -cs * beta
+        root = math.sqrt(gbar * gbar + dbar * dbar)   # ||[gbar, dbar]||
+        Arnorm = phibar * root                        # estimate of ||A r||
+
+        gamma = math.sqrt(gbar * gbar + beta * beta)
+        gamma = max(gamma, eps)
+        cs = gbar / gamma
+        sn = beta / gamma
+        phi = cs * phibar
+        phibar = sn * phibar
+
+        # solution update (short recurrence)
+        w1, w2 = w2, w
+        w = (v - oldeps * w1 - delta * w2) * (1.0 / gamma)
+        x = x + phi * w
+
+        # update running condition-number estimate
+        gmax = max(gmax, gamma)
+        gmin = min(gmin, gamma)
+        z = rhs1 / gamma
+        rhs1 = rhs2 - delta * z
+        rhs2 = -epsln * z
+
+        # estimate norms and the normalized stopping tests (Paige-Saunders)
+        Anorm = math.sqrt(tnorm2)
+        ynorm = torch.norm(x).item()
+        epsx = Anorm * ynorm * eps
+
+        rnorm = phibar
+        if ynorm == 0.0 or Anorm == 0.0:
+            test1 = float('inf')
+        else:
+            test1 = rnorm / (Anorm * ynorm)          # ||r|| / (||A|| ||x||)
+        if Anorm == 0.0:
+            test2 = float('inf')
+        else:
+            test2 = root / Anorm                     # ||Ar|| / (||A|| ||r||)
+
+        Acond = gmax / gmin if gmin > 0 else float('inf')
+
+        # Stopping criteria (combine scipy's normalized tests with the
+        # caller's atol/rtol on the genuine preconditioned residual rnorm).
+        if istop == 0:
+            t1 = 1.0 + test1            # exact when rtol < eps
+            t2 = 1.0 + test2
+            if t2 <= 1.0:
+                istop = 2
+            if t1 <= 1.0:
+                istop = 1
+            if itn >= maxiter:
+                istop = 6
+            if Acond >= 0.1 / eps:
+                istop = 4
+            if epsx >= beta1:
+                istop = 3
+            if test2 <= rtol:
+                istop = 2
+            if test1 <= rtol:
+                istop = 1
+            # Honor an explicit absolute tolerance on the residual as well so
+            # callers asking for a tight atol still get it.
+            if rnorm <= atol:
+                istop = 1
+
+        if istop != 0:
+            converged = istop in (1, 2, 3)
+            if not converged and istop == 6:
+                warnings.warn(
+                    f"MINRES did not converge in {maxiter} iterations "
+                    f"(residual={rnorm:.2e})"
+                )
+            return x, itn, rnorm
+
+    warnings.warn(f"MINRES did not converge in {maxiter} iterations (residual={rnorm:.2e})")
+    return x, maxiter, rnorm
+
+
+# ============================================================================
+# LSQR / LSMR -- least-squares (Golub-Kahan bidiagonalization), matrix-free.
+# Pure-torch ports of scipy.sparse.linalg.lsqr / lsmr; device-agnostic
+# (CPU / CUDA / ROCm). Solve  min_x ||A x - b||_2  with optional Tikhonov
+# ``damp``; A may be rectangular. Scalars (norms, rotations) are real;
+# the only matrix ops are A @ x and A^H @ y, so complex A works (rmatvec
+# uses the conjugate transpose). Forward only (called inside an autograd
+# Function's forward); uses .item() freely.
+# ============================================================================
+
+def _sym_ortho(a, b):
+    """Stable Givens rotation (Choi). Returns (c, s, r) on real scalars."""
+    if b == 0:
+        return (math.copysign(1.0, a) if a != 0 else 1.0), 0.0, abs(a)
+    if a == 0:
+        return 0.0, math.copysign(1.0, b), abs(b)
+    if abs(b) > abs(a):
+        tau = a / b
+        s = math.copysign(1.0, b) / math.sqrt(1 + tau * tau)
+        return s * tau, s, b / s
+    tau = b / a
+    c = math.copysign(1.0, a) / math.sqrt(1 + tau * tau)
+    return c, c * tau, a / c
+
+
+def _ls_matvecs(val, row, col, shape):
+    """Return (matvec, rmatvec) for A and A^H (conj-transpose for complex)."""
+    A = CachedSparseMatrix(val, row, col, shape)
+    AT = CachedSparseMatrix(torch.conj_physical(val), col, row, (shape[1], shape[0]))
+    return A.matvec, AT.matvec
+
+
+def lsqr_solve(val, row, col, shape, b, *, atol=1e-8, btol=1e-8, maxiter=10000,
+               damp=0.0, conlim=1e8, x0=None, **kwargs):
+    """LSQR (Paige & Saunders 1982). Faithful torch port of scipy lsqr."""
+    matvec, rmatvec = _ls_matvecs(val, row, col, shape)
+    m, n = shape
+    dtype, device = b.dtype, b.device
+    eps = torch.finfo(b.real.dtype if torch.is_complex(b) else dtype).eps
+    dampsq = damp * damp
+    ctol = 1.0 / conlim if conlim > 0 else 0.0
+    anorm = ddnorm = res2 = xnorm = xxnorm = z = 0.0
+    cs2, sn2 = -1.0, 0.0
+
+    x = torch.zeros(n, dtype=dtype, device=device) if x0 is None else x0.clone()
+    u = b.clone() if x0 is None else (b - matvec(x))
+    beta = u.norm().item()
+    if beta > 0:
+        u = u / beta
+    v = rmatvec(u)
+    alfa = v.norm().item()
+    if alfa > 0:
+        v = v / alfa
+    w = v.clone()
+    rhobar, phibar, bnorm, rnorm = alfa, beta, beta, beta
+    if alfa * beta == 0:  # arnorm == 0: x=0 (or x0) is already optimal
+        return x, 0, rnorm
+
+    istop = 0
+    for itn in range(1, maxiter + 1):
+        u = matvec(v) - alfa * u
+        beta = u.norm().item()
+        if beta > 0:
+            u = u / beta
+            anorm = math.sqrt(anorm ** 2 + alfa ** 2 + beta ** 2 + dampsq)
+            v = rmatvec(u) - beta * v
+            alfa = v.norm().item()
+            if alfa > 0:
+                v = v / alfa
+        if damp > 0:
+            rhobar1 = math.sqrt(rhobar ** 2 + dampsq)
+            cs1, sn1 = rhobar / rhobar1, damp / rhobar1
+            psi, phibar = sn1 * phibar, cs1 * phibar
+        else:
+            rhobar1, psi = rhobar, 0.0
+        cs, sn, rho = _sym_ortho(rhobar1, beta)
+        theta = sn * alfa
+        rhobar = -cs * alfa
+        phi = cs * phibar
+        phibar = sn * phibar
+        tau = sn * phi
+        dk = (1.0 / rho) * w
+        x = x + (phi / rho) * w
+        w = v + (-theta / rho) * w
+        ddnorm = ddnorm + dk.norm().item() ** 2
+        # ||x|| estimate
+        delta = sn2 * rho
+        gambar = -cs2 * rho
+        rhs = phi - delta * z
+        zbar = rhs / gambar
+        xnorm = math.sqrt(xxnorm + zbar ** 2)
+        gamma = math.sqrt(gambar ** 2 + theta ** 2)
+        cs2, sn2 = gambar / gamma, theta / gamma
+        z = rhs / gamma
+        xxnorm = xxnorm + z ** 2
+        acond = anorm * math.sqrt(ddnorm)
+        rnorm = math.sqrt(phibar ** 2 + res2)
+        res2 = res2 + psi ** 2
+        arnorm = alfa * abs(tau)
+        test1 = rnorm / bnorm if bnorm > 0 else 0.0
+        test2 = arnorm / (anorm * rnorm + eps)
+        test3 = 1.0 / (acond + eps)
+        t1c = test1 / (1 + anorm * xnorm / bnorm) if bnorm > 0 else test1
+        rtol = btol + atol * anorm * xnorm / bnorm if bnorm > 0 else btol
+        if itn >= maxiter:
+            istop = 7
+        if 1 + test3 <= 1:
+            istop = 6
+        if 1 + test2 <= 1:
+            istop = 5
+        if 1 + t1c <= 1:
+            istop = 4
+        if test3 <= ctol:
+            istop = 3
+        if test2 <= atol:
+            istop = 2
+        if test1 <= rtol:
+            istop = 1
+        if istop:
+            break
+    return x, itn, rnorm
+
+
+def lsmr_solve(val, row, col, shape, b, *, atol=1e-8, btol=1e-8, maxiter=10000,
+               damp=0.0, conlim=1e8, x0=None, **kwargs):
+    """LSMR (Fong & Saunders 2011). Faithful torch port of scipy lsmr."""
+    matvec, rmatvec = _ls_matvecs(val, row, col, shape)
+    m, n = shape
+    dtype, device = b.dtype, b.device
+    eps = torch.finfo(b.real.dtype if torch.is_complex(b) else dtype).eps
+    ctol = 1.0 / conlim if conlim > 0 else 0.0
+
+    x = torch.zeros(n, dtype=dtype, device=device) if x0 is None else x0.clone()
+    u = b.clone() if x0 is None else (b - matvec(x))
+    beta = u.norm().item()
+    if beta > 0:
+        u = u / beta
+    v = rmatvec(u)
+    alpha = v.norm().item()
+    if alpha > 0:
+        v = v / alpha
+
+    # init
+    itn = 0
+    zetabar = alpha * beta
+    alphabar = alpha
+    rho = rhobar = cbar = 1.0
+    sbar = 0.0
+    h = v.clone()
+    hbar = torch.zeros(n, dtype=dtype, device=device)
+    betadd = beta
+    betad = 0.0
+    rhodold = 1.0
+    tautildeold = thetatilde = zeta = d = 0.0
+    normA2 = alpha * alpha
+    maxrbar, minrbar = 0.0, 1e100
+    normb = beta
+    normr = beta
+    normar = alpha * beta
+    if normar == 0:
+        return x, 0, normr
+    if normb == 0:
+        return x, 0, 0.0
+
+    istop = 0
+    for itn in range(1, maxiter + 1):
+        u = matvec(v) - alpha * u
+        beta = u.norm().item()
+        if beta > 0:
+            u = u / beta
+            v = rmatvec(u) - beta * v
+            alpha = v.norm().item()
+            if alpha > 0:
+                v = v / alpha
+        chat, shat, alphahat = _sym_ortho(alphabar, damp)
+        rhoold = rho
+        c, s, rho = _sym_ortho(alphahat, beta)
+        thetanew = s * alpha
+        alphabar = c * alpha
+        rhobarold = rhobar
+        zetaold = zeta
+        thetabar = sbar * rho
+        rhotemp = cbar * rho
+        cbar, sbar, rhobar = _sym_ortho(cbar * rho, thetanew)
+        zeta = cbar * zetabar
+        zetabar = -sbar * zetabar
+        hbar = h + (-(thetabar * rho / (rhoold * rhobarold))) * hbar
+        x = x + (zeta / (rho * rhobar)) * hbar
+        h = v + (-(thetanew / rho)) * h
+        # ||r|| estimate
+        betaacute = chat * betadd
+        betacheck = -shat * betadd
+        betahat = c * betaacute
+        betadd = -s * betaacute
+        thetatildeold = thetatilde
+        ctildeold, stildeold, rhotildeold = _sym_ortho(rhodold, thetabar)
+        thetatilde = stildeold * rhobar
+        rhodold = ctildeold * rhobar
+        betad = -stildeold * betad + ctildeold * betahat
+        tautildeold = (zetaold - thetatildeold * tautildeold) / rhotildeold
+        taud = (zeta - thetatilde * tautildeold) / rhodold
+        d = d + betacheck * betacheck
+        normr = math.sqrt(d + (betad - taud) ** 2 + betadd * betadd)
+        normA2 = normA2 + beta * beta
+        normA = math.sqrt(normA2)
+        normA2 = normA2 + alpha * alpha
+        maxrbar = max(maxrbar, rhobarold)
+        if itn > 1:
+            minrbar = min(minrbar, rhobarold)
+        condA = max(maxrbar, rhotemp) / min(minrbar, rhotemp)
+        normar = abs(zetabar)
+        normx = x.norm().item()
+        test1 = normr / normb if normb > 0 else 0.0
+        test2 = normar / (normA * normr + eps)
+        test3 = 1.0 / (condA + eps)
+        t1c = test1 / (1 + normA * normx / normb) if normb > 0 else test1
+        rtol = btol + atol * normA * normx / normb if normb > 0 else btol
+        if itn >= maxiter:
+            istop = 7
+        if 1 + test3 <= 1:
+            istop = 6
+        if 1 + test2 <= 1:
+            istop = 5
+        if 1 + t1c <= 1:
+            istop = 4
+        if test3 <= ctol:
+            istop = 3
+        if test2 <= atol:
+            istop = 2
+        if test1 <= rtol:
+            istop = 1
+        if istop:
+            break
+    return x, itn, normr
+
+
+# ============================================================================
 # Legacy interfaces for backward compatibility
 # ============================================================================
 
@@ -1439,7 +2247,7 @@ def pytorch_solve(
     b : Tensor
         Right-hand side
     method : str
-        'cg' or 'bicgstab'
+        'cg', 'bicgstab', 'gmres', or 'minres'
     atol : float
         Absolute tolerance
     rtol : float
@@ -1492,8 +2300,41 @@ def pytorch_solve(
         x, _, _ = pbicgstab_solve(val, row, col, shape, b, x0=x0, atol=atol, rtol=rtol,
                                   maxiter=maxiter, preconditioner=preconditioner)
         return x
+    elif method == 'gmres':
+        if b.dim() == 2:
+            cols = []
+            for k in range(b.shape[1]):
+                x_k, _, _ = pgmres_solve(val, row, col, shape, b[:, k], x0=None,
+                                         atol=atol, rtol=rtol, maxiter=maxiter,
+                                         preconditioner=preconditioner)
+                cols.append(x_k)
+            return torch.stack(cols, dim=1)
+        x, _, _ = pgmres_solve(val, row, col, shape, b, x0=x0, atol=atol, rtol=rtol,
+                               maxiter=maxiter, preconditioner=preconditioner)
+        return x
+    elif method == 'minres':
+        if b.dim() == 2:
+            cols = []
+            for k in range(b.shape[1]):
+                x_k, _, _ = minres_solve(val, row, col, shape, b[:, k], x0=None,
+                                         atol=atol, rtol=rtol, maxiter=maxiter,
+                                         preconditioner=preconditioner)
+                cols.append(x_k)
+            return torch.stack(cols, dim=1)
+        x, _, _ = minres_solve(val, row, col, shape, b, x0=x0, atol=atol, rtol=rtol,
+                               maxiter=maxiter, preconditioner=preconditioner)
+        return x
+    elif method in ('lsqr', 'lsmr'):
+        # least-squares (Golub-Kahan); no preconditioner. btol from rtol.
+        fn = lsqr_solve if method == 'lsqr' else lsmr_solve
+        if b.dim() == 2:
+            cols = [fn(val, row, col, shape, b[:, k], atol=atol, btol=rtol,
+                       maxiter=maxiter)[0] for k in range(b.shape[1])]
+            return torch.stack(cols, dim=1)
+        x, _, _ = fn(val, row, col, shape, b, x0=x0, atol=atol, btol=rtol, maxiter=maxiter)
+        return x
     else:
-        raise ValueError(f"Unknown method: {method}. Available: cg, bicgstab")
+        raise ValueError(f"Unknown method: {method}. Available: cg, bicgstab, gmres, minres, lsqr, lsmr")
 
 
 # ============================================================================
@@ -1729,3 +2570,69 @@ def batched_cg_solve(
         A, B, X0=X0, atol=atol, rtol=rtol, maxiter=maxiter,
         preconditioner=M_batched, check_interval=check_interval
     )
+
+
+def batched_cg_same_pattern(
+    val_batch: Tensor,   # [B, nnz]
+    row: Tensor,         # [nnz]   (shared across the batch)
+    col: Tensor,         # [nnz]   (shared across the batch)
+    shape: Tuple[int, int],
+    b_batch: Tensor,     # [B, n]
+    atol: float = 1e-10,
+    rtol: float = 1e-6,
+    maxiter: int = 10000,
+) -> Tensor:
+    """Truly *batched* CG for a batch of SPD matrices that share a sparsity
+    pattern ``(row, col)`` but have different values.
+
+    Solves ``A_i x_i = b_i`` for every i **simultaneously** -- the batch lives
+    on dim 0 throughout, so there is no Python loop over matrices. The matvec is
+    a single batched scatter (``index_add_`` over the shared pattern) and every
+    CG scalar (alpha, beta, rho) is a length-B vector. Jacobi-preconditioned.
+
+    Pure torch ops only -> device-agnostic (CPU / CUDA / ROCm). Returns ``x``
+    of shape ``[B, n]``. Intended to be called inside an autograd ``Function``
+    that supplies gradients analytically (this routine itself does not track
+    grad).
+    """
+    m, n = shape
+    assert m == n, "CG requires square systems"
+    Bn = val_batch.shape[0]
+    device, dtype = val_batch.device, val_batch.dtype
+    row = row.to(device)
+    col = col.to(device)
+
+    def matvec(X):  # [B, n] -> [B, n] :  Y_i = A_i X_i
+        Y = torch.zeros(Bn, n, device=device, dtype=dtype)
+        Y.index_add_(1, row, val_batch * X[:, col])
+        return Y
+
+    # Per-matrix Jacobi diagonal D_i (gather the diagonal entries of each A_i)
+    D = torch.zeros(Bn, n, device=device, dtype=dtype)
+    diag = row == col
+    D.index_add_(1, row[diag], val_batch[:, diag])
+    D_inv = torch.where(D.abs() > 0, 1.0 / D, torch.ones_like(D))
+
+    X = torch.zeros(Bn, n, device=device, dtype=dtype)
+    R = b_batch.clone()                 # b - A·0
+    Z = D_inv * R
+    P = Z.clone()
+    rz_old = (R * Z).sum(dim=1)         # [B]
+    bnorm = torch.linalg.vector_norm(b_batch, dim=1).clamp_min(1e-30)
+    tol = torch.clamp(rtol * bnorm, min=atol)   # per-batch stopping threshold
+
+    tiny = torch.tensor(1e-30, dtype=dtype, device=device)
+    for _ in range(maxiter):
+        AP = matvec(P)
+        pAp = (P * AP).sum(dim=1)
+        alpha = rz_old / torch.where(pAp.abs() > 0, pAp, tiny)
+        X = X + alpha.unsqueeze(1) * P
+        R = R - alpha.unsqueeze(1) * AP
+        if bool((torch.linalg.vector_norm(R, dim=1) <= tol).all()):
+            break
+        Z = D_inv * R
+        rz_new = (R * Z).sum(dim=1)
+        beta = rz_new / torch.where(rz_old.abs() > 0, rz_old, tiny)
+        P = Z + beta.unsqueeze(1) * P
+        rz_old = rz_new
+    return X

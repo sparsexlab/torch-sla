@@ -65,11 +65,6 @@ setup(
     },
     
     packages=find_packages(),
-    package_data={
-        'torch_sla': [
-            '../csrc/spsolve/*.cpp',
-        ],
-    },
     include_package_data=True,
     
     python_requires='>=3.8',
@@ -122,7 +117,7 @@ setup(
     ],
     
     keywords=[
-        'pytorch', 'sparse', 'linear-algebra', 'cuda', 'cupy', 'cudss',
+        'pytorch', 'sparse', 'linear-algebra', 'cuda', 'cudss',
         'sparse-matrix', 'linear-solver', 'differentiable', 'autograd',
     ],
     

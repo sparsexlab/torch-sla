@@ -6,16 +6,15 @@ This module provides differentiable sparse linear equation solvers with multiple
 Backends:
 ---------
 - 'scipy': SciPy backend (CPU only) - Direct solvers via LU/UMFPACK
-- 'eigen': Eigen backend (CPU only) - Iterative solvers (CG, BiCGStab)
-- 'pytorch': PyTorch-native (CPU & CUDA) - Iterative solvers for large-scale problems
-- 'cupy': CuPy backend (CUDA only) - Direct and iterative solvers via cupyx.scipy
+- 'pytorch': PyTorch-native (CPU / CUDA / ROCm) - Iterative solvers for large-scale problems
+- 'strumpack': STRUMPACK multifrontal direct (CPU / CUDA / ROCm)
 - 'cudss': NVIDIA cuDSS (CUDA only) - Direct solvers (LU, Cholesky, LDLT)
 
 Methods:
 --------
 Direct solvers:
-- 'lu': LU factorization (scipy, cupy, cudss)
-- 'umfpack': UMFPACK direct solver (scipy only)
+- 'lu': LU factorization (scipy, strumpack, cudss)
+- 'umfpack': UMFPACK direct solver (CPU only, via scipy/scikit-umfpack; no GPU/ROCm build)
 - 'lu': LU decomposition
 - 'cholesky': Cholesky decomposition (SPD matrices)
 - 'ldlt': LDLT decomposition (symmetric matrices, cudss)
@@ -35,7 +34,6 @@ Usage:
     x = spsolve(val, row, col, shape, b, backend='scipy', method='lu')
     x = spsolve(val, row, col, shape, b, backend='cudss', method='lu')
     x = spsolve(val, row, col, shape, b, backend='pytorch', method='cg')  # GPU iterative
-    x = spsolve(val, row, col, shape, b, backend='cupy', method='lu')     # CuPy GPU direct
 """
 
 import warnings
@@ -44,15 +42,13 @@ from torch.autograd.function import Function
 from typing import Tuple, Optional, Union, Literal
 
 from .backends import (
-    get_eigen_module,
     get_cudss_module,
     is_scipy_available,
-    is_eigen_available,
     is_pytorch_available,
-    is_cupy_available,
     is_cudss_available,
     is_pyamg_available,
     is_amgx_available,
+    is_strumpack_available,
     select_backend,
     select_method,
     BACKEND_METHODS,
@@ -174,118 +170,6 @@ class SparseLinearSolvePyAMG(Function):
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb, None, None, None
-
-
-class SparseLinearSolveEigenCG(Function):
-    """Eigen CG solver with gradient support"""
-
-    @staticmethod
-    def forward(ctx, val, row, col, shape, b, atol, maxiter):
-        _eigen = get_eigen_module()
-        indices = torch.stack([row, col], 0)
-        if b.dim() == 2:
-            cols = [_eigen.cg(indices, val, shape[0], shape[1], b[:, k], atol, maxiter)
-                    for k in range(b.shape[1])]
-            u = torch.stack(cols, dim=1)
-        else:
-            u = _eigen.cg(indices, val, shape[0], shape[1], b, atol, maxiter)
-        ctx.save_for_backward(val, row, col, u)
-        ctx.A_shape = shape
-        ctx.atol = atol
-        ctx.maxiter = maxiter
-        return u
-
-    @staticmethod
-    def backward(ctx, gradu):
-        _eigen = get_eigen_module()
-        val, row, col, u = ctx.saved_tensors
-        m, n = ctx.A_shape
-        atol = ctx.atol
-        maxiter = ctx.maxiter
-        indices_T = torch.stack([col, row], 0)
-        if gradu.dim() == 2:
-            cols = [_eigen.cg(indices_T, val, n, m, gradu[:, k], atol, maxiter)
-                    for k in range(gradu.shape[1])]
-            gradb = torch.stack(cols, dim=1)
-        else:
-            gradb = _eigen.cg(indices_T, val, n, m, gradu, atol, maxiter)
-        gradval = -gradb[row] * u[col]
-        if gradval.dim() == 2:
-            gradval = gradval.sum(-1)
-        return gradval, None, None, None, gradb, None, None
-
-
-class SparseLinearSolveEigenBiCGStab(Function):
-    """Eigen BiCGStab solver with gradient support"""
-
-    @staticmethod
-    def forward(ctx, val, row, col, shape, b, atol, maxiter):
-        _eigen = get_eigen_module()
-        indices = torch.stack([row, col], 0)
-        if b.dim() == 2:
-            cols = [_eigen.bicgstab(indices, val, shape[0], shape[1], b[:, k], atol, maxiter)
-                    for k in range(b.shape[1])]
-            u = torch.stack(cols, dim=1)
-        else:
-            u = _eigen.bicgstab(indices, val, shape[0], shape[1], b, atol, maxiter)
-        ctx.save_for_backward(val, row, col, u)
-        ctx.A_shape = shape
-        ctx.atol = atol
-        ctx.maxiter = maxiter
-        return u
-
-    @staticmethod
-    def backward(ctx, gradu):
-        _eigen = get_eigen_module()
-        val, row, col, u = ctx.saved_tensors
-        m, n = ctx.A_shape
-        atol = ctx.atol
-        maxiter = ctx.maxiter
-        indices_T = torch.stack([col, row], 0)
-        if gradu.dim() == 2:
-            cols = [_eigen.bicgstab(indices_T, val, n, m, gradu[:, k], atol, maxiter)
-                    for k in range(gradu.shape[1])]
-            gradb = torch.stack(cols, dim=1)
-        else:
-            gradb = _eigen.bicgstab(indices_T, val, n, m, gradu, atol, maxiter)
-        gradval = -gradb[row] * u[col]
-        if gradval.dim() == 2:
-            gradval = gradval.sum(-1)
-        return gradval, None, None, None, gradb, None, None
-
-
-class SparseLinearSolveCuPy(Function):
-    """CuPy solver with gradient support (direct and iterative methods)"""
-
-    @staticmethod
-    def forward(ctx, val, row, col, shape, b, method, atol, maxiter, tol):
-        from .backends.cupy_backend import cupy_solve
-        u = cupy_solve(val, row, col, shape, b, method=method, atol=atol, maxiter=maxiter, tol=tol)
-        ctx.save_for_backward(val, row, col, u)
-        ctx.A_shape = shape
-        ctx.method = method
-        ctx.atol = atol
-        ctx.maxiter = maxiter
-        ctx.tol = tol
-        return u
-
-    @staticmethod
-    def backward(ctx, gradu):
-        from .backends.cupy_backend import cupy_solve
-        val, row, col, u = ctx.saved_tensors
-        m, n = ctx.A_shape
-        method = ctx.method
-        atol = ctx.atol
-        maxiter = ctx.maxiter
-        tol = ctx.tol
-
-        # Solve A^T * gradb = gradu (adjoint method)
-        gradb = cupy_solve(val, col, row, (n, m), gradu,
-                          method=method, atol=atol, maxiter=maxiter, tol=tol)
-        gradval = -gradb[row] * u[col]
-        if gradval.dim() == 2:
-            gradval = gradval.sum(-1)
-        return gradval, None, None, None, gradb, None, None, None, None
 
 
 class SparseLinearSolveCuDSS(Function):
@@ -440,6 +324,49 @@ class SparseLinearSolvePyTorch(Function):
         return gradval, None, None, None, gradb, None, None, None, None, None, None
 
 
+class SparseLinearSolveStrumpack(Function):
+    """STRUMPACK sparse direct solver (CPU / CUDA / ROCm) with gradient support.
+
+    Forward factors the (coalesced) matrix once via torch-strumpack's
+    multifrontal LU and solves. Backward reuses the cached factorization for
+    the transpose solve ``A^T grad_b = grad_u`` and assembles the adjoint
+    ``grad_val[k] = -grad_b[row[k]] * u[col[k]]`` on the original COO pattern.
+
+    Real float64 and complex128 (STRUMPACK builds both ``double`` and
+    ``complex<double>``); this is torch-sla's portable direct path on AMD ROCm
+    where cuDSS (NVIDIA-only) is unavailable.
+    """
+
+    @staticmethod
+    def forward(ctx, val, row, col, shape, b):
+        from .backends import strumpack_backend as _sp
+        crow, ccol, cvals = _sp._coo_to_csr(val, row, col, shape)
+        fac = _sp.factor(crow, ccol, cvals, shape[0])
+        u = _sp.solve(fac, b)
+        ctx.save_for_backward(val, row, col, u)
+        ctx.shape = shape
+        ctx.b_dim = b.dim()
+        return u
+
+    @staticmethod
+    def backward(ctx, grad_u):
+        from .backends import strumpack_backend as _sp
+        val, row, col, u = ctx.saved_tensors
+        n = ctx.shape[0]
+        # Adjoint: solve A^H grad_b = grad_u, then grad_val = -grad_b[i] conj(u[j]).
+        # A^H = conj(A)^T -> COO (col, row, conj(val)). ``.conj()`` is a no-op on
+        # real (recovers the A^T / -grad_b[row]*u[col] real adjoint), correct for
+        # complex. STRUMPACK re-factors A^H (a different matrix when complex).
+        crow, ccol, cvals = _sp._coo_to_csr(torch.conj_physical(val), col, row, (n, n))
+        fac_h = _sp.factor(crow, ccol, cvals, n)
+        grad_b = _sp.solve(fac_h, grad_u)
+        if ctx.b_dim == 1:
+            grad_val = -(grad_b[row] * torch.conj_physical(u[col]))
+        else:  # multiple RHS: sum over the rhs columns
+            grad_val = -(grad_b[row, :] * torch.conj_physical(u[col, :])).sum(dim=1)
+        return grad_val, None, None, None, grad_b
+
+
 # ============================================================================
 # Main solve function
 # ============================================================================
@@ -483,15 +410,15 @@ def spsolve(
         Backend to use:
         - 'auto': Auto-select based on device and problem size (default)
         - 'scipy': SciPy (CPU only, uses LU/UMFPACK)
-        - 'eigen': Eigen C++ (CPU only, iterative)
-        - 'pytorch': PyTorch-native (CPU & CUDA, iterative) - best for large problems
-        - 'cupy': CuPy (CUDA only, direct and iterative via cupyx.scipy)
+        - 'pytorch': PyTorch-native (CPU / CUDA / ROCm, iterative) - best for large problems
+        - 'strumpack': STRUMPACK multifrontal direct (CPU / CUDA / ROCm)
         - 'cudss': NVIDIA cuDSS (CUDA only, direct)
     method : str, optional
         Solver method. Available methods depend on backend:
         - 'auto': Auto-select based on matrix properties
-        - 'lu': LU factorization (scipy, cupy, cudss)
-        - 'umfpack': UMFPACK direct solver (scipy only)
+        - 'lu': LU factorization (scipy, strumpack, cudss)
+        - 'umfpack': UMFPACK direct solver (CPU only, via scipy/scikit-umfpack;
+          there is no GPU/ROCm UMFPACK -- for portable direct solves use 'strumpack')
         - 'cholesky', 'ldlt': Direct solvers (cudss)
         - 'cg', 'cgs', 'bicgstab', 'gmres': Iterative solvers
     atol : float, optional
@@ -606,39 +533,6 @@ def spsolve(
         )
 
     # ========================================================================
-    # Eigen backend (CPU)
-    # ========================================================================
-    elif backend == "eigen":
-        if val.is_cuda:
-            warnings.warn("Eigen backend requires CPU, moving tensors to CPU")
-            val = val.cpu()
-            row = row.cpu()
-            col = col.cpu()
-            b = b.cpu()
-
-        if not is_eigen_available():
-            raise RuntimeError("Eigen backend is not available. Ensure C++ extension is compiled.")
-
-        if val.dtype != torch.float64:
-            warnings.warn("Using float64 is recommended for good precision with iterative solvers")
-
-        if method == "cg":
-            return SparseLinearSolveEigenCG.apply(val, row, col, shape, b, atol, maxiter)
-        else:  # bicgstab
-            return SparseLinearSolveEigenBiCGStab.apply(val, row, col, shape, b, atol, maxiter)
-
-    # ========================================================================
-    # CuPy backend (CUDA)
-    # ========================================================================
-    elif backend == "cupy":
-        if not val.is_cuda:
-            raise ValueError("CuPy backend requires CUDA tensors")
-        if not is_cupy_available():
-            raise RuntimeError("CuPy backend is not available. Install with: pip install cupy-cuda12x")
-
-        return SparseLinearSolveCuPy.apply(val, row, col, shape, b, method, atol, maxiter, tol)
-
-    # ========================================================================
     # cuDSS backend (CUDA)
     # ========================================================================
     elif backend == "cudss":
@@ -710,10 +604,22 @@ def spsolve(
         return SparseLinearSolvePyAMG.apply(val, row, col, shape, b,
                                             atol, maxiter, amg_method)
 
+    # ========================================================================
+    # STRUMPACK backend (sparse direct; CPU / CUDA / ROCm via torch-strumpack)
+    # ========================================================================
+    elif backend == "strumpack":
+        if not is_strumpack_available():
+            raise RuntimeError(
+                "STRUMPACK backend is not available. Install with: "
+                "pip install torch-strumpack    "
+                "# cpu / cuda / rocm wheel (portable direct solver, incl. AMD)"
+            )
+        return SparseLinearSolveStrumpack.apply(val, row, col, shape, b)
+
     else:
         raise ValueError(
             f"Unknown backend: {backend}. "
-            f"Available: scipy, eigen, pytorch, cupy, cudss, pyamg, amgx"
+            f"Available: scipy, pytorch, cudss, pyamg, amgx, strumpack"
         )
 
 

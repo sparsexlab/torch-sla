@@ -7,6 +7,14 @@ This module provides batch solving capabilities for sparse linear equations:
 
 For same-layout batches, we can leverage optimized batch operations.
 For different-layout batches, we solve each system independently.
+
+Device support
+--------------
+- ``cg`` / ``bicgstab`` / ``gmres`` / ``minres`` / ``lsqr`` / ``lsmr``: PyTorch-native
+  and device-agnostic, so they run on **CPU, CUDA, and ROCm/HIP** out of the box.
+- ``strumpack``: multifrontal sparse direct, also **CPU / CUDA / ROCm** (needs the
+  optional ``torch-strumpack`` package).
+- ``cudss_*``: NVIDIA cuDSS direct solver, **CUDA only**.
 """
 
 import torch
@@ -15,17 +23,23 @@ from typing import Tuple, List, Optional, Union, Literal
 import warnings
 
 from .backends import (
-    get_cpu_module,
     get_cudss_module,
-    is_cupy_available,
     is_cudss_available,
+    BACKEND_METHODS,
 )
+
+# PyTorch-native methods are device-agnostic (CPU / CUDA / ROCm).
+_PYTORCH_METHODS = set(BACKEND_METHODS.get(
+    'pytorch', ['cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr']))
 
 
 MethodType = Literal[
-    'cg', 'bicgstab',
-    'cupy_lu',
-    'cudss', 'cudss_lu', 'cudss_cholesky', 'cudss_ldlt'
+    # PyTorch-native, device-agnostic (CPU / CUDA / ROCm)
+    'cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr',
+    # multifrontal direct, device-agnostic (CPU / CUDA / ROCm)
+    'strumpack',
+    # NVIDIA cuDSS direct (CUDA only)
+    'cudss', 'cudss_lu', 'cudss_cholesky', 'cudss_ldlt',
 ]
 
 
@@ -51,22 +65,35 @@ class BatchSparseLinearSolveSameLayout(Function):
         
         batch_size = val_batch.size(0)
         m, n = shape
-        
-        # Solve each system
+
+        # Fast path: CG is *truly* batched (single scatter matvec over the shared
+        # pattern, all systems iterate together) -- no Python loop. Device-agnostic.
+        if method == 'cg':
+            from .backends.pytorch_backend import batched_cg_same_pattern
+            u_batch = batched_cg_same_pattern(
+                val_batch, row, col, (m, n), b_batch, atol=atol, maxiter=maxiter)
+            ctx.save_for_backward(val_batch, row, col, u_batch)
+            ctx.A_shape = shape
+            ctx.method = method
+            ctx.atol = atol
+            ctx.maxiter = maxiter
+            return u_batch
+
+        # Other methods: solve each system independently (no batched kernel yet).
         results = []
         for i in range(batch_size):
             val = val_batch[i]
             b = b_batch[i]
-            
-            if method == 'cg':
-                _cpu = get_cpu_module()
-                x = _cpu.cg(torch.stack([row, col], 0), val, m, n, b, atol, maxiter)
-            elif method == 'bicgstab':
-                _cpu = get_cpu_module()
-                x = _cpu.bicgstab(torch.stack([row, col], 0), val, m, n, b, atol, maxiter)
-            elif method == 'cupy_lu':
-                from .backends.cupy_backend import cupy_solve
-                x = cupy_solve(val, row, col, (m, n), b, method='lu')
+
+            if method in _PYTORCH_METHODS:
+                # device-agnostic: CPU / CUDA / ROCm
+                from .backends.pytorch_backend import pytorch_solve
+                x = pytorch_solve(val, row, col, (m, n), b, method=method, atol=atol, maxiter=maxiter)
+            elif method == 'strumpack':
+                # multifrontal direct, device-agnostic (CPU / CUDA / ROCm)
+                from .backends import strumpack_backend as _sp
+                crow, ccol, cval = _sp._coo_to_csr(val, row, col, (m, n))
+                x = _sp.solve(_sp.factor(crow, ccol, cval, n), b)
             elif method == 'cudss_lu':
                 _cudss = get_cudss_module()
                 x = _cudss.lu(torch.stack([row, col], 0), val, m, n, b)
@@ -100,25 +127,34 @@ class BatchSparseLinearSolveSameLayout(Function):
         maxiter = ctx.maxiter
         
         batch_size = val_batch.size(0)
-        
+
+        # Fast path: batched adjoint. Solve A_i^T gradb_i = gradu_i for all i at
+        # once (transpose = swap row/col), then the COO-value gradient is a single
+        # batched gather: dL/dval_i = -gradb_i[row] * u_i[col].
+        if method == 'cg':
+            from .backends.pytorch_backend import batched_cg_same_pattern
+            gradb_batch = batched_cg_same_pattern(
+                val_batch, col, row, (n, m), gradu_batch, atol=atol, maxiter=maxiter)
+            gradval_batch = -gradb_batch[:, row] * u_batch[:, col]
+            return gradval_batch, None, None, None, gradb_batch, None, None, None
+
         gradval_list = []
         gradb_list = []
-        
+
         for i in range(batch_size):
             val = val_batch[i]
             u = u_batch[i]
             gradu = gradu_batch[i]
             
             # Solve A^T * gradb = gradu
-            if method == 'cg':
-                _cpu = get_cpu_module()
-                gradb = _cpu.cg(torch.stack([col, row], 0), val, n, m, gradu, atol, maxiter)
-            elif method == 'bicgstab':
-                _cpu = get_cpu_module()
-                gradb = _cpu.bicgstab(torch.stack([col, row], 0), val, n, m, gradu, atol, maxiter)
-            elif method == 'cupy_lu':
-                from .backends.cupy_backend import cupy_solve
-                gradb = cupy_solve(val, col, row, (n, m), gradu, method='lu')
+            if method in _PYTORCH_METHODS:
+                # transpose = swap (row, col); device-agnostic (CPU / CUDA / ROCm)
+                from .backends.pytorch_backend import pytorch_solve
+                gradb = pytorch_solve(val, col, row, (n, m), gradu, method=method, atol=atol, maxiter=maxiter)
+            elif method == 'strumpack':
+                from .backends import strumpack_backend as _sp
+                crow, ccol, cval = _sp._coo_to_csr(val, row, col, (m, n))
+                gradb = _sp.solve_transpose(_sp.factor(crow, ccol, cval, n), gradu)
             elif method in ['cudss_lu']:
                 _cudss = get_cudss_module()
                 gradb = _cudss.lu(torch.stack([col, row], 0), val, n, m, gradu)
@@ -154,13 +190,12 @@ def spsolve_batch_same_layout(
     """
     Batch solve sparse linear systems with the SAME sparsity pattern.
     
-    .. deprecated::
-        Use SparseTensor.decompose().solve() instead for a more Pythonic interface:
-        
-        >>> A = SparseTensor(val, row, col, shape)
-        >>> decomp = A.decompose(method='lu')
-        >>> x_batch = decomp.solve(val_batch, b_batch)
-    
+    .. note::
+        ``method='cg'`` runs a **truly batched** solver (one scatter matvec over
+        the shared pattern, all systems iterate together) -- this is the fast
+        path on GPU / ROCm. Other methods (bicgstab/gmres/minres/lsqr/lsmr,
+        strumpack, cudss_*) currently solve each system in a Python loop.
+
     All matrices A_i share the same (row, col) structure but have different values.
     This is efficient when the sparsity pattern is fixed (e.g., FEM with fixed mesh).
     

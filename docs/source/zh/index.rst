@@ -31,7 +31,7 @@ torch-sla: PyTorch 稀疏线性代数
 .. raw:: html
 
    <ul class="feature-list">
-     <li>🚀 <span class="gradient-text">高性能</span>: 通过 CuPy 和 cuDSS 实现 CUDA 加速求解</li>
+     <li>🚀 <span class="gradient-text">高性能</span>: GPU 加速求解，支持 NVIDIA CUDA（cuDSS）和 AMD ROCm（PyTorch 原生 + STRUMPACK）</li>
      <li>💾 <span class="gradient-text">内存高效</span>: 仅存储非零元素，支持求解百万级未知数的系统</li>
      <li>🔄 <span class="gradient-text">可微分</span>: 完整支持 <code>torch.autograd</code> 梯度计算</li>
      <li>📦 <span class="gradient-text">批量处理</span>: 并行求解数千个系统</li>
@@ -47,7 +47,7 @@ torch-sla: PyTorch 稀疏线性代数
    <ul class="feature-list">
      <li><span class="gradient-text">内存高效</span>: 仅存储非零元素 — 1M×1M 矩阵（1% 密度）仅需 ~80MB 而非 ~8TB</li>
      <li><span class="gradient-text">完整梯度支持</span>: 通过 torch.autograd 实现端到端可微分流程</li>
-     <li><span class="gradient-text">多后端支持</span>: <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>、<a href="https://eigen.tuxfamily.org/">Eigen</a>、<a href="https://docs.cupy.dev/">CuPy</a>、<a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a></li>
+     <li><span class="gradient-text">多后端支持</span>: <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>、<a href="https://pytorch.org/">PyTorch原生</a>、<a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a>、STRUMPACK — 其中 PyTorch 原生与 STRUMPACK 也可在 AMD ROCm 上运行</li>
      <li><span class="gradient-text">批量求解</span>: 支持相同和不同稀疏模式的批量矩阵</li>
      <li><span class="gradient-text">分布式求解</span>: 域分解与 halo 交换</li>
      <li><span class="gradient-text">大规模测试</span>: 经过 1.69亿+ DOF 测试，近线性复杂度扩展</li>
@@ -90,7 +90,7 @@ CUDA 加速
    # 移动到 GPU 进行 CUDA 加速求解
    A_cuda = A.cuda()
    b_cuda = b.cuda()
-   x = A_cuda.solve(b_cuda)  # 自动使用 cuDSS 或 CuPy
+   x = A_cuda.solve(b_cuda)  # 自动使用 cuDSS
 
 应用场景
 --------
@@ -145,8 +145,9 @@ torch-sla 支持哪些稀疏求解器？
 
 torch-sla 支持多种后端:
 
-- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES), Eigen (CG, BiCGStab)
-- **GPU**: CuPy (LU, CG, GMRES), cuDSS (LU, Cholesky, LDLT)
+- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES)、PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、STRUMPACK (LU, Cholesky, LDLt 直接法)
+- **GPU — NVIDIA (CUDA)**: PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、cuDSS (LU, Cholesky, LDLT 直接法)、STRUMPACK (LU, Cholesky, LDLt 直接法)
+- **GPU — AMD (ROCm)**: PyTorch原生 (CG, BiCGStab, GMRES, MINRES)、STRUMPACK (LU, Cholesky, LDLt 直接法)。cuDSS 仅支持 NVIDIA，在 ROCm 上不可用。
 
 库会根据硬件和矩阵属性自动选择最佳求解器。
 
@@ -183,7 +184,7 @@ torch-sla 支持相同稀疏模式矩阵的批量求解:
 .. code-block:: python
 
    A_cuda = A.cuda()
-   x = A_cuda.solve(b.cuda())  # 使用 cuDSS 或 CuPy
+   x = A_cuda.solve(b.cuda())  # 使用 cuDSS
 
 SparseTensor 和 DSparseTensor 有什么区别？
 ------------------------------------------
@@ -209,7 +210,7 @@ torch-sla vs scipy.sparse.linalg
      - ✅ **原生张量**
      - ❌ 需要 numpy 复制
    * - GPU 加速
-     - ✅ **CUDA (cuDSS, CuPy)**
+     - ✅ **NVIDIA: cuDSS + PyTorch；AMD ROCm: PyTorch + STRUMPACK**
      - ❌ 仅 CPU
    * - Autograd 梯度
      - ✅ **完整支持（伴随法）**
@@ -257,7 +258,7 @@ torch-sla vs torch.linalg.solve
      - ✅ **相同/不同模式**
      - ⚠️ 仅相同形状
    * - GPU 支持
-     - ✅ **cuDSS, CuPy, PyTorch**
+     - ✅ **NVIDIA: cuDSS + PyTorch；AMD ROCm: PyTorch + STRUMPACK**
      - ✅ 是
    * - Autograd
      - ✅ **O(1) 图节点**

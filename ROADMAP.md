@@ -1,53 +1,58 @@
 # Roadmap
 
-Planned directions for torch-sla, roughly ordered by priority.
+Planned directions for torch-sla, roughly ordered by priority. Checkboxes track
+what has actually landed — `[x]` done, `[ ]` pending.
 
-_Last updated: 2026-05._
+_Last updated: 2026-06._
 
-## 1. Complex-valued solves (with correct complex adjoint)
+## 1. Complex-valued solves (with correct complex adjoint) — ✅ done
 
-Support complex-valued sparse systems — in particular **complex-symmetric** matrices (`A = Aᵀ`, e.g. time-harmonic Helmholtz / PML / impedance) solved via cuDSS's LDLᵀ, and **Hermitian** matrices (`A = Aᴴ`) via LDLᴴ. cuDSS supports both natively; torch-sla just hasn't exposed the path yet. Top priority — it is what unblocks complex FEM in TensorMesh (Helmholtz / PML / metamaterial topology optimization). Two parts:
+Support complex-valued sparse systems — in particular **complex-symmetric** matrices (`A = Aᵀ`, e.g. time-harmonic Helmholtz / PML / impedance) solved via cuDSS's LDLᵀ, and **Hermitian** matrices (`A = Aᴴ`) via LDLᴴ. This is what unblocks complex FEM in TensorMesh (Helmholtz / PML / metamaterial topology optimization).
 
-Status today: the **scipy** backend already solves complex systems on CPU (direct `lu` + iterative, verified to machine precision) — a usable reference/validation path. The cuDSS work below is the high-performance **GPU** path. The `pytorch` (CG/BiCGStab use `torch.dot`, no conjugate; `<` ops break on complex) and `eigen` (C++ hard-codes `double`) backends don't support complex yet — separate gaps.
+- [x] **cuDSS complex** — `complex64`/`complex128` in `_DTYPE_MAP`, `HERMITIAN`/`HPD` in `_MTYPE_MAP` (`backends/nvmath_backend.py`).
+- [x] **complex adjoint** — `autograd.py` uses `grad_val = -grad_b[row] * u[col].conj()` and solves `Aᴴ` per matrix type (general/LU; complex-symmetric LDLᵀ via the conjugation trick; Hermitian LDLᴴ). `torch.autograd.gradcheck` passes on complex inputs.
+- [x] **complex across backends** — scipy (CPU direct + iterative), cuDSS (GPU direct), pytorch-native (CG / BiCGStab / GMRES / MINRES, relerr ~1e-13).
+- [x] **complex `det` / `eigsh`** — missing-conjugate bugs in the det & eigsh adjoints fixed; verified fwd+bwd on CPU + CUDA + ROCm.
+- [ ] **TensorMesh end-to-end complex Helmholtz example** — downstream; the FEM assembly stack still needs a few real-dtype assumptions unblocked (see item 2 of the [TensorMesh ROADMAP](https://github.com/camlab-ethz/TensorMesh)).
 
-**(a) Expose complex in the cuDSS backend** — small:
-- Add `complex64`/`complex128` to `_DTYPE_MAP` in `backends/nvmath_backend.py`.
-- Add `HERMITIAN` / `HPD` entries to `_MTYPE_MAP` (only `general/symmetric/spd` today).
+## 2. PETSc backend — ⏸ deprioritised (superseded by STRUMPACK + AMG)
 
-**(b) Fix the complex adjoint in the autograd backward** — small but **mathematically essential** (skipping it gives a correct forward solve but *silently wrong gradients*). `spsolve` is a custom `autograd.Function`, so PyTorch's complex-autograd rules stop at its `backward` boundary — the adjoint is hand-written and currently real-only. For `u = A⁻¹b` with a real loss, the complex adjoint (PyTorch's conjugate-gradient convention) is `λ = A⁻ᴴ ḡ`, `grad_b = λ`, `grad_A|ᵢⱼ = -λᵢ conj(uⱼ)`. Two corrections, both backward-compatible with the real path (`.conj()` is a no-op on real tensors):
-- Conjugate `u` in the outer product: `gradval = -gradb[row] * u[col].conj()`.
-- Use `Aᴴ` (not `Aᵀ`/`A`) for the adjoint solve, per matrix type:
-  - **general / LU**: `Aᴴ = conj(A)ᵀ` → transpose indices **and** `val.conj()`.
-  - **complex-symmetric (LDLᵀ)**: `Aᴴ = conj(A) ≠ A` → reuse the forward factorization via the conjugation trick `gradb = ldlt(indices, val, m, n, gradu.conj()).conj()`.
-  - **Hermitian (LDLᴴ)**: `Aᴴ = A` → reuse the factorization directly with `gradu`.
-- Validate with `torch.autograd.gradcheck` (supports complex inputs).
+Originally planned for PETSc's rich **preconditioner** ecosystem (GAMG, hypre BoomerAMG, ILU/ICC, block Jacobi, ASM, fieldsplit, …) and full Krylov suite, plus its complete **HIP/ROCm** backend (the `Mat` class was ported to HIP by AMD in 2021–2022 on hipBLAS/hipSPARSE/hipSOLVER).
 
-Downstream (TensorMesh repo): the FEM assembly stack needs a few real-dtype assumptions unblocked before an end-to-end complex Helmholtz example works; see item 2 of the [TensorMesh ROADMAP](https://github.com/camlab-ethz/TensorMesh).
+Deprioritised after assessment: `petsc4py` is Linux/MPI-only and a ROCm-enabled PETSc + matching `petsc4py` is an HPC-cluster build, not a `pip install` — at odds with torch-sla's cross-platform, pip-installable positioning. Most of the original need is now covered another way (see what landed below). Revisit only if the GPU preconditioner ecosystem (GAMG / hypre BoomerAMG on AMD) is specifically required.
 
-## 2. PETSc backend
-
-Add a [PETSc](https://petsc.org/) backend, primarily for its rich, industrial-grade **preconditioner** ecosystem (GAMG, hypre BoomerAMG, ILU/ICC, block Jacobi, ASM, fieldsplit, …) and its full Krylov suite (GMRES, FGMRES, MINRES, …) — filling the gap left by the pytorch-native backend, which today ships only CG/BiCGStab plus lightweight preconditioners.
-
-Crucially, **PETSc has a complete HIP/ROCm backend** (the `Mat` class was ported to HIP by AMD in 2021–2022, on top of hipBLAS/hipSPARSE/hipSOLVER, with a Kokkos path as well). PETSc's GPU strength is on the **iterative + preconditioned** side — preconditioners such as GAMG and hypre BoomerAMG run on AMD GPUs — so this backend would give AMD users a complete **solver + preconditioner stack on GPU** without us writing a rocSPARSE binding ourselves. (GPU *direct* solves on AMD remain limited — STRUMPACK offers partial GPU offload; MUMPS/SuperLU_DIST are CPU/CUDA-oriented.)
-
-Integration notes:
-- `petsc4py` is the fast integration path (Python bindings already exist).
-- Key engineering detail: zero-copy hand-off between torch GPU tensors and PETSc `Vec`/`Mat` on the same device (PETSc can wrap external GPU array pointers).
-- Build caveat: a ROCm-enabled PETSc + matching `petsc4py` is an HPC-cluster build, not a `pip install`.
-
-References: [PETSc GPU Support Roadmap](https://petsc.org/release/overview/gpu_roadmap/), [PETSc/TAO for Exascale](https://arxiv.org/html/2406.08646v2).
+- [x] **STRUMPACK backend** (the portable GPU *direct* path PETSc was partly wanted for) — multifrontal LU / Cholesky / LDLt, real + complex, **CPU / CUDA / ROCm**; autograd `Aᴴ` adjoint. Gives AMD users a GPU direct solve without a hand-written rocSPARSE binding.
+- [x] **pytorch-native preconditioners beyond Jacobi** — ILU(0), additive Schwarz (ASM), block-Jacobi, SSOR, polynomial, IC0 — closing much of the preconditioner gap on-device.
+- [ ] **PETSc backend itself** — not pursued for now (rationale above).
 
 ## 3. Multi-GPU linear solvers + TensorMesh multi-GPU assembly
 
-Wire up torch-sla's multi-GPU / distributed linear solvers (see `torch_sla/distributed.py`, `DSparseTensor`) with TensorMesh's multi-GPU assembly, so a domain-decomposed FEM problem can be assembled and solved across multiple GPUs end-to-end. **Status: still debugging.**
+Wire up torch-sla's multi-GPU / distributed linear solvers (`torch_sla/distributed/`, `DSparseTensor`) with TensorMesh's multi-GPU assembly, so a domain-decomposed FEM problem can be assembled and solved across multiple GPUs end-to-end.
 
-## 4. Ginkgo backend
+- [x] **distributed Krylov** — `cg` / `bicgstab` / `gmres` / `fgmres` / `minres`; multiprocess tests match scipy.
+- [x] **per-rank preconditioners** — block-Jacobi + AMG (PyAMG / torch-amgx).
+- [x] **comm/compute overlap** — async P2P (`batch_isend_irecv` on NCCL, send/recv on gloo).
+- [x] **scale** — benchmarked to **400M DOF on 4 GPUs**.
+- [ ] **TensorMesh end-to-end** — cross-repo: wire into TensorMesh's multi-GPU FEM assembly for an end-to-end domain-decomposed assemble + solve.
 
-Add a [Ginkgo](https://ginkgo-project.github.io/) backend as a **lighter-weight** alternative to PETSc, primarily for its **batched** solver support. Ginkgo is a single-source, performance-portable C++ sparse linear algebra library spanning CUDA (NVIDIA), HIP (AMD), and SYCL (Intel) — one backend covering all three vendors, which directly serves torch-sla's GPU-agnostic positioning.
+## 4. Ginkgo backend — 🔭 planned
 
-Its niche relative to PETSc is complementary, not competing, and aligns especially well with torch-sla's identity:
-- **Batched solvers** (`batch::Csr`, batched Krylov across CUDA/HIP/SYCL) — the most mature library-level batched-solver story, matching the "many small systems" regime of ML/FEM workflows. This is the main draw.
-- **Cross-vendor portability** from one codebase (AMD + Intel + NVIDIA).
-- [pyGinkgo](https://arxiv.org/pdf/2510.08230) lowers the integration cost.
+Add a [Ginkgo](https://ginkgo-project.github.io/) backend as a **lighter-weight** alternative to PETSc, primarily for its **batched** solver support. Ginkgo is a single-source, performance-portable C++ library spanning CUDA (NVIDIA), HIP (AMD), and SYCL (Intel) — one backend covering all three vendors, matching torch-sla's GPU-agnostic positioning.
 
-References: [Ginkgo project](https://ginkgo-project.github.io/), [pyGinkgo](https://arxiv.org/pdf/2510.08230).
+- [ ] **batched solvers** (`batch::Csr`, batched Krylov across CUDA/HIP/SYCL) — the main draw, for the "many small systems" regime.
+- [ ] **cross-vendor portability** from one codebase (AMD + Intel + NVIDIA).
+- [ ] integration via [pyGinkgo](https://arxiv.org/pdf/2510.08230).
+
+Note: a first-party **batched same-pattern CG** (vectorized scatter matvec, device-agnostic CPU/CUDA/ROCm) already landed in the pytorch backend, so the immediate batched-SPD need is partly met without Ginkgo; Ginkgo would broaden this to more methods + Intel.
+
+References: [Ginkgo](https://ginkgo-project.github.io/), [pyGinkgo](https://arxiv.org/pdf/2510.08230).
+
+## ✅ Delivered since this roadmap was written (not originally listed)
+
+- [x] **STRUMPACK backend** — portable sparse direct (CPU/CUDA/ROCm), real + complex (see item 2).
+- [x] **GMRES + MINRES** (pytorch-native) — restarted right-preconditioned GMRES; Paige–Saunders MINRES with scipy-style stopping.
+- [x] **LSQR + LSMR** least-squares (pytorch-native, device-agnostic) — verified vs scipy on CPU + CUDA.
+- [x] **differentiable nonlinear solve** — Newton + implicit-function-theorem adjoint; validated against the analytical 1D Bratu solution and `scipy.optimize.root`.
+- [x] **batched same-pattern CG** — truly vectorized over a batch of matrices sharing a sparsity pattern (no Python loop); device-agnostic.
+- [x] **GPU graph ops** — `connected_components` reimplemented as parallel pure-torch (device-staying, batched).
+- [x] **removed `eigen` C++ backend** (redundant with scipy) and **removed `cupy` backend** (lu→cudss, iterative+lstsq→pytorch).

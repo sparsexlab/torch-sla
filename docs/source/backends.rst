@@ -9,13 +9,14 @@ which optional dependencies are installed.
 The current backend lineup and what each supports:
 
 .. list-table:: **Capability matrix**
-   :widths: 12 10 10 10 12 10 12 12 12
+   :widths: 11 8 8 8 10 12 10 10 10 10
    :header-rows: 1
    :class: capability-table
 
    * - Backend
      - CPU
      - CUDA
+     - ROCm
      - Direct
      - Iterative
      - Complex
@@ -25,42 +26,37 @@ The current backend lineup and what each supports:
    * - ``scipy``
      - ✔
      - --
+     - --
      - LU / UMFPACK
      - CG, BiCGStab, GMRES
      - ✔
      - via batch helpers
      - --
      - ✔
-   * - ``eigen``
-     - ✔
-     - --
-     - --
-     - CG, BiCGStab
-     - --
-     - --
-     - --
-     - ✔
    * - ``pytorch``
      - ✔
      - ✔
+     - ✔
      - --
-     - CG, BiCGStab, PCG, PBiCGStab
+     - CG, BiCGStab, GMRES, MINRES, PCG, PBiCGStab
      - ✔
      - ✔
      - via ``DSparseTensor``
      - ✔
-   * - ``cupy``
+   * - ``strumpack``
+     - ✔
+     - ✔
+     - ✔
+     - LU / Cholesky / LDL\ :sup:`T`
      - --
      - ✔
-     - LU (cuSPARSE)
-     - CG, GMRES
-     - ✔
-     - via batch helpers
+     - --
      - --
      - ✔
    * - ``cudss``
      - --
      - ✔
+     - --
      - LU / Cholesky / LDL\ :sup:`T` / LDL\ :sup:`H`
      - --
      - ✔
@@ -69,6 +65,7 @@ The current backend lineup and what each supports:
      - ✔
    * - ``pyamg``
      - ✔
+     - ✔ (V-cycle only)
      - ✔ (V-cycle only)
      - --
      - Ruge-Stuben AMG, Smoothed Aggregation
@@ -80,11 +77,32 @@ The current backend lineup and what each supports:
      - --
      - ✔
      - --
+     - --
      - AMG, PCG, PBiCGStab, FGMRES (NVIDIA AmgX)
      - --
      - --
      - --
      - ✔
+
+----
+
+The STRUMPACK backend
+--------------------
+
+``backend="strumpack"`` is a **portable multifrontal sparse direct
+solver**. Unlike cuDSS (which is NVIDIA CUDA only), STRUMPACK runs on
+**CPU, CUDA, and AMD ROCm** from the same API, supports both real and
+complex matrices, and offers LU, Cholesky, and LDL\ :sup:`T`
+factorizations. It is fully differentiable: gradients flow through the
+adjoint (A\ :sup:`H`) solve, so it drops into autograd pipelines like the
+other backends.
+
+In practice STRUMPACK is the answer for a GPU **direct** solve on
+hardware where cuDSS cannot go — most importantly AMD ROCm GPUs, where
+cuDSS is unavailable. It requires the optional ``torch-strumpack``
+package::
+
+    pip install torch-strumpack   # cpu / cuda / rocm wheels
 
 ----
 
@@ -108,21 +126,19 @@ which OS each one builds on today.
      - ✔
      - ✔
      - Pure SciPy; UMFPACK optional via ``scikit-umfpack``.
-   * - ``eigen``
-     - ✔
-     - ✔
-     - ✔
-     - C++ extension, compiled at install time.
    * - ``pytorch``
      - ✔
      - ✔
      - ✔
-     - PyTorch-native; CUDA path active when ``torch.cuda.is_available()``.
-   * - ``cupy``
+     - PyTorch-native; CUDA / ROCm path active when ``torch.cuda.is_available()``
+       (ROCm torch builds report as ``cuda``).
+   * - ``strumpack``
      - ✔
      - ✔
-     - --
-     - Requires NVIDIA CUDA. CuPy has no native macOS wheels.
+     - ✔
+     - Multifrontal sparse direct solver (LU / Cholesky / LDL\ :sup:`T`,
+       real + complex). CPU/CUDA/ROCm via ``torch-strumpack``
+       (``pip install torch-strumpack``).
    * - ``cudss``
      - ✔
      - ✔
@@ -144,15 +160,19 @@ which OS each one builds on today.
 When ``backend="auto"`` picks what
 ---------------------------------
 
-* **CUDA tensors**: try ``cudss`` (best direct solver) -> ``cupy`` (LU) ->
+* **NVIDIA CUDA tensors**: try ``cudss`` (best direct solver) ->
   ``pytorch`` (iterative fallback).
+* **AMD ROCm tensors**: cuDSS is **NVIDIA-only** and never runs here, so
+  the auto path uses ``pytorch`` (iterative) and, when a direct solve is
+  needed, ``strumpack`` (portable multifrontal direct solver on ROCm).
 * **CPU tensors, small / medium**: prefer ``scipy`` LU.
 * **CPU tensors, large or repeated**: ``pytorch`` CG / BiCGStab keeps the
   memory footprint flat.
 
 Override via ``backend="..."`` whenever you need exact control (e.g.
-``backend="cudss"`` to force a direct GPU solve for a single
-ill-conditioned system that iterative methods cannot crack).
+``backend="cudss"`` to force a direct GPU solve on NVIDIA, or
+``backend="strumpack"`` for a direct GPU solve on AMD ROCm where cuDSS is
+unavailable).
 
 ----
 

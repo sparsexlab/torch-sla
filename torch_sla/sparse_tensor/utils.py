@@ -82,10 +82,8 @@ def auto_select_method(
     if not is_cuda:
         if is_scipy_available():
             return ("scipy", "lu")
-        elif is_eigen_available():
-            return ("eigen", "cg" if is_spd else "bicgstab")
         else:
-            raise RuntimeError("No CPU backend available")
+            return ("pytorch", "cg" if is_spd else "bicgstab")
     
     estimated_memory = estimate_direct_solver_memory(nnz, n, dtype)
     available_memory = get_available_gpu_memory()
@@ -93,9 +91,7 @@ def auto_select_method(
     if available_memory > 0 and estimated_memory < available_memory * memory_threshold:
         if is_cudss_available():
             return ("cudss", "cholesky" if is_spd else "lu")
-        elif is_cupy_available():
-            return ("cupy", "lu")
-    
+
     if is_scipy_available():
         return ("scipy", "lu")
     

@@ -15,7 +15,6 @@ from torch_sla import (
     spsolve_batch_coo_same_layout,
     spsolve_batch_coo_different_layout,
     ParallelBatchSolver,
-    is_cupy_available,
     is_cudss_available,
 )
 
@@ -211,33 +210,6 @@ def test_parallel_batch_solver():
 # ============================================================================
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_batch_same_layout_cupy():
-    """Test batch solve with CuPy backend"""
-    if not is_cupy_available():
-        pytest.skip("CuPy not available")
-
-    n = 32
-    batch_size = 3
-    device = 'cuda'
-
-    A_template = create_spd_sparse(n, density=0.3, device=device)
-    row = A_template._indices()[0]
-    col = A_template._indices()[1]
-    nnz = A_template._nnz()
-    shape = tuple(A_template.shape)
-
-    val_batch = torch.randn(batch_size, nnz, dtype=torch.float64, device=device)
-    b_batch = torch.randn(batch_size, n, dtype=torch.float64, device=device)
-
-    x_batch = spsolve_batch_same_layout(
-        val_batch, row, col, shape, b_batch,
-        method='cupy_lu'
-    )
-
-    assert x_batch.shape == (batch_size, n)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.parametrize('method', ['cudss_lu', 'cudss_cholesky', 'cudss_ldlt'])
 def test_batch_same_layout_cudss(method):
     """Test batch solve with cuDSS backends"""
@@ -292,3 +264,84 @@ if __name__ == '__main__':
     
     print("\nAll batch tests passed!")
 
+
+
+# ============================================================================
+# Device-agnostic pytorch-native methods (run on CPU / CUDA / ROCm alike)
+# ============================================================================
+
+@pytest.mark.parametrize('method', ['cg', 'bicgstab', 'gmres', 'minres', 'lsmr'])
+def test_batch_same_layout_pytorch_methods(method):
+    """All pytorch-native methods work through the batch path (these are the
+    device-agnostic solvers that also cover ROCm). Checks solution + gradients."""
+    n, batch_size = 16, 3
+    A_template = create_spd_sparse(n, density=0.4)
+    row, col = A_template._indices()[0], A_template._indices()[1]
+    nnz = A_template._nnz()
+
+    val_batch = torch.randn(batch_size, nnz, dtype=torch.float64)
+    # make each matrix SPD-ish by reusing the template values + noise on diagonal
+    base = A_template._values()
+    val_batch = base.unsqueeze(0).repeat(batch_size, 1).clone()
+    val_batch.requires_grad_(True)
+    b_batch = torch.randn(batch_size, n, dtype=torch.float64)
+
+    x = spsolve_batch_same_layout(val_batch, row, col, (n, n), b_batch,
+                                  method=method, atol=1e-12, maxiter=5000)
+    assert x.shape == (batch_size, n)
+
+    # reference: dense solve per item
+    ref = []
+    for j in range(batch_size):
+        A = torch.zeros(n, n, dtype=torch.float64)
+        A[row, col] = val_batch.detach()[j]
+        ref.append(torch.linalg.solve(A, b_batch[j]))
+    ref = torch.stack(ref)
+    # all iterative -> relative tolerance ~rtol (default 1e-6)
+    assert (x - ref).abs().max().item() < 1e-5, f"{method}: {(x - ref).abs().max().item():.2e}"
+
+    g = torch.autograd.grad(x.sum(), val_batch)[0]
+    assert torch.isfinite(g).all()
+
+
+def test_batched_cg_same_pattern_is_vectorized_and_differentiable():
+    """The CG path solves a batch of DIFFERENT SPD matrices (shared pattern) in
+    one vectorized kernel (no per-matrix Python loop). Check forward + gradients
+    against dense autograd, to the CG tolerance (rtol 1e-6)."""
+    n, B = 30, 6
+    rows, cols = [], []
+    for i in range(n):
+        rows.append(i); cols.append(i)
+        if i + 1 < n:
+            rows += [i, i + 1]; cols += [i + 1, i]
+    row, col = torch.tensor(rows), torch.tensor(cols)
+
+    torch.manual_seed(0)
+    vb = torch.empty(B, len(rows), dtype=torch.float64)
+    for j in range(B):
+        k = 0
+        for i in range(n):
+            vb[j, k] = 2.0 + 0.5 * torch.rand(()); k += 1
+            if i + 1 < n:
+                o = -0.3 - 0.4 * torch.rand(()); vb[j, k] = o; k += 1; vb[j, k] = o; k += 1
+    b = torch.randn(B, n, dtype=torch.float64)
+
+    vbg = vb.clone().requires_grad_(True); bg = b.clone().requires_grad_(True)
+    x = spsolve_batch_same_layout(vbg, row, col, (n, n), bg, method='cg',
+                                  atol=1e-14, maxiter=3000)
+    loss = (x * torch.arange(1., n + 1)).sum()
+    gv, gb = torch.autograd.grad(loss, [vbg, bg])
+
+    # dense reference (forward + autograd grads)
+    vbg2 = vb.clone().requires_grad_(True); bg2 = b.clone().requires_grad_(True)
+    xs = []
+    for j in range(B):
+        A = torch.zeros(n, n, dtype=torch.float64).index_put((row, col), vbg2[j], accumulate=True)
+        xs.append(torch.linalg.solve(A, bg2[j]))
+    xref = torch.stack(xs)
+    loss2 = (xref * torch.arange(1., n + 1)).sum()
+    gv2, gb2 = torch.autograd.grad(loss2, [vbg2, bg2])
+
+    assert (x.detach() - xref.detach()).abs().max() < 1e-5
+    assert (gv - gv2).abs().max() < 1e-3
+    assert (gb - gb2).abs().max() < 1e-3
