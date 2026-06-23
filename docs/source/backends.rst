@@ -31,20 +31,11 @@ The current backend lineup and what each supports:
      - via batch helpers
      - --
      - ✔
-   * - ``eigen``
-     - ✔
-     - --
-     - --
-     - CG, BiCGStab
-     - --
-     - --
-     - --
-     - ✔
    * - ``pytorch``
      - ✔
      - ✔
      - --
-     - CG, BiCGStab, PCG, PBiCGStab
+     - CG, BiCGStab, GMRES, MINRES, PCG, PBiCGStab
      - ✔
      - ✔
      - via ``DSparseTensor``
@@ -108,11 +99,6 @@ which OS each one builds on today.
      - ✔
      - ✔
      - Pure SciPy; UMFPACK optional via ``scikit-umfpack``.
-   * - ``eigen``
-     - ✔
-     - ✔
-     - ✔
-     - C++ extension, compiled at install time.
    * - ``pytorch``
      - ✔
      - ✔

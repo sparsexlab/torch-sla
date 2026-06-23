@@ -126,7 +126,7 @@
             "name": "What sparse solvers does torch-sla support?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "torch-sla supports multiple backends: CPU solvers include SciPy (LU, UMFPACK, CG, BiCGStab, GMRES) and Eigen (CG, BiCGStab). GPU solvers include CuPy (LU, CG, GMRES) and cuDSS (LU, Cholesky, LDLT). The library automatically selects the best solver based on hardware and matrix properties."
+                "text": "torch-sla supports multiple backends: CPU solvers include SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES) and PyTorch-native (CG, BiCGStab, GMRES, MINRES). GPU solvers include PyTorch-native (CG, BiCGStab, GMRES, MINRES), cuDSS (LU, Cholesky, LDLT), and CuPy (LU, CG, GMRES). The library automatically selects the best solver based on hardware and matrix properties."
             }
         },
         {

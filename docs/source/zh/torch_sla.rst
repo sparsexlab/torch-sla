@@ -152,9 +152,8 @@ BACKEND_METHODS
 .. code-block:: python
 
    BACKEND_METHODS = {
-       'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'minres'],
-       'eigen': ['cg', 'bicgstab'],
-       'pytorch': ['cg', 'bicgstab'],
+       'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr'],
+       'pytorch': ['cg', 'bicgstab', 'gmres', 'minres'],
        'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
        'cudss': ['lu', 'cholesky', 'ldlt'],
    }
@@ -168,7 +167,6 @@ DEFAULT_METHODS
 
    DEFAULT_METHODS = {
        'scipy': 'lu',
-       'eigen': 'bicgstab',
        'pytorch': 'cg',
        'cupy': 'lu',
        'cudss': 'cholesky',

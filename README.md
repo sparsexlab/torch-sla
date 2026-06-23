@@ -28,7 +28,7 @@
 ## Features
 
 - 🔥 **Differentiable**: Full gradient support through `torch.autograd`
-- 🚀 **Multiple Backends**: SciPy, Eigen (CPU), CuPy, cuDSS, PyTorch-native (CUDA)
+- 🚀 **Multiple Backends**: SciPy (CPU), PyTorch-native (CPU/CUDA), CuPy, cuDSS (CUDA)
 - 📦 **Batched Operations**: Support for batched sparse tensors `[..., M, N, ...]`
 - 🎯 **Property Detection**: Auto-detect symmetry and positive definiteness
 - ⚡ **High Performance**: Auto-selects best solver based on device, dtype, and problem size
@@ -130,10 +130,10 @@ Based on benchmarks on 2D Poisson equations (tested up to **400M DOF** multi-GPU
 | Backend | Device | Description | Recommended For |
 |---------|--------|-------------|-----------------|
 | `scipy` | CPU | SciPy (LU/UMFPACK) | **CPU default** - fast + machine precision |
-| `eigen` | CPU | Eigen C++ (CG, BiCGStab) | Alternative CPU iterative |
 | `cupy` | CUDA | CuPy (LU, CG, GMRES) | GPU direct + iterative via cupyx.scipy |
-| `cudss` | CUDA | NVIDIA cuDSS (LU, Cholesky, LDLT) | **CUDA default** - fastest direct |
-| `pytorch` | CUDA | PyTorch-native (CG, BiCGStab) | Very large problems (> 2M DOF) |
+| `cudss` | CUDA | NVIDIA cuDSS (LU, Cholesky, LDLT) | **CUDA default** - fastest direct (NVIDIA) |
+| `strumpack` | CPU/CUDA/ROCm | STRUMPACK multifrontal direct (LU) via torch-strumpack | **Portable direct solver, incl. AMD ROCm** |
+| `pytorch` | CPU/CUDA | PyTorch-native (CG, BiCGStab, GMRES, MINRES) | Very large problems (> 2M DOF) |
 
 ### Solver Methods
 
@@ -143,9 +143,10 @@ Based on benchmarks on 2D Poisson equations (tested up to **400M DOF** multi-GPU
 | `cholesky` | cudss | **SPD matrices (fastest)** | Machine precision |
 | `ldlt` | cudss | Symmetric matrices | Machine precision |
 | `umfpack` | scipy | General matrices (requires scikit-umfpack) | Machine precision |
-| `cg` | scipy, eigen, cupy, pytorch | SPD matrices (iterative) | ~1e-6 to 1e-7 |
-| `bicgstab` | scipy, eigen, pytorch | General (iterative) | ~1e-6 to 1e-7 |
-| `gmres` | scipy, cupy | General (iterative) | ~1e-6 to 1e-7 |
+| `cg` | scipy, cupy, pytorch | SPD matrices (iterative) | ~1e-6 to 1e-7 |
+| `bicgstab` | scipy, pytorch | General (iterative) | ~1e-6 to 1e-7 |
+| `gmres` | scipy, cupy, pytorch | General (iterative) | ~1e-6 to 1e-7 |
+| `minres` | scipy, pytorch | Symmetric indefinite (iterative) | ~1e-6 to 1e-7 |
 
 ## Batched Solve
 
