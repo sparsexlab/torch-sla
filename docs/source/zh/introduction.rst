@@ -12,7 +12,7 @@
 
    <ul class="feature-list">
      <li><span class="gradient-text">内存高效</span>: 仅存储非零元素 — 使用最少内存求解百万级未知数</li>
-     <li><span class="gradient-text">多后端支持</span>: 可选择 <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>、<a href="https://pytorch.org/">PyTorch原生</a>、<a href="https://docs.cupy.dev/">CuPy</a> 或 <a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a></li>
+     <li><span class="gradient-text">多后端支持</span>: 可选择 <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>、<a href="https://pytorch.org/">PyTorch原生</a>、<a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a>（NVIDIA）或 STRUMPACK（支持 CPU/CUDA/ROCm 的可移植直接求解器）</li>
      <li><span class="gradient-text">后端/方法分离</span>: 独立指定后端和求解方法</li>
      <li><span class="gradient-text">自动选择</span>: 根据设备、数据类型和问题规模自动选择最佳后端和方法</li>
      <li><span class="gradient-text">梯度支持</span>: 通过 PyTorch autograd 完整计算梯度，<span class="badge-gradient">O(1) 计算图节点</span></li>
@@ -33,24 +33,24 @@
 
    * - 问题规模
      - CPU
-     - CUDA
-     - 备注
+     - CUDA (NVIDIA)
+     - ROCm (AMD) / 备注
    * - 小型 (< 10万 DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - 直接求解器，机器精度
+     - 直接求解器，机器精度。ROCm: 用 ``strumpack`` 直接求解（cuDSS 仅 NVIDIA）。
    * - 中型 (10万 - 200万 DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - cuDSS 在 GPU 上最快
+     - cuDSS 在 NVIDIA 上最快。ROCm: 用 ``strumpack`` 做 GPU 直接求解。
    * - 大型 (200万 - 1.69亿 DOF)
      - 不适用
      - ``pytorch+cg``
-     - **仅迭代法**，~1e-6 精度
+     - **仅迭代法**，~1e-6 精度。``pytorch+cg`` 同样可在 ROCm 上运行。
    * - 超大型 (> 1.69亿 DOF)
      - 不适用
      - ``DSparseTensor`` 多卡
-     - 多卡域分解并行
+     - 多卡域分解并行（CUDA / ROCm）
 
 核心发现
 ~~~~~~~~
@@ -134,15 +134,15 @@ LU 分解，用于同一矩阵的高效重复求解。
      - **CPU 默认**
    * - ``cudss``
      - CUDA
-     - NVIDIA cuDSS 直接求解器 (LU, Cholesky, LDLT)
+     - NVIDIA cuDSS 直接求解器 (LU, Cholesky, LDLT)，仅支持 NVIDIA
      - **CUDA 直接**
-   * - ``cupy``
-     - CUDA
-     - CuPy GPU 求解器 (LU, CG, GMRES) 通过 cupyx.scipy
-     - 备选
+   * - ``strumpack``
+     - CPU/CUDA/ROCm
+     - STRUMPACK 多波前稀疏直接求解器 (LU, Cholesky, LDLt；支持实数与复数；完整 autograd)，通过 ``torch-strumpack`` 在 CPU/CUDA/ROCm 上可移植运行
+     - **AMD ROCm 直接求解 / 可移植直接法**
    * - ``pytorch``
-     - CPU/CUDA
-     - PyTorch 原生迭代求解器 (CG, BiCGStab, GMRES, MINRES) + Jacobi 预处理
+     - CPU/CUDA/ROCm
+     - PyTorch 原生迭代求解器 (CG, BiCGStab, GMRES, MINRES) + Jacobi 预处理，设备无关 (CPU/CUDA/ROCm)
      - **大规模问题 (>200万 DOF)**
 
 求解方法
@@ -160,15 +160,15 @@ LU 分解，用于同一矩阵的高效重复求解。
      - 描述
      - 精度
    * - ``lu``
-     - scipy, cupy, cudss
+     - scipy, cudss, strumpack
      - LU 分解（一般矩阵，直接法）
      - ~1e-14
    * - ``cholesky``
-     - cudss
+     - cudss, strumpack
      - Cholesky 分解（对称正定矩阵，**最快**）
      - ~1e-14
    * - ``ldlt``
-     - cudss
+     - cudss, strumpack
      - LDLT 分解（对称矩阵）
      - ~1e-14
 
@@ -184,7 +184,7 @@ LU 分解，用于同一矩阵的高效重复求解。
      - 描述
      - 精度
    * - ``cg``
-     - scipy, cupy, pytorch
+     - scipy, pytorch
      - 共轭梯度法（对称正定矩阵）+ Jacobi 预处理
      - ~1e-6
    * - ``bicgstab``
@@ -196,7 +196,7 @@ LU 分解，用于同一矩阵的高效重复求解。
      - MINRES（对称不定矩阵）+ Jacobi 预处理
      - ~1e-6
    * - ``gmres``
-     - scipy, cupy, pytorch
+     - scipy, pytorch
      - GMRES（一般矩阵）
      - ~1e-6
 
@@ -562,7 +562,7 @@ CUDA 用法
 4. **GPU 小规模问题用 cudss+cholesky**: 200万 DOF 以下最快的直接法
 5. **GPU 大规模问题用 pytorch+cg**: 单卡可达 1.69 亿 DOF
 6. **超大规模用多卡并行**: DSparseTensor 支持域分解，3 卡可达 5 亿+ DOF
-7. **推荐 cupy** 用于 GPU 迭代求解器 (CG, GMRES) 或作为直接求解器备选
+7. **可移植 GPU 直接求解用 strumpack**: 在 CPU/CUDA/ROCm 上提供 LU / Cholesky / LDLt — 在 cuDSS 不可用的 AMD ROCm 上是首选的直接求解器
 8. **重复求解缓存 LU 分解**: 用 ``A.lu()`` 复用分解结果
 
 引用

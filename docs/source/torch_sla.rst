@@ -259,11 +259,9 @@ Backend Availability Checks
 
 .. autofunction:: torch_sla.is_scipy_available
 
-.. autofunction:: torch_sla.is_eigen_available
-
-.. autofunction:: torch_sla.is_cupy_available
-
 .. autofunction:: torch_sla.is_cudss_available
+
+.. autofunction:: torch_sla.backends.is_strumpack_available
 
 ----
 
@@ -299,9 +297,11 @@ Dictionary mapping backend names to available solver methods.
 
    BACKEND_METHODS = {
        'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr'],
-       'pytorch': ['cg', 'bicgstab', 'gmres', 'minres'],
-       'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
-       'cudss': ['lu', 'cholesky', 'ldlt'],
+       'pytorch': ['cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr'],  # device-agnostic (CPU/CUDA/ROCm)
+       'cudss': ['lu', 'cholesky', 'ldlt'],                               # NVIDIA CUDA only
+       'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],
+       'amgx': ['amg', 'cg', 'pcg', 'bicgstab', 'pbicgstab', 'gmres', 'fgmres'],
+       'strumpack': ['lu'],                                               # multifrontal direct (CPU/CUDA/ROCm)
    }
 
 DEFAULT_METHODS
@@ -314,12 +314,14 @@ Dictionary mapping backend names to their default solver methods.
    DEFAULT_METHODS = {
        'scipy': 'lu',
        'pytorch': 'cg',
-       'cupy': 'lu',
        'cudss': 'cholesky',
+       'pyamg': 'ruge_stuben',
+       'amgx': 'pbicgstab',
+       'strumpack': 'lu',
    }
 
 Type Aliases
 ~~~~~~~~~~~~
 
-- ``BackendType``: Literal type for backend names: ``'scipy'``, ``'pytorch'``, ``'cupy'``, ``'cudss'``
+- ``BackendType``: Literal type for backend names: ``'scipy'``, ``'pytorch'``, ``'cudss'``, ``'pyamg'``, ``'amgx'``, ``'strumpack'``, ``'auto'``
 - ``MethodType``: Literal type for solver methods: ``'lu'``, ``'umfpack'``, ``'cg'``, ``'cgs'``, ``'bicgstab'``, ``'gmres'``, ``'minres'``, ``'cholesky'``, ``'ldlt'``, ``'lsqr'``, ``'lsmr'``

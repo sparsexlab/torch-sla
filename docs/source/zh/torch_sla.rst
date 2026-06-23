@@ -153,9 +153,11 @@ BACKEND_METHODS
 
    BACKEND_METHODS = {
        'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr'],
-       'pytorch': ['cg', 'bicgstab', 'gmres', 'minres'],
-       'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
-       'cudss': ['lu', 'cholesky', 'ldlt'],
+       'pytorch': ['cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr'],  # 设备无关 (CPU/CUDA/ROCm)
+       'cudss': ['lu', 'cholesky', 'ldlt'],                               # 仅 NVIDIA CUDA
+       'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],
+       'amgx': ['amg', 'cg', 'pcg', 'bicgstab', 'pbicgstab', 'gmres', 'fgmres'],
+       'strumpack': ['lu'],                                               # 多波前直接求解 (CPU/CUDA/ROCm)
    }
 
 DEFAULT_METHODS
@@ -168,7 +170,9 @@ DEFAULT_METHODS
    DEFAULT_METHODS = {
        'scipy': 'lu',
        'pytorch': 'cg',
-       'cupy': 'lu',
        'cudss': 'cholesky',
+       'pyamg': 'ruge_stuben',
+       'amgx': 'pbicgstab',
+       'strumpack': 'lu',
    }
 

@@ -12,7 +12,7 @@ Key Features
 
    <ul class="feature-list">
      <li><span class="gradient-text">Memory Efficient</span>: Only stores non-zero elements — solve systems with millions of unknowns using minimal memory</li>
-     <li><span class="gradient-text">Multiple Backends</span>: Choose from <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>, <a href="https://pytorch.org/">PyTorch-native</a>, <a href="https://docs.cupy.dev/">CuPy</a>, or <a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a></li>
+     <li><span class="gradient-text">Multiple Backends</span>: Choose from <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>, <a href="https://pytorch.org/">PyTorch-native</a>, <a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a> (NVIDIA), or STRUMPACK (portable direct solver on CPU/CUDA/ROCm)</li>
      <li><span class="gradient-text">Backend/Method Separation</span>: Independently specify the backend and solver method</li>
      <li><span class="gradient-text">Auto-selection</span>: Automatically choose the best backend and method based on device, dtype, and problem size</li>
      <li><span class="gradient-text">Gradient Support</span>: Full gradient computation via PyTorch autograd with <span class="badge-gradient">O(1) graph nodes</span></li>
@@ -33,24 +33,25 @@ Based on extensive benchmarks on 2D Poisson equations (tested up to **169M DOF**
 
    * - Problem Size
      - CPU
-     - CUDA
-     - Notes
+     - CUDA (NVIDIA)
+     - ROCm (AMD) / Notes
    * - Small (< 100K DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - Direct solvers, machine precision
+     - Direct solvers, machine precision. ROCm: ``strumpack`` direct solve
+       (cuDSS is NVIDIA-only).
    * - Medium (100K - 2M DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - cuDSS is fastest on GPU
+     - cuDSS is fastest on NVIDIA. ROCm: ``strumpack`` for a GPU direct solve.
    * - Large (2M - 169M DOF)
      - N/A
      - ``pytorch+cg``
-     - **Iterative only**, ~1e-6 precision
+     - **Iterative only**, ~1e-6 precision. ``pytorch+cg`` runs on ROCm too.
    * - Very Large (> 169M DOF)
      - N/A
      - ``DSparseTensor`` multi-GPU
-     - Multi-GPU domain decomposition
+     - Multi-GPU domain decomposition (CUDA / ROCm)
 
 Key Insights
 ~~~~~~~~~~~~
@@ -134,15 +135,15 @@ Backends
      - **CPU default**
    * - ``cudss``
      - CUDA
-     - NVIDIA cuDSS for direct solvers (LU, Cholesky, LDLT)
+     - NVIDIA cuDSS for direct solvers (LU, Cholesky, LDLT). NVIDIA-only.
      - **CUDA direct**
-   * - ``cupy``
-     - CUDA
-     - CuPy GPU solvers (LU, CG, GMRES) via cupyx.scipy
-     - Alternative
+   * - ``strumpack``
+     - CPU/CUDA/ROCm
+     - STRUMPACK multifrontal sparse direct solver (LU, Cholesky, LDLt; real + complex; full autograd). Portable across CPU/CUDA/ROCm via ``torch-strumpack``.
+     - **Direct on AMD ROCm / portable direct**
    * - ``pytorch``
-     - CPU/CUDA
-     - PyTorch-native iterative (CG, BiCGStab, GMRES, MINRES) with Jacobi preconditioning
+     - CPU/CUDA/ROCm
+     - PyTorch-native iterative (CG, BiCGStab, GMRES, MINRES) with Jacobi preconditioning. Device-agnostic (CPU/CUDA/ROCm).
      - **Large problems (>2M DOF)**
 
 Methods
@@ -160,15 +161,15 @@ Direct Solvers
      - Description
      - Precision
    * - ``lu``
-     - scipy, cupy, cudss
+     - scipy, cudss, strumpack
      - LU factorization (general matrices, direct)
      - ~1e-14
    * - ``cholesky``
-     - cudss
+     - cudss, strumpack
      - Cholesky factorization (for SPD matrices, **fastest**)
      - ~1e-14
    * - ``ldlt``
-     - cudss
+     - cudss, strumpack
      - LDLT factorization (for symmetric matrices)
      - ~1e-14
 
@@ -184,7 +185,7 @@ Iterative Solvers
      - Description
      - Precision
    * - ``cg``
-     - scipy, cupy, pytorch
+     - scipy, pytorch
      - Conjugate Gradient (for SPD) with Jacobi preconditioning
      - ~1e-6
    * - ``bicgstab``
@@ -192,7 +193,7 @@ Iterative Solvers
      - BiCGStab (for general matrices) with Jacobi preconditioning
      - ~1e-6
    * - ``gmres``
-     - scipy, cupy, pytorch
+     - scipy, pytorch
      - GMRES (for general matrices)
      - ~1e-6
    * - ``minres``
@@ -590,7 +591,7 @@ Performance Tips
 4. **Use cudss+cholesky for small CUDA problems**: Fastest direct solver (< 2M DOF)
 5. **Use pytorch+cg for large problems**: Memory efficient, scales to 169M+ DOF on single GPU
 6. **Use multi-GPU for very large problems**: DSparseTensor supports domain decomposition, 3 GPUs can reach 500M+ DOF
-7. **Use cupy** for GPU iterative solvers (CG, GMRES) or as a direct solver fallback
+7. **Use strumpack for a portable GPU direct solve**: LU / Cholesky / LDLt on CPU/CUDA/ROCm — the direct-solver choice on AMD ROCm where cuDSS is unavailable
 8. **Use LU factorization for repeated solves**: Cache with ``A.lu()``
 
 Citation

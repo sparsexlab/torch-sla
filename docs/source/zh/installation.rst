@@ -9,9 +9,11 @@
    # 基本安装（自带 torch / numpy / scipy / ninja，CPU 求解器开箱即用）
    pip install torch-sla
 
-   # GPU 用户：按需选择一个或两个 CUDA 12+ 后端
-   pip install torch-sla[cupy]    # 添加 CuPy 后端
-   pip install torch-sla[cudss]   # 添加 cuDSS 后端（GPU 最快的直接求解器）
+   # NVIDIA GPU 用户（CUDA 12+）
+   pip install torch-sla[cudss]   # 添加 cuDSS 后端（NVIDIA GPU 最快的直接求解器）
+
+   # 可移植 GPU 直接求解器（CPU / NVIDIA CUDA / AMD ROCm）
+   pip install torch-strumpack    # 添加 STRUMPACK 多波前稀疏直接求解器（LU/Cholesky/LDLt）
 
    # 完整安装，包含所有运行时后端（不含 dev / docs）
    pip install torch-sla[all]
@@ -38,9 +40,9 @@
 - PyTorch >= 1.10.0
 - NumPy >= 1.19（核心依赖，自动安装）
 - SciPy >= 1.5（核心依赖，自动安装；CPU 默认后端）
-- CUDA Toolkit（GPU 后端需要）
-- nvmath-python（可选，cuDSS 后端需要）
-- cupy-cuda12x（可选，CuPy 后端需要）
+- CUDA Toolkit（NVIDIA GPU 后端需要）
+- nvmath-python（可选，cuDSS 后端需要，仅 NVIDIA CUDA）
+- torch-strumpack（可选，STRUMPACK 直接求解器后端需要；支持 CPU/CUDA/ROCm）
 
 后端依赖
 --------
@@ -55,14 +57,14 @@
    * - ``scipy``
      - scipy
      - ``pip install scipy``
-   * - ``cupy``
-     - cupy-cuda12x
-     - ``pip install cupy-cuda12x``
    * - ``cudss``
-     - nvmath-python
+     - nvmath-python（仅 NVIDIA CUDA）
      - ``pip install nvmath-python[cu12]``
+   * - ``strumpack``
+     - torch-strumpack（CPU/CUDA/ROCm 可移植多波前稀疏直接求解器）
+     - ``pip install torch-strumpack``
    * - ``pytorch``
-     - torch
+     - torch（设备无关，支持 CPU/CUDA/ROCm）
      - 已包含
 
 验证安装

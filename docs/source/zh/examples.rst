@@ -290,11 +290,11 @@ SafeTensors 格式
      - CPU
      - ``lu``, ``umfpack``, ``cg``, ``bicgstab``, ``gmres``
    * - ``pytorch``
-     - CPU/CUDA
+     - CPU/CUDA/ROCm
      - ``cg``, ``bicgstab``, ``gmres``, ``minres``
-   * - ``cupy``
-     - CUDA
-     - ``lu``, ``cg``, ``cgs``, ``gmres``, ``minres``
+   * - ``strumpack``
+     - CPU/CUDA/ROCm
+     - ``lu``, ``cholesky``, ``ldlt``
    * - ``cudss``
      - CUDA
      - ``lu``, ``cholesky``, ``ldlt``
@@ -689,7 +689,14 @@ CUDA 用法
 
 传输到GPU进行CUDA加速求解。
 
-**性能：** cuDSS/CuPy 对于大型系统可快10-100倍。
+**性能：** cuDSS 对于大型系统可快10-100倍。
+
+.. note::
+
+   同样的代码无需修改即可在 **AMD ROCm** 上运行：ROCm 版 PyTorch 会
+   将 AMD GPU 暴露为 ``device='cuda'``，因此 ``A.cuda()`` /
+   ``b.cuda()`` 会把张量移动到 AMD GPU 上。PyTorch 原生迭代求解器与
+   ``strumpack`` 直接求解器都可在 ROCm 上运行；``cudss`` 不行（仅支持 NVIDIA）。
 
 **代码：**
 
@@ -699,7 +706,7 @@ CUDA 用法
 
    A = SparseTensor(val, row, col, shape)
    A_cuda = A.cuda()
-   
+
    x = A_cuda.solve(b.cuda())
 
 ----
@@ -707,15 +714,17 @@ CUDA 用法
 CUDA上的后端选择
 ~~~~~~~~~~~~~~~~
 
-**自动选择：** cuDSS（首选）→ CuPy（备选）
+**自动选择（NVIDIA）：** cuDSS（首选）→ pytorch（迭代备选）
+
+**自动选择（AMD ROCm）：** strumpack（直接）/ pytorch（迭代）— cuDSS 仅支持 NVIDIA
 
 **代码：**
 
 .. code-block:: python
 
-   x = A_cuda.solve(b_cuda, backend='cudss', method='lu')
-   x = A_cuda.solve(b_cuda, backend='cudss', method='cholesky')  # 对于 SPD
-   x = A_cuda.solve(b_cuda, backend='cupy', method='lu')
+   x = A_cuda.solve(b_cuda, backend='cudss', method='lu')        # 仅 NVIDIA
+   x = A_cuda.solve(b_cuda, backend='cudss', method='cholesky')  # 对于 SPD，仅 NVIDIA
+   x = A_cuda.solve(b_cuda, backend='strumpack', method='lu')    # CUDA 或 ROCm 直接求解
 
 ----
 
