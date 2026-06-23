@@ -40,15 +40,6 @@ The current backend lineup and what each supports:
      - ✔
      - via ``DSparseTensor``
      - ✔
-   * - ``cupy``
-     - --
-     - ✔
-     - LU (cuSPARSE)
-     - CG, GMRES
-     - ✔
-     - via batch helpers
-     - --
-     - ✔
    * - ``cudss``
      - --
      - ✔
@@ -104,11 +95,6 @@ which OS each one builds on today.
      - ✔
      - ✔
      - PyTorch-native; CUDA path active when ``torch.cuda.is_available()``.
-   * - ``cupy``
-     - ✔
-     - ✔
-     - --
-     - Requires NVIDIA CUDA. CuPy has no native macOS wheels.
    * - ``cudss``
      - ✔
      - ✔
@@ -130,7 +116,7 @@ which OS each one builds on today.
 When ``backend="auto"`` picks what
 ---------------------------------
 
-* **CUDA tensors**: try ``cudss`` (best direct solver) -> ``cupy`` (LU) ->
+* **CUDA tensors**: try ``cudss`` (best direct solver) ->
   ``pytorch`` (iterative fallback).
 * **CPU tensors, small / medium**: prefer ``scipy`` LU.
 * **CPU tensors, large or repeated**: ``pytorch`` CG / BiCGStab keeps the

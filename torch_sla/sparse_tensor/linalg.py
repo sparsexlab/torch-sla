@@ -36,11 +36,10 @@ def solve(
         Right-hand side vector(s). Shape:
         - Non-batched: [M] or [M, K] for multiple RHS
         - Batched: [...batch, M] or [...batch, M, K]
-    backend : {"auto", "scipy", "pytorch", "cupy", "cudss"}, optional
+    backend : {"auto", "scipy", "pytorch", "cudss"}, optional
         Solver backend. Default: "auto" (selects based on device).
         - "scipy": Uses SciPy's sparse solvers (CPU only)
         - "pytorch": PyTorch-native iterative solvers (CPU & CUDA)
-        - "cupy": Uses CuPy's sparse solvers (CUDA only)
         - "cudss": Uses NVIDIA cuDSS (CUDA only)
     method : str, optional
         Solver method. Default: "auto" (selects based on matrix properties).
@@ -151,7 +150,7 @@ def solve_batch(
         All matrices share the same row_indices and col_indices.
     b : torch.Tensor
         Right-hand side. Shape [...batch, M].
-    backend : {"auto", "scipy", "pytorch", "cupy", "cudss"}, optional
+    backend : {"auto", "scipy", "pytorch", "cudss"}, optional
         Solver backend. See solve() for details. Default: "auto".
     method : str, optional
         Solver method. See solve() for details. Default: "auto".

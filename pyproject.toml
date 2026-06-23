@@ -21,7 +21,6 @@ keywords = [
     "sparse",
     "linear-algebra",
     "cuda",
-    "cupy",
     "cudss",
     "sparse-matrix",
     "linear-solver",
@@ -69,10 +68,6 @@ docs = [
     "furo",
     "sphinx-autodoc-typehints",
 ]
-# CuPy backend (CUDA 12+)
-cupy = [
-    "cupy-cuda12x>=13.0",
-]
 # cuDSS backend via nvmath-python (CUDA 12+)
 cudss = [
     "nvmath-python[cu12]",
@@ -89,7 +84,6 @@ strumpack = [
 all = [
     "pytest>=6.0",
     "nvmath-python[cu12]",
-    "cupy-cuda12x>=13.0",
     "torch-amgx>=0.1.0a1",
 ]
 

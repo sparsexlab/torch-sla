@@ -3,7 +3,6 @@ Tests for torch-sla sparse linear solvers
 
 Tests all available backends:
 - CPU: cg, bicgstab
-- CUDA: cupy (lu, cg, gmres), cudss (lu, cholesky, ldlt)
 """
 
 import pytest
@@ -20,7 +19,6 @@ from torch_sla import (
     spsolve_coo,
     spsolve_csr,
     get_available_backends,
-    is_cupy_available,
     is_cudss_available,
 )
 
@@ -94,144 +92,6 @@ def test_spsolve_gradient_cpu(n, method):
     torch.testing.assert_close(x, x2, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(A_dense.grad, A_grad, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(b_dense.grad, b.grad, rtol=1e-3, atol=1e-3)
-
-
-# ============================================================================
-# CuPy Backend Tests
-# ============================================================================
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-@pytest.mark.parametrize(
-    ['n', 'method'],
-    product([16, 64, 256], ['cupy_lu', 'cupy_cg', 'cupy_gmres'])  # cupy_lu = direct, others iterative
-)
-def test_spsolve_cupy(n, method):
-    """Test CuPy solvers (direct and iterative)"""
-    if not is_cupy_available():
-        pytest.skip("CuPy backend not available")
-
-    # Map test method names to backend/method pairs
-    backend_method = {
-        'cupy_lu': ('cupy', 'lu'),
-        'cupy_cg': ('cupy', 'cg'),
-        'cupy_gmres': ('cupy', 'gmres'),
-    }
-    backend, solver_method = backend_method[method]
-
-    # Create SPD matrix (required for CG)
-    A = torch.rand(n, n, dtype=torch.float64, device='cuda')
-    A = A @ A.T + torch.eye(n, dtype=torch.float64, device='cuda') * n
-    A[A.abs() < 0.3] = 0
-    A = A.to_sparse_coo()
-
-    b = torch.randn(n, dtype=torch.float64, device='cuda')
-
-    x = spsolve(
-        A.values(), A.indices()[0], A.indices()[1], A.shape, b,
-        backend=backend, method=solver_method
-    )
-
-    # Verify solution: Ax ≈ b
-    A_dense = A.to_dense()
-    residual = torch.mv(A_dense, x) - b
-    relative_error = residual.norm() / b.norm()
-
-    # Direct solvers achieve ~1e-12, iterative solvers ~1e-6
-    tol = 1e-4 if solver_method in ('cg', 'cgs', 'gmres', 'minres') else 1e-6
-    assert relative_error < tol, f"Relative error too large: {relative_error}"
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-@pytest.mark.parametrize('method', ['lu', 'cg'])
-def test_spsolve_gradient_cupy(method):
-    """Test gradient computation for CuPy solvers"""
-    if not is_cupy_available():
-        pytest.skip("CuPy backend not available")
-
-    n = 32
-
-    # Create SPD matrix
-    A_dense = torch.rand(n, n, dtype=torch.float64, device='cuda')
-    A_dense = A_dense @ A_dense.T + torch.eye(n, dtype=torch.float64, device='cuda') * n
-    A_dense[A_dense.abs() < 0.3] = 0
-    A = A_dense.to_sparse_coo()
-
-    b = torch.randn(n, dtype=torch.float64, device='cuda')
-    b_dense = b.clone()
-
-    val = A.values().clone()
-    val.requires_grad_(True)
-    b.requires_grad_(True)
-    A_dense.requires_grad_(True)
-    b_dense.requires_grad_(True)
-
-    # Sparse solve
-    x = spsolve(val, A.indices()[0], A.indices()[1], A.shape, b,
-                backend='cupy', method=method)
-    x.sum().backward()
-
-    # Dense solve for reference
-    x2 = torch.linalg.solve(A_dense, b_dense)
-    x2.sum().backward()
-
-    torch.testing.assert_close(x, x2, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(b_dense.grad, b.grad, rtol=1e-3, atol=1e-3)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_spsolve_cupy_float32():
-    """Test CuPy solver with float32"""
-    if not is_cupy_available():
-        pytest.skip("CuPy backend not available")
-
-    n = 64
-    A = torch.rand(n, n, dtype=torch.float32, device='cuda')
-    A = A @ A.T + torch.eye(n, dtype=torch.float32, device='cuda') * n
-    A[A.abs() < 0.3] = 0
-    A = A.to_sparse_coo()
-
-    b = torch.randn(n, dtype=torch.float32, device='cuda')
-
-    x = spsolve(
-        A.values(), A.indices()[0], A.indices()[1], A.shape, b,
-        backend='cupy', method='lu'
-    )
-
-    # Verify solution
-    A_dense = A.to_dense()
-    residual = torch.mv(A_dense, x) - b
-    relative_error = residual.norm() / b.norm()
-
-    assert relative_error < 1e-3, f"Relative error too large: {relative_error}"
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_spsolve_cupy_multi_rhs():
-    """Test CuPy direct solver with multiple right-hand sides"""
-    if not is_cupy_available():
-        pytest.skip("CuPy backend not available")
-
-    n, k = 32, 5
-    A = torch.rand(n, n, dtype=torch.float64, device='cuda')
-    A = A @ A.T + torch.eye(n, dtype=torch.float64, device='cuda') * n
-    A[A.abs() < 0.3] = 0
-    A = A.to_sparse_coo()
-
-    b = torch.randn(n, k, dtype=torch.float64, device='cuda')
-
-    x = spsolve(
-        A.values(), A.indices()[0], A.indices()[1], A.shape, b,
-        backend='cupy', method='lu'
-    )
-
-    assert x.shape == (n, k), f"Expected shape ({n}, {k}), got {x.shape}"
-
-    # Verify each column
-    A_dense = A.to_dense()
-    for j in range(k):
-        residual = A_dense @ x[:, j] - b[:, j]
-        relative_error = residual.norm() / b[:, j].norm()
-        assert relative_error < 1e-6, f"Column {j}: relative error {relative_error}"
 
 
 # ============================================================================
@@ -451,7 +311,6 @@ def test_get_available_backends():
 
 if __name__ == '__main__':
     print("Available backends:", get_available_backends())
-    print("CuPy available:", is_cupy_available())
     print("cuDSS available:", is_cudss_available())
 
     # Run a simple test
@@ -461,9 +320,6 @@ if __name__ == '__main__':
     test_spsolve_gradient_cpu(32, 'cg')
     print("CPU gradient test passed!")
 
-    if torch.cuda.is_available() and is_cupy_available():
-        test_spsolve_cupy(32, 'cupy_lu')
-        print("CuPy test passed!")
 
     if torch.cuda.is_available() and is_cudss_available():
         test_spsolve_cudss(32, 'cudss_lu')

@@ -126,7 +126,7 @@
             "name": "What sparse solvers does torch-sla support?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "torch-sla supports multiple backends: CPU solvers include SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES) and PyTorch-native (CG, BiCGStab, GMRES, MINRES). GPU solvers include PyTorch-native (CG, BiCGStab, GMRES, MINRES), cuDSS (LU, Cholesky, LDLT), and CuPy (LU, CG, GMRES). The library automatically selects the best solver based on hardware and matrix properties."
+                "text": "torch-sla supports multiple backends: CPU solvers include SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES) and PyTorch-native (CG, BiCGStab, GMRES, MINRES). GPU solvers include PyTorch-native (CG, BiCGStab, GMRES, MINRES) and cuDSS (LU, Cholesky, LDLT). The library automatically selects the best solver based on hardware and matrix properties."
             }
         },
         {
@@ -150,7 +150,7 @@
             "name": "How do I use torch-sla on GPU?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Simply call .cuda() on your SparseTensor: A_cuda = A.cuda(); x = A_cuda.solve(b.cuda()). The library automatically uses cuDSS or CuPy for GPU-accelerated solving."
+                "text": "Simply call .cuda() on your SparseTensor: A_cuda = A.cuda(); x = A_cuda.solve(b.cuda()). The library automatically uses cuDSS for GPU-accelerated solving."
             }
         },
         {

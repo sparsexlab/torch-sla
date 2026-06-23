@@ -91,9 +91,7 @@ def auto_select_method(
     if available_memory > 0 and estimated_memory < available_memory * memory_threshold:
         if is_cudss_available():
             return ("cudss", "cholesky" if is_spd else "lu")
-        elif is_cupy_available():
-            return ("cupy", "lu")
-    
+
     if is_scipy_available():
         return ("scipy", "lu")
     

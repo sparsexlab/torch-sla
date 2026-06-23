@@ -43,7 +43,6 @@ import math
 
 from ..backends import (
     is_scipy_available,
-    is_cupy_available,
     is_cudss_available,
     select_backend,
     select_method,
@@ -226,7 +225,7 @@ class SparseTensor:
     **10. CUDA Support**
     
     >>> A_cuda = A.cuda()
-    >>> x = A_cuda.solve(b.cuda())  # Uses cuDSS or CuPy
+    >>> x = A_cuda.solve(b.cuda())  # Uses cuDSS
     """
     
     def __init__(

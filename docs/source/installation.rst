@@ -6,7 +6,7 @@ Installation
    <ul class="feature-list">
      <li><span class="gradient-text">PyPI</span>: <code>pip install torch-sla</code> — simplest installation</li>
      <li><span class="gradient-text">GitHub</span>: Clone and install for development</li>
-     <li><span class="gradient-text">Optional backends</span>: cuDSS, CuPy, PyAMG, AmgX for enhanced performance</li>
+     <li><span class="gradient-text">Optional backends</span>: cuDSS, PyAMG, AmgX for enhanced performance</li>
    </ul>
 
 ----

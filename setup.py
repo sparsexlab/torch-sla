@@ -117,7 +117,7 @@ setup(
     ],
     
     keywords=[
-        'pytorch', 'sparse', 'linear-algebra', 'cuda', 'cupy', 'cudss',
+        'pytorch', 'sparse', 'linear-algebra', 'cuda', 'cudss',
         'sparse-matrix', 'linear-solver', 'differentiable', 'autograd',
     ],
     

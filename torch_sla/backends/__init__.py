@@ -7,11 +7,10 @@ Backends:
 - 'scipy': SciPy backend (CPU only) - Uses LU for direct solvers
 - 'pytorch': PyTorch-native (CPU & CUDA) - Iterative solvers with Jacobi preconditioning
 - 'strumpack': STRUMPACK direct solver (CPU / CUDA / ROCm) via torch-strumpack
-- 'cupy': CuPy backend (CUDA only) - Direct and iterative solvers via cupyx.scipy
 - 'cudss': NVIDIA cuDSS via nvmath-python (CUDA only) - Direct solvers (LU, Cholesky, LDLT)
 
 Methods (solver algorithms):
-- 'lu': LU factorization (scipy, cupy, cudss)
+- 'lu': LU factorization (scipy, cudss)
 - 'umfpack': UMFPACK direct solver (scipy only, requires scikit-umfpack)
 - 'cholesky': Cholesky decomposition (direct, SPD matrices, cudss)
 - 'ldlt': LDLT decomposition (direct, symmetric matrices, cudss)
@@ -44,14 +43,13 @@ Usage:
     x = spsolve(A, b, backend='scipy', method='lu')
     x = spsolve(A, b, backend='cudss', method='cholesky')
     x = spsolve(A, b, backend='pytorch', method='cg')  # GPU iterative
-    x = spsolve(A, b, backend='cupy', method='spsolve')  # CuPy direct on GPU
 """
 
 from typing import Optional, List, Dict, Literal
 import torch
 
 # Type aliases
-BackendType = Literal['scipy', 'pytorch', 'cupy', 'cudss', 'pyamg',
+BackendType = Literal['scipy', 'pytorch', 'cudss', 'pyamg',
                       'amgx', 'strumpack', 'auto']
 MethodType = Literal[
     'auto',
@@ -67,7 +65,6 @@ MethodType = Literal[
 BACKEND_METHODS: Dict[str, List[str]] = {
     'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr'],
     'pytorch': ['cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr'],  # PyTorch-native iterative with Jacobi preconditioning
-    'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
     'cudss': ['lu', 'cholesky', 'ldlt'],
     'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],
     'amgx': ['amg', 'cg', 'pcg', 'bicgstab', 'pbicgstab', 'gmres', 'fgmres'],
@@ -78,7 +75,6 @@ BACKEND_METHODS: Dict[str, List[str]] = {
 DEFAULT_METHODS: Dict[str, str] = {
     'scipy': 'lu',            # Best for CPU: fast + machine precision (SuperLU)
     'pytorch': 'cg',         # Use CG for SPD (most common), with Jacobi preconditioning
-    'cupy': 'lu',             # GPU direct solver via SuperLU
     'cudss': 'cholesky',     # Best for CUDA: fastest + high precision
     'pyamg': 'ruge_stuben',   # Classical AMG; works for most PDE / SPD problems
     'amgx':  'pbicgstab',     # AmgX's most robust default; AMG-preconditioned
@@ -91,7 +87,6 @@ CUDA_ITERATIVE_THRESHOLD = 2_000_000
 
 # Backend availability flags
 _scipy_available: Optional[bool] = None
-_cupy_available: Optional[bool] = None
 _cudss_available: Optional[bool] = None
 
 
@@ -115,22 +110,6 @@ def is_scipy_available() -> bool:
 def is_pytorch_available() -> bool:
     """Check if PyTorch-native backend is available (always True)"""
     return True
-
-
-def is_cupy_available() -> bool:
-    """Check if CuPy backend is available"""
-    global _cupy_available
-    if _cupy_available is None:
-        if not _check_cuda():
-            _cupy_available = False
-        else:
-            try:
-                import cupy  # noqa: F401
-                import cupyx.scipy.sparse.linalg  # noqa: F401
-                _cupy_available = True
-            except ImportError:
-                _cupy_available = False
-    return _cupy_available
 
 
 def is_cudss_available() -> bool:
@@ -239,9 +218,6 @@ def get_available_backends() -> List[str]:
 
     backends.append('pytorch')  # Always available
 
-    if is_cupy_available():
-        backends.append('cupy')
-
     if is_cudss_available():
         backends.append('cudss')
 
@@ -255,7 +231,6 @@ def get_available_backends() -> List[str]:
 _BACKEND_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     'scipy':   {'device': 'CPU',  'install': 'pip install scipy'},
     'pytorch': {'device': 'CPU/CUDA', 'install': 'bundled with torch (always available)'},
-    'cupy':    {'device': 'CUDA', 'install': 'pip install torch-sla[cupy]'},
     'cudss':   {'device': 'CUDA', 'install': 'pip install torch-sla[cudss]'},
     'strumpack': {'device': 'CPU/CUDA/ROCm', 'install': 'pip install torch-strumpack'},
 }
@@ -275,13 +250,11 @@ def show_backends() -> None:
     torch-sla backend status (CUDA: available)
       scipy    [CPU]      available
       pytorch  [CPU/CUDA] available
-      cupy     [CUDA]     not available — pip install torch-sla[cupy]
       cudss    [CUDA]     not available — pip install torch-sla[cudss]
     """
     checks = [
         ('scipy',   is_scipy_available()),
         ('pytorch', is_pytorch_available()),
-        ('cupy',    is_cupy_available()),
         ('cudss',   is_cudss_available()),
         ('strumpack', is_strumpack_available()),
     ]
@@ -335,7 +308,7 @@ def select_backend(
     Returns
     -------
     str
-        Backend name ('scipy', 'pytorch', 'cupy', or 'cudss')
+        Backend name ('scipy', 'pytorch', or 'cudss')
     """
     if device.type == 'cpu':
         # CPU: scipy is best (SuperLU: fast + machine precision)
@@ -353,9 +326,6 @@ def select_backend(
             # cuDSS is best for CUDA (supports both float32 and float64)
             if is_cudss_available():
                 return 'cudss'
-            # CuPy as fallback (also supports float32 and float64)
-            if is_cupy_available():
-                return 'cupy'
 
         # Fallback to iterative
         return 'pytorch'
@@ -376,7 +346,6 @@ def select_method(
     Recommendations based on benchmark results:
     - scipy: lu (direct, best precision) or cg (iterative, for SPD)
     - cudss: cholesky (SPD, fastest) > ldlt (symmetric) > lu (general)
-    - cupy: lu (direct) or cg (iterative, for SPD)
     - pytorch: cg (SPD) or bicgstab (general), both with Jacobi preconditioning
 
     Parameters
@@ -408,14 +377,6 @@ def select_method(
     elif backend == 'pytorch':
         # Iterative with Jacobi preconditioning
         return 'cg' if is_spd else 'bicgstab'
-
-    elif backend == 'cupy':
-        if prefer_direct:
-            return 'lu'
-        elif is_spd:
-            return 'cg'
-        else:
-            return 'gmres'
 
     elif backend == 'cudss':
         # Recommendation: cholesky > ldlt > lu (based on benchmarks)

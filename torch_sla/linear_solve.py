@@ -7,13 +7,12 @@ Backends:
 ---------
 - 'scipy': SciPy backend (CPU only) - Direct solvers via LU/UMFPACK
 - 'pytorch': PyTorch-native (CPU & CUDA) - Iterative solvers for large-scale problems
-- 'cupy': CuPy backend (CUDA only) - Direct and iterative solvers via cupyx.scipy
 - 'cudss': NVIDIA cuDSS (CUDA only) - Direct solvers (LU, Cholesky, LDLT)
 
 Methods:
 --------
 Direct solvers:
-- 'lu': LU factorization (scipy, cupy, cudss)
+- 'lu': LU factorization (scipy, cudss)
 - 'umfpack': UMFPACK direct solver (scipy only)
 - 'lu': LU decomposition
 - 'cholesky': Cholesky decomposition (SPD matrices)
@@ -34,7 +33,6 @@ Usage:
     x = spsolve(val, row, col, shape, b, backend='scipy', method='lu')
     x = spsolve(val, row, col, shape, b, backend='cudss', method='lu')
     x = spsolve(val, row, col, shape, b, backend='pytorch', method='cg')  # GPU iterative
-    x = spsolve(val, row, col, shape, b, backend='cupy', method='lu')     # CuPy GPU direct
 """
 
 import warnings
@@ -46,7 +44,6 @@ from .backends import (
     get_cudss_module,
     is_scipy_available,
     is_pytorch_available,
-    is_cupy_available,
     is_cudss_available,
     is_pyamg_available,
     is_amgx_available,
@@ -172,40 +169,6 @@ class SparseLinearSolvePyAMG(Function):
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb, None, None, None
-
-
-class SparseLinearSolveCuPy(Function):
-    """CuPy solver with gradient support (direct and iterative methods)"""
-
-    @staticmethod
-    def forward(ctx, val, row, col, shape, b, method, atol, maxiter, tol):
-        from .backends.cupy_backend import cupy_solve
-        u = cupy_solve(val, row, col, shape, b, method=method, atol=atol, maxiter=maxiter, tol=tol)
-        ctx.save_for_backward(val, row, col, u)
-        ctx.A_shape = shape
-        ctx.method = method
-        ctx.atol = atol
-        ctx.maxiter = maxiter
-        ctx.tol = tol
-        return u
-
-    @staticmethod
-    def backward(ctx, gradu):
-        from .backends.cupy_backend import cupy_solve
-        val, row, col, u = ctx.saved_tensors
-        m, n = ctx.A_shape
-        method = ctx.method
-        atol = ctx.atol
-        maxiter = ctx.maxiter
-        tol = ctx.tol
-
-        # Solve A^T * gradb = gradu (adjoint method)
-        gradb = cupy_solve(val, col, row, (n, m), gradu,
-                          method=method, atol=atol, maxiter=maxiter, tol=tol)
-        gradval = -gradb[row] * u[col]
-        if gradval.dim() == 2:
-            gradval = gradval.sum(-1)
-        return gradval, None, None, None, gradb, None, None, None, None
 
 
 class SparseLinearSolveCuDSS(Function):
@@ -447,12 +410,11 @@ def spsolve(
         - 'auto': Auto-select based on device and problem size (default)
         - 'scipy': SciPy (CPU only, uses LU/UMFPACK)
         - 'pytorch': PyTorch-native (CPU & CUDA, iterative) - best for large problems
-        - 'cupy': CuPy (CUDA only, direct and iterative via cupyx.scipy)
         - 'cudss': NVIDIA cuDSS (CUDA only, direct)
     method : str, optional
         Solver method. Available methods depend on backend:
         - 'auto': Auto-select based on matrix properties
-        - 'lu': LU factorization (scipy, cupy, cudss)
+        - 'lu': LU factorization (scipy, cudss)
         - 'umfpack': UMFPACK direct solver (scipy only)
         - 'cholesky', 'ldlt': Direct solvers (cudss)
         - 'cg', 'cgs', 'bicgstab', 'gmres': Iterative solvers
@@ -568,17 +530,6 @@ def spsolve(
         )
 
     # ========================================================================
-    # CuPy backend (CUDA)
-    # ========================================================================
-    elif backend == "cupy":
-        if not val.is_cuda:
-            raise ValueError("CuPy backend requires CUDA tensors")
-        if not is_cupy_available():
-            raise RuntimeError("CuPy backend is not available. Install with: pip install cupy-cuda12x")
-
-        return SparseLinearSolveCuPy.apply(val, row, col, shape, b, method, atol, maxiter, tol)
-
-    # ========================================================================
     # cuDSS backend (CUDA)
     # ========================================================================
     elif backend == "cudss":
@@ -665,7 +616,7 @@ def spsolve(
     else:
         raise ValueError(
             f"Unknown backend: {backend}. "
-            f"Available: scipy, pytorch, cupy, cudss, pyamg, amgx, strumpack"
+            f"Available: scipy, pytorch, cudss, pyamg, amgx, strumpack"
         )
 
 

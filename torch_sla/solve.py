@@ -353,7 +353,7 @@ def _coerce_to_coo(A: MatrixLike, *,
 # ====================================================================== #
 # Public solve()
 # ====================================================================== #
-BackendName = Literal["auto", "scipy", "pytorch", "cupy", "cudss"]
+BackendName = Literal["auto", "scipy", "pytorch", "cudss"]
 MethodName = Literal["auto", "lu", "cholesky", "ldlt", "umfpack",
                      "cg", "cgs", "bicgstab", "gmres"]
 
