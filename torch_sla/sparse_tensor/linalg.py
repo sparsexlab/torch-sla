@@ -36,10 +36,10 @@ def solve(
         Right-hand side vector(s). Shape:
         - Non-batched: [M] or [M, K] for multiple RHS
         - Batched: [...batch, M] or [...batch, M, K]
-    backend : {"auto", "scipy", "eigen", "cupy", "cudss"}, optional
+    backend : {"auto", "scipy", "pytorch", "cupy", "cudss"}, optional
         Solver backend. Default: "auto" (selects based on device).
         - "scipy": Uses SciPy's sparse solvers (CPU only)
-        - "eigen": Uses Eigen C++ library (CPU only)
+        - "pytorch": PyTorch-native iterative solvers (CPU & CUDA)
         - "cupy": Uses CuPy's sparse solvers (CUDA only)
         - "cudss": Uses NVIDIA cuDSS (CUDA only)
     method : str, optional
@@ -151,7 +151,7 @@ def solve_batch(
         All matrices share the same row_indices and col_indices.
     b : torch.Tensor
         Right-hand side. Shape [...batch, M].
-    backend : {"auto", "scipy", "eigen", "cupy", "cudss"}, optional
+    backend : {"auto", "scipy", "pytorch", "cupy", "cudss"}, optional
         Solver backend. See solve() for details. Default: "auto".
     method : str, optional
         Solver method. See solve() for details. Default: "auto".
@@ -926,10 +926,14 @@ def _lobpcg_core(
     Z = torch.empty(n, 3 * m, dtype=dtype, device=device)
     eigenvalues = torch.empty(m, dtype=dtype, device=device)
 
-    # Initial Rayleigh-Ritz step.
+    # Initial Rayleigh-Ritz step.  Use conjugate transpose (.mH) so the Gram
+    # matrix X^H A X is genuinely Hermitian for complex A -- plain .T gives a
+    # non-Hermitian matrix and torch.linalg.eigh's behaviour on that is
+    # undefined (LAPACK on CPU and cuSOLVER on GPU disagree -> complex eigsh
+    # converged on CPU but NOT on GPU). .mH == .T on real tensors.
     AX.copy_(matvec(X))
-    H = X.T @ AX
-    H = 0.5 * (H + H.T)
+    H = X.mH @ AX
+    H = 0.5 * (H + H.mH)
     eigvals, V = torch.linalg.eigh(H)
     idx = eigvals.argsort(descending=largest)
     eigvals, V = eigvals[idx], V[:, idx]
@@ -970,24 +974,49 @@ def _lobpcg_core(
         ncols_eff = Z_active.shape[1]
 
         AZ_active = matvec(Z_active)
-        H = Z_active.T @ AZ_active
-        H = 0.5 * (H + H.T)
+        H = Z_active.mH @ AZ_active       # conjugate transpose: Hermitian Gram
+        H = 0.5 * (H + H.mH)
         eigvals, V = torch.linalg.eigh(H)
         idx = eigvals.argsort(descending=largest)
         eigvals, V = eigvals[idx], V[:, idx]
-        Vk = V[:, :m]
+
+        # fp32 rank-deficiency guard. In low precision the subspace
+        # ``[X | R | P]`` can become (near-)rank-deficient -- e.g. R
+        # collapses into span(X) near convergence, or clustered Ritz
+        # vectors in X turn collinear. ``_qr_orthonormalize`` then drops
+        # the offending columns and returns ``ncols_eff < ncols``, which
+        # can even fall below the block size ``m``. When that happens the
+        # projected problem only yields ``ncols_eff`` Ritz pairs, so
+        # ``H``, ``eigvals`` and ``V`` are ``ncols_eff``-sized. The
+        # buffers ``X``/``AX``/``P``/``eigenvalues`` are all sized ``m``,
+        # so we must clamp every update to the number of pairs that
+        # actually survive (``m_eff``); writing an ``ncols_eff``-wide
+        # slice into the ``m``-wide buffers (the old unconditional
+        # ``X.copy_(X_new)`` etc.) raised a shape-mismatch RuntimeError.
+        # In fp64 the block stays full rank, so ``m_eff == m`` and this is
+        # a no-op -- behaviour and convergence are unchanged.
+        m_eff = min(m, ncols_eff)
+        Vk = V[:, :m_eff]
 
         X_new = Z_active @ Vk
         AX_new = AZ_active @ Vk
-        if ncols_eff > m:
-            P_new = Z_active[:, m:] @ Vk[m:, :]
+        # Conjugate-direction P from the (R, P) coordinates, only when the
+        # active subspace is wider than the kept block (otherwise there is
+        # no extra direction and P resets to zero).
+        if ncols_eff > m_eff:
+            P_new = Z_active[:, m_eff:] @ Vk[m_eff:, :]
         else:
-            P_new = torch.zeros_like(X)
+            P_new = torch.zeros(n, m_eff, dtype=dtype, device=device)
 
-        X.copy_(X_new)
-        AX.copy_(AX_new)
-        P.copy_(P_new)
-        eigenvalues.copy_(eigvals[:m])
+        # Update only the leading ``m_eff`` columns / entries; the trailing
+        # ``m - m_eff`` columns keep their previous (already orthonormal,
+        # already-Ritz) values so the buffers stay well-defined and the
+        # next residual/Gram step remains consistent.
+        X[:, :m_eff].copy_(X_new)
+        AX[:, :m_eff].copy_(AX_new)
+        P[:, :m_eff].copy_(P_new)
+        P[:, m_eff:].zero_()
+        eigenvalues[:m_eff].copy_(eigvals[:m_eff])
 
     return eigenvalues[:k], X[:, :k]
 

@@ -5,8 +5,8 @@ This module provides a unified interface for different sparse linear algebra bac
 
 Backends:
 - 'scipy': SciPy backend (CPU only) - Uses LU for direct solvers
-- 'eigen': Eigen backend (CPU only) - Iterative solvers (CG, BiCGStab)
 - 'pytorch': PyTorch-native (CPU & CUDA) - Iterative solvers with Jacobi preconditioning
+- 'strumpack': STRUMPACK direct solver (CPU / CUDA / ROCm) via torch-strumpack
 - 'cupy': CuPy backend (CUDA only) - Direct and iterative solvers via cupyx.scipy
 - 'cudss': NVIDIA cuDSS via nvmath-python (CUDA only) - Direct solvers (LU, Cholesky, LDLT)
 
@@ -51,8 +51,8 @@ from typing import Optional, List, Dict, Literal
 import torch
 
 # Type aliases
-BackendType = Literal['scipy', 'eigen', 'pytorch', 'cupy', 'cudss', 'pyamg',
-                      'amgx', 'auto']
+BackendType = Literal['scipy', 'pytorch', 'cupy', 'cudss', 'pyamg',
+                      'amgx', 'strumpack', 'auto']
 MethodType = Literal[
     'auto',
     # Direct methods
@@ -66,23 +66,23 @@ MethodType = Literal[
 # Backend -> supported methods mapping
 BACKEND_METHODS: Dict[str, List[str]] = {
     'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr'],
-    'eigen': ['cg', 'bicgstab'],
-    'pytorch': ['cg', 'bicgstab'],  # PyTorch-native iterative with Jacobi preconditioning
+    'pytorch': ['cg', 'bicgstab', 'gmres', 'minres'],  # PyTorch-native iterative with Jacobi preconditioning
     'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
     'cudss': ['lu', 'cholesky', 'ldlt'],
     'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],
     'amgx': ['amg', 'cg', 'pcg', 'bicgstab', 'pbicgstab', 'gmres', 'fgmres'],
+    'strumpack': ['lu'],  # multifrontal sparse direct (CPU / CUDA / ROCm)
 }
 
 # Default methods for each backend (based on benchmarks)
 DEFAULT_METHODS: Dict[str, str] = {
     'scipy': 'lu',            # Best for CPU: fast + machine precision (SuperLU)
-    'eigen': 'bicgstab',
     'pytorch': 'cg',         # Use CG for SPD (most common), with Jacobi preconditioning
     'cupy': 'lu',             # GPU direct solver via SuperLU
     'cudss': 'cholesky',     # Best for CUDA: fastest + high precision
     'pyamg': 'ruge_stuben',   # Classical AMG; works for most PDE / SPD problems
     'amgx':  'pbicgstab',     # AmgX's most robust default; AMG-preconditioned
+    'strumpack': 'lu',        # multifrontal direct
 }
 
 # Threshold for switching from direct to iterative on CUDA (DOF)
@@ -93,7 +93,6 @@ CUDA_ITERATIVE_THRESHOLD = 2_000_000
 _scipy_available: Optional[bool] = None
 _cupy_available: Optional[bool] = None
 _cudss_available: Optional[bool] = None
-_eigen_available: Optional[bool] = None
 
 
 def _check_cuda() -> bool:
@@ -111,18 +110,6 @@ def is_scipy_available() -> bool:
         except ImportError:
             _scipy_available = False
     return _scipy_available
-
-
-def is_eigen_available() -> bool:
-    """Check if Eigen backend (C++ extension) is available"""
-    global _eigen_available
-    if _eigen_available is None:
-        try:
-            _load_eigen_backend()
-            _eigen_available = True
-        except Exception:
-            _eigen_available = False
-    return _eigen_available
 
 
 def is_pytorch_available() -> bool:
@@ -222,15 +209,33 @@ def is_amgx_available() -> bool:
     return _amgx_available
 
 
+_strumpack_available = None
+def is_strumpack_available() -> bool:
+    """Check if the STRUMPACK backend is available (CPU / CUDA / ROCm).
+
+    Requires the optional ``torch-strumpack`` package, whose compiled
+    STRUMPACK extension must load on this machine. Install a platform wheel::
+
+        pip install torch-strumpack        # cpu / cuda / rocm
+
+    This is torch-sla's portable (incl. **AMD ROCm**) sparse-direct path.
+    """
+    global _strumpack_available
+    if _strumpack_available is None:
+        try:
+            from .strumpack_backend import is_strumpack_available as _probe
+            _strumpack_available = bool(_probe())
+        except Exception:
+            _strumpack_available = False
+    return _strumpack_available
+
+
 def get_available_backends() -> List[str]:
     """Get list of available backends"""
     backends = []
 
     if is_scipy_available():
         backends.append('scipy')
-
-    if is_eigen_available():
-        backends.append('eigen')
 
     backends.append('pytorch')  # Always available
 
@@ -240,16 +245,19 @@ def get_available_backends() -> List[str]:
     if is_cudss_available():
         backends.append('cudss')
 
+    if is_strumpack_available():
+        backends.append('strumpack')
+
     return backends
 
 
 # Per-backend status descriptors used by show_backends()
 _BACKEND_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     'scipy':   {'device': 'CPU',  'install': 'pip install scipy'},
-    'eigen':   {'device': 'CPU',  'install': 'JIT-compiled C++ extension (requires a C++ compiler)'},
     'pytorch': {'device': 'CPU/CUDA', 'install': 'bundled with torch (always available)'},
     'cupy':    {'device': 'CUDA', 'install': 'pip install torch-sla[cupy]'},
     'cudss':   {'device': 'CUDA', 'install': 'pip install torch-sla[cudss]'},
+    'strumpack': {'device': 'CPU/CUDA/ROCm', 'install': 'pip install torch-strumpack'},
 }
 
 
@@ -266,17 +274,16 @@ def show_backends() -> None:
     >>> torch_sla.show_backends()
     torch-sla backend status (CUDA: available)
       scipy    [CPU]      available
-      eigen    [CPU]      available
       pytorch  [CPU/CUDA] available
       cupy     [CUDA]     not available — pip install torch-sla[cupy]
       cudss    [CUDA]     not available — pip install torch-sla[cudss]
     """
     checks = [
         ('scipy',   is_scipy_available()),
-        ('eigen',   is_eigen_available()),
         ('pytorch', is_pytorch_available()),
         ('cupy',    is_cupy_available()),
         ('cudss',   is_cudss_available()),
+        ('strumpack', is_strumpack_available()),
     ]
     cuda_status = 'available' if _check_cuda() else 'not available'
     print(f"torch-sla backend status (CUDA: {cuda_status})")
@@ -328,14 +335,12 @@ def select_backend(
     Returns
     -------
     str
-        Backend name ('scipy', 'eigen', 'pytorch', 'cupy', or 'cudss')
+        Backend name ('scipy', 'pytorch', 'cupy', or 'cudss')
     """
     if device.type == 'cpu':
         # CPU: scipy is best (SuperLU: fast + machine precision)
         if is_scipy_available():
             return 'scipy'
-        if is_eigen_available():
-            return 'eigen'
         return 'pytorch'  # Fallback to PyTorch-native
 
     elif device.type == 'cuda':
@@ -400,9 +405,6 @@ def select_method(
         else:
             return 'bicgstab'
 
-    elif backend == 'eigen':
-        return 'cg' if is_spd else 'bicgstab'
-
     elif backend == 'pytorch':
         # Iterative with Jacobi preconditioning
         return 'cg' if is_spd else 'bicgstab'
@@ -424,44 +426,6 @@ def select_method(
         return 'lu'
 
     return DEFAULT_METHODS.get(backend, methods[0] if methods else 'auto')
-
-
-def _load_eigen_backend():
-    """Load Eigen backend (C++ iterative solvers)"""
-    global _eigen_module
-
-    if _eigen_module is not None:
-        return _eigen_module
-
-    import os
-    from torch.utils.cpp_extension import load
-
-    try:
-        _eigen_module = load(
-            name="spsolve",
-            sources=[os.path.abspath(os.path.join(
-                os.path.dirname(__file__), "..", "..", "csrc", "spsolve", "spsolve.cpp"
-            ))],
-            verbose=False
-        )
-        return _eigen_module
-    except Exception as e:
-        raise RuntimeError(f"Failed to load Eigen backend: {e}")
-
-
-# Lazy-loaded modules
-_eigen_module = None
-
-
-# Convenience functions for getting modules
-def get_cpu_module():
-    """Get Eigen backend module (legacy name for compatibility)"""
-    return get_eigen_module()
-
-
-def get_eigen_module():
-    """Get Eigen backend module"""
-    return _load_eigen_backend()
 
 
 def get_cudss_module():

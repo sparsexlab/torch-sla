@@ -15,7 +15,6 @@ from typing import Tuple, List, Optional, Union, Literal
 import warnings
 
 from .backends import (
-    get_cpu_module,
     get_cudss_module,
     is_cupy_available,
     is_cudss_available,
@@ -59,11 +58,11 @@ class BatchSparseLinearSolveSameLayout(Function):
             b = b_batch[i]
             
             if method == 'cg':
-                _cpu = get_cpu_module()
-                x = _cpu.cg(torch.stack([row, col], 0), val, m, n, b, atol, maxiter)
+                from .backends.pytorch_backend import pytorch_solve
+                x = pytorch_solve(val, row, col, (m, n), b, method='cg', atol=atol, maxiter=maxiter)
             elif method == 'bicgstab':
-                _cpu = get_cpu_module()
-                x = _cpu.bicgstab(torch.stack([row, col], 0), val, m, n, b, atol, maxiter)
+                from .backends.pytorch_backend import pytorch_solve
+                x = pytorch_solve(val, row, col, (m, n), b, method='bicgstab', atol=atol, maxiter=maxiter)
             elif method == 'cupy_lu':
                 from .backends.cupy_backend import cupy_solve
                 x = cupy_solve(val, row, col, (m, n), b, method='lu')
@@ -111,11 +110,11 @@ class BatchSparseLinearSolveSameLayout(Function):
             
             # Solve A^T * gradb = gradu
             if method == 'cg':
-                _cpu = get_cpu_module()
-                gradb = _cpu.cg(torch.stack([col, row], 0), val, n, m, gradu, atol, maxiter)
+                from .backends.pytorch_backend import pytorch_solve
+                gradb = pytorch_solve(val, col, row, (n, m), gradu, method='cg', atol=atol, maxiter=maxiter)
             elif method == 'bicgstab':
-                _cpu = get_cpu_module()
-                gradb = _cpu.bicgstab(torch.stack([col, row], 0), val, n, m, gradu, atol, maxiter)
+                from .backends.pytorch_backend import pytorch_solve
+                gradb = pytorch_solve(val, col, row, (n, m), gradu, method='bicgstab', atol=atol, maxiter=maxiter)
             elif method == 'cupy_lu':
                 from .backends.cupy_backend import cupy_solve
                 gradb = cupy_solve(val, col, row, (n, m), gradu, method='lu')

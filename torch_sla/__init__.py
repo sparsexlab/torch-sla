@@ -5,8 +5,8 @@ A differentiable sparse linear equation solver library for PyTorch with multiple
 
 Backends
 --------
-- CPU: SciPy (LU, UMFPACK), Eigen (CG, BiCGStab)
-- CUDA: CuPy (LU, CG, GMRES), cuDSS (LU, Cholesky, LDLT)
+- CPU: SciPy (LU, UMFPACK), PyTorch-native (CG, BiCGStab, GMRES, MINRES)
+- CUDA: PyTorch-native (CG, BiCGStab, GMRES, MINRES), cuDSS (LU, Cholesky, LDLT), CuPy (LU, CG, GMRES)
 
 Features
 --------
@@ -94,7 +94,6 @@ from .backends import (
     select_method,
     # Availability checks
     is_scipy_available,
-    is_eigen_available,
     is_cupy_available,
     is_cudss_available,
     # Backend-method mappings
@@ -170,7 +169,6 @@ __all__ = [
     "select_backend",
     "select_method",
     "is_scipy_available",
-    "is_eigen_available",
     "is_cupy_available",
     "is_cudss_available",
     "BACKEND_METHODS",
