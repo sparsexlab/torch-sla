@@ -3,9 +3,9 @@
 - [x] sparse linear solve
 - [x] sparse eigen vals
 - [x] sparse determination
-- [ ] non linear solve 
-- [ ] ODE operator
-- [ ] matrix partition
+- [x] non linear solve (Newton + implicit-function-theorem gradients; differentiable wrt A.values + params)
+- [ ] ODE operator (genuinely net-new; needs a spec -- time integration du/dt=-Au? operator assembly?)
+- [x] matrix partition (already implemented: torch_sla/partition.py -- metis/simple/coordinates/RCB + build_partition; 12 tests pass; pymetis optional)
 - [x] **GPU-adapt graph ops** -- `connected_components` reimplemented as parallel pure-torch
       (label-propagation + pointer-jumping via `scatter_reduce`, stays on device, no CPU
       round-trip, no Python edge loop) -> GPU-ready; batched supported (broadcast). Verified
@@ -126,8 +126,11 @@ n = 1000    | 0.71 ms      | 2.51 ms      | 1.20 ms      | 431 ms   | 3.6x SLOWE
 
 ## Efficiency
 
-- [ ] sparse matmul
-  - [ ] cusparse backend
+- [x] sparse matmul (already implemented: torch_sla/sparse_tensor/matmul.py -- `__matmul__`,
+      SparseSparseMatmulFunction with sparse gradients; sparse@dense + sparse@sparse verified)
+  - [ ] dedicated cusparse backend -- NOTE: torch.sparse.mm already dispatches to cuSPARSE on
+        CUDA, so a separate backend is likely redundant; revisit only if a specific cuSPARSE
+        routine (e.g. SpGEMM tuning) is needed
 - [ ] sparse linear solve
   - [x] cudss backend
   - [x] torch backend
