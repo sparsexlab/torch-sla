@@ -148,9 +148,9 @@ What sparse solvers does torch-sla support?
 
 torch-sla supports multiple backends:
 
-- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES), PyTorch-native (CG, BiCGStab, GMRES, MINRES), STRUMPACK (LU, Cholesky, LDLt direct)
-- **GPU — NVIDIA (CUDA)**: PyTorch-native (CG, BiCGStab, GMRES, MINRES), cuDSS (LU, Cholesky, LDLT direct), STRUMPACK (LU, Cholesky, LDLt direct)
-- **GPU — AMD (ROCm)**: PyTorch-native (CG, BiCGStab, GMRES, MINRES), STRUMPACK (LU, Cholesky, LDLt direct). cuDSS is NVIDIA-only and is not available on ROCm.
+- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES), PyTorch-native (CG, BiCGStab, GMRES, MINRES), STRUMPACK (multifrontal LU direct)
+- **GPU — NVIDIA (CUDA)**: PyTorch-native (CG, BiCGStab, GMRES, MINRES), cuDSS (LU, Cholesky, LDLT direct), STRUMPACK (multifrontal LU direct)
+- **GPU — AMD (ROCm)**: PyTorch-native (CG, BiCGStab, GMRES, MINRES), STRUMPACK (multifrontal LU direct). cuDSS is NVIDIA-only and is not available on ROCm.
 
 The library automatically selects the best solver based on your hardware and matrix properties.
 

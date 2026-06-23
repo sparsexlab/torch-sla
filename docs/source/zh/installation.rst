@@ -13,7 +13,7 @@
    pip install torch-sla[cudss]   # 添加 cuDSS 后端（NVIDIA GPU 最快的直接求解器）
 
    # 可移植 GPU 直接求解器（CPU / NVIDIA CUDA / AMD ROCm）
-   pip install torch-strumpack    # 添加 STRUMPACK 多波前稀疏直接求解器（LU/Cholesky/LDLt）
+   pip install torch-strumpack    # 添加 STRUMPACK 多波前稀疏直接求解器（LU）
 
    # 完整安装，包含所有运行时后端（不含 dev / docs）
    pip install torch-sla[all]

@@ -39,7 +39,7 @@ run CPU solvers out of the box. GPU users can pick the backend(s) they need:
     pip install torch-sla[amgx]     # + NVIDIA AmgX GPU AMG / Krylov
 
     # Portable GPU direct solver (CPU / NVIDIA CUDA / AMD ROCm):
-    pip install torch-strumpack     # + STRUMPACK multifrontal direct solver (LU/Cholesky/LDLt)
+    pip install torch-strumpack     # + STRUMPACK multifrontal direct solver (LU)
 
     # CPU users (all platforms, including macOS):
     pip install torch-sla[pyamg]    # + PyAMG (CPU AMG setup + on-device V-cycle)
@@ -80,7 +80,7 @@ Backend Requirements
      - Native CG/BiCGStab solvers. Device-agnostic — runs on CPU / CUDA / ROCm.
    * - ``strumpack``
      - ``pip install torch-strumpack``
-     - Portable multifrontal sparse **direct** solver (LU / Cholesky / LDLt,
+     - Portable multifrontal sparse **direct** solver (multifrontal LU,
        real + complex, full autograd). Runs on **CPU / CUDA / ROCm** —
        the direct-solver path on AMD ROCm where cuDSS is unavailable.
    * - ``cudss``
@@ -124,7 +124,7 @@ the fastest path for each environment.
      - cuDSS is **NVIDIA-only** and does not run here. The PyTorch-native
        Krylov solvers (CG / BiCGStab / GMRES / MINRES / LSQR / LSMR) are
        device-agnostic and run on ROCm. **STRUMPACK gives a GPU direct
-       solve on ROCm** (LU / Cholesky / LDLt). PyAMG-hybrid does CPU setup
+       solve on ROCm** (multifrontal LU). PyAMG-hybrid does CPU setup
        + on-device V-cycle via ``torch.sparse`` on ROCm / XPU torch builds.
    * - **Linux / Windows CPU-only**
      - ``pip install torch-sla[pyamg]``

@@ -47,7 +47,7 @@ The current backend lineup and what each supports:
      - ✔
      - ✔
      - ✔
-     - LU / Cholesky / LDL\ :sup:`T`
+     - LU (multifrontal)
      - --
      - ✔
      - --
@@ -92,8 +92,7 @@ The STRUMPACK backend
 ``backend="strumpack"`` is a **portable multifrontal sparse direct
 solver**. Unlike cuDSS (which is NVIDIA CUDA only), STRUMPACK runs on
 **CPU, CUDA, and AMD ROCm** from the same API, supports both real and
-complex matrices, and offers LU, Cholesky, and LDL\ :sup:`T`
-factorizations. It is fully differentiable: gradients flow through the
+complex matrices, and offers a multifrontal LU factorization. It is fully differentiable: gradients flow through the
 adjoint (A\ :sup:`H`) solve, so it drops into autograd pipelines like the
 other backends.
 
@@ -136,7 +135,7 @@ which OS each one builds on today.
      - ✔
      - ✔
      - ✔
-     - Multifrontal sparse direct solver (LU / Cholesky / LDL\ :sup:`T`,
+     - Multifrontal sparse direct solver (multifrontal LU,
        real + complex). CPU/CUDA/ROCm via ``torch-strumpack``
        (``pip install torch-strumpack``).
    * - ``cudss``
