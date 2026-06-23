@@ -66,7 +66,7 @@ MethodType = Literal[
 # Backend -> supported methods mapping
 BACKEND_METHODS: Dict[str, List[str]] = {
     'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr'],
-    'pytorch': ['cg', 'bicgstab', 'gmres', 'minres'],  # PyTorch-native iterative with Jacobi preconditioning
+    'pytorch': ['cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr'],  # PyTorch-native iterative with Jacobi preconditioning
     'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
     'cudss': ['lu', 'cholesky', 'ldlt'],
     'pyamg': ['amg', 'ruge_stuben', 'smoothed_aggregation', 'sa'],

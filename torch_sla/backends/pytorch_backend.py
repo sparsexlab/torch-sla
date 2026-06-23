@@ -1911,6 +1911,242 @@ def minres_solve(
 
 
 # ============================================================================
+# LSQR / LSMR -- least-squares (Golub-Kahan bidiagonalization), matrix-free.
+# Pure-torch ports of scipy.sparse.linalg.lsqr / lsmr; device-agnostic
+# (CPU / CUDA / ROCm). Solve  min_x ||A x - b||_2  with optional Tikhonov
+# ``damp``; A may be rectangular. Scalars (norms, rotations) are real;
+# the only matrix ops are A @ x and A^H @ y, so complex A works (rmatvec
+# uses the conjugate transpose). Forward only (called inside an autograd
+# Function's forward); uses .item() freely.
+# ============================================================================
+
+def _sym_ortho(a, b):
+    """Stable Givens rotation (Choi). Returns (c, s, r) on real scalars."""
+    if b == 0:
+        return (math.copysign(1.0, a) if a != 0 else 1.0), 0.0, abs(a)
+    if a == 0:
+        return 0.0, math.copysign(1.0, b), abs(b)
+    if abs(b) > abs(a):
+        tau = a / b
+        s = math.copysign(1.0, b) / math.sqrt(1 + tau * tau)
+        return s * tau, s, b / s
+    tau = b / a
+    c = math.copysign(1.0, a) / math.sqrt(1 + tau * tau)
+    return c, c * tau, a / c
+
+
+def _ls_matvecs(val, row, col, shape):
+    """Return (matvec, rmatvec) for A and A^H (conj-transpose for complex)."""
+    A = CachedSparseMatrix(val, row, col, shape)
+    AT = CachedSparseMatrix(torch.conj_physical(val), col, row, (shape[1], shape[0]))
+    return A.matvec, AT.matvec
+
+
+def lsqr_solve(val, row, col, shape, b, *, atol=1e-8, btol=1e-8, maxiter=10000,
+               damp=0.0, conlim=1e8, x0=None, **kwargs):
+    """LSQR (Paige & Saunders 1982). Faithful torch port of scipy lsqr."""
+    matvec, rmatvec = _ls_matvecs(val, row, col, shape)
+    m, n = shape
+    dtype, device = b.dtype, b.device
+    eps = torch.finfo(b.real.dtype if torch.is_complex(b) else dtype).eps
+    dampsq = damp * damp
+    ctol = 1.0 / conlim if conlim > 0 else 0.0
+    anorm = ddnorm = res2 = xnorm = xxnorm = z = 0.0
+    cs2, sn2 = -1.0, 0.0
+
+    x = torch.zeros(n, dtype=dtype, device=device) if x0 is None else x0.clone()
+    u = b.clone() if x0 is None else (b - matvec(x))
+    beta = u.norm().item()
+    if beta > 0:
+        u = u / beta
+    v = rmatvec(u)
+    alfa = v.norm().item()
+    if alfa > 0:
+        v = v / alfa
+    w = v.clone()
+    rhobar, phibar, bnorm, rnorm = alfa, beta, beta, beta
+    if alfa * beta == 0:  # arnorm == 0: x=0 (or x0) is already optimal
+        return x, 0, rnorm
+
+    istop = 0
+    for itn in range(1, maxiter + 1):
+        u = matvec(v) - alfa * u
+        beta = u.norm().item()
+        if beta > 0:
+            u = u / beta
+            anorm = math.sqrt(anorm ** 2 + alfa ** 2 + beta ** 2 + dampsq)
+            v = rmatvec(u) - beta * v
+            alfa = v.norm().item()
+            if alfa > 0:
+                v = v / alfa
+        if damp > 0:
+            rhobar1 = math.sqrt(rhobar ** 2 + dampsq)
+            cs1, sn1 = rhobar / rhobar1, damp / rhobar1
+            psi, phibar = sn1 * phibar, cs1 * phibar
+        else:
+            rhobar1, psi = rhobar, 0.0
+        cs, sn, rho = _sym_ortho(rhobar1, beta)
+        theta = sn * alfa
+        rhobar = -cs * alfa
+        phi = cs * phibar
+        phibar = sn * phibar
+        tau = sn * phi
+        dk = (1.0 / rho) * w
+        x = x + (phi / rho) * w
+        w = v + (-theta / rho) * w
+        ddnorm = ddnorm + dk.norm().item() ** 2
+        # ||x|| estimate
+        delta = sn2 * rho
+        gambar = -cs2 * rho
+        rhs = phi - delta * z
+        zbar = rhs / gambar
+        xnorm = math.sqrt(xxnorm + zbar ** 2)
+        gamma = math.sqrt(gambar ** 2 + theta ** 2)
+        cs2, sn2 = gambar / gamma, theta / gamma
+        z = rhs / gamma
+        xxnorm = xxnorm + z ** 2
+        acond = anorm * math.sqrt(ddnorm)
+        rnorm = math.sqrt(phibar ** 2 + res2)
+        res2 = res2 + psi ** 2
+        arnorm = alfa * abs(tau)
+        test1 = rnorm / bnorm if bnorm > 0 else 0.0
+        test2 = arnorm / (anorm * rnorm + eps)
+        test3 = 1.0 / (acond + eps)
+        t1c = test1 / (1 + anorm * xnorm / bnorm) if bnorm > 0 else test1
+        rtol = btol + atol * anorm * xnorm / bnorm if bnorm > 0 else btol
+        if itn >= maxiter:
+            istop = 7
+        if 1 + test3 <= 1:
+            istop = 6
+        if 1 + test2 <= 1:
+            istop = 5
+        if 1 + t1c <= 1:
+            istop = 4
+        if test3 <= ctol:
+            istop = 3
+        if test2 <= atol:
+            istop = 2
+        if test1 <= rtol:
+            istop = 1
+        if istop:
+            break
+    return x, itn, rnorm
+
+
+def lsmr_solve(val, row, col, shape, b, *, atol=1e-8, btol=1e-8, maxiter=10000,
+               damp=0.0, conlim=1e8, x0=None, **kwargs):
+    """LSMR (Fong & Saunders 2011). Faithful torch port of scipy lsmr."""
+    matvec, rmatvec = _ls_matvecs(val, row, col, shape)
+    m, n = shape
+    dtype, device = b.dtype, b.device
+    eps = torch.finfo(b.real.dtype if torch.is_complex(b) else dtype).eps
+    ctol = 1.0 / conlim if conlim > 0 else 0.0
+
+    x = torch.zeros(n, dtype=dtype, device=device) if x0 is None else x0.clone()
+    u = b.clone() if x0 is None else (b - matvec(x))
+    beta = u.norm().item()
+    if beta > 0:
+        u = u / beta
+    v = rmatvec(u)
+    alpha = v.norm().item()
+    if alpha > 0:
+        v = v / alpha
+
+    # init
+    itn = 0
+    zetabar = alpha * beta
+    alphabar = alpha
+    rho = rhobar = cbar = 1.0
+    sbar = 0.0
+    h = v.clone()
+    hbar = torch.zeros(n, dtype=dtype, device=device)
+    betadd = beta
+    betad = 0.0
+    rhodold = 1.0
+    tautildeold = thetatilde = zeta = d = 0.0
+    normA2 = alpha * alpha
+    maxrbar, minrbar = 0.0, 1e100
+    normb = beta
+    normr = beta
+    normar = alpha * beta
+    if normar == 0:
+        return x, 0, normr
+    if normb == 0:
+        return x, 0, 0.0
+
+    istop = 0
+    for itn in range(1, maxiter + 1):
+        u = matvec(v) - alpha * u
+        beta = u.norm().item()
+        if beta > 0:
+            u = u / beta
+            v = rmatvec(u) - beta * v
+            alpha = v.norm().item()
+            if alpha > 0:
+                v = v / alpha
+        chat, shat, alphahat = _sym_ortho(alphabar, damp)
+        rhoold = rho
+        c, s, rho = _sym_ortho(alphahat, beta)
+        thetanew = s * alpha
+        alphabar = c * alpha
+        rhobarold = rhobar
+        zetaold = zeta
+        thetabar = sbar * rho
+        rhotemp = cbar * rho
+        cbar, sbar, rhobar = _sym_ortho(cbar * rho, thetanew)
+        zeta = cbar * zetabar
+        zetabar = -sbar * zetabar
+        hbar = h + (-(thetabar * rho / (rhoold * rhobarold))) * hbar
+        x = x + (zeta / (rho * rhobar)) * hbar
+        h = v + (-(thetanew / rho)) * h
+        # ||r|| estimate
+        betaacute = chat * betadd
+        betacheck = -shat * betadd
+        betahat = c * betaacute
+        betadd = -s * betaacute
+        thetatildeold = thetatilde
+        ctildeold, stildeold, rhotildeold = _sym_ortho(rhodold, thetabar)
+        thetatilde = stildeold * rhobar
+        rhodold = ctildeold * rhobar
+        betad = -stildeold * betad + ctildeold * betahat
+        tautildeold = (zetaold - thetatildeold * tautildeold) / rhotildeold
+        taud = (zeta - thetatilde * tautildeold) / rhodold
+        d = d + betacheck * betacheck
+        normr = math.sqrt(d + (betad - taud) ** 2 + betadd * betadd)
+        normA2 = normA2 + beta * beta
+        normA = math.sqrt(normA2)
+        normA2 = normA2 + alpha * alpha
+        maxrbar = max(maxrbar, rhobarold)
+        if itn > 1:
+            minrbar = min(minrbar, rhobarold)
+        condA = max(maxrbar, rhotemp) / min(minrbar, rhotemp)
+        normar = abs(zetabar)
+        normx = x.norm().item()
+        test1 = normr / normb if normb > 0 else 0.0
+        test2 = normar / (normA * normr + eps)
+        test3 = 1.0 / (condA + eps)
+        t1c = test1 / (1 + normA * normx / normb) if normb > 0 else test1
+        rtol = btol + atol * normA * normx / normb if normb > 0 else btol
+        if itn >= maxiter:
+            istop = 7
+        if 1 + test3 <= 1:
+            istop = 6
+        if 1 + test2 <= 1:
+            istop = 5
+        if 1 + t1c <= 1:
+            istop = 4
+        if test3 <= ctol:
+            istop = 3
+        if test2 <= atol:
+            istop = 2
+        if test1 <= rtol:
+            istop = 1
+        if istop:
+            break
+    return x, itn, normr
+
+
+# ============================================================================
 # Legacy interfaces for backward compatibility
 # ============================================================================
 
@@ -2088,8 +2324,17 @@ def pytorch_solve(
         x, _, _ = minres_solve(val, row, col, shape, b, x0=x0, atol=atol, rtol=rtol,
                                maxiter=maxiter, preconditioner=preconditioner)
         return x
+    elif method in ('lsqr', 'lsmr'):
+        # least-squares (Golub-Kahan); no preconditioner. btol from rtol.
+        fn = lsqr_solve if method == 'lsqr' else lsmr_solve
+        if b.dim() == 2:
+            cols = [fn(val, row, col, shape, b[:, k], atol=atol, btol=rtol,
+                       maxiter=maxiter)[0] for k in range(b.shape[1])]
+            return torch.stack(cols, dim=1)
+        x, _, _ = fn(val, row, col, shape, b, x0=x0, atol=atol, btol=rtol, maxiter=maxiter)
+        return x
     else:
-        raise ValueError(f"Unknown method: {method}. Available: cg, bicgstab, gmres, minres")
+        raise ValueError(f"Unknown method: {method}. Available: cg, bicgstab, gmres, minres, lsqr, lsmr")
 
 
 # ============================================================================
