@@ -7,6 +7,14 @@ This module provides batch solving capabilities for sparse linear equations:
 
 For same-layout batches, we can leverage optimized batch operations.
 For different-layout batches, we solve each system independently.
+
+Device support
+--------------
+- ``cg`` / ``bicgstab`` / ``gmres`` / ``minres`` / ``lsqr`` / ``lsmr``: PyTorch-native
+  and device-agnostic, so they run on **CPU, CUDA, and ROCm/HIP** out of the box.
+- ``strumpack``: multifrontal sparse direct, also **CPU / CUDA / ROCm** (needs the
+  optional ``torch-strumpack`` package).
+- ``cudss_*``: NVIDIA cuDSS direct solver, **CUDA only**.
 """
 
 import torch
@@ -17,12 +25,21 @@ import warnings
 from .backends import (
     get_cudss_module,
     is_cudss_available,
+    BACKEND_METHODS,
 )
+
+# PyTorch-native methods are device-agnostic (CPU / CUDA / ROCm).
+_PYTORCH_METHODS = set(BACKEND_METHODS.get(
+    'pytorch', ['cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr']))
 
 
 MethodType = Literal[
-    'cg', 'bicgstab',
-    'cudss', 'cudss_lu', 'cudss_cholesky', 'cudss_ldlt'
+    # PyTorch-native, device-agnostic (CPU / CUDA / ROCm)
+    'cg', 'bicgstab', 'gmres', 'minres', 'lsqr', 'lsmr',
+    # multifrontal direct, device-agnostic (CPU / CUDA / ROCm)
+    'strumpack',
+    # NVIDIA cuDSS direct (CUDA only)
+    'cudss', 'cudss_lu', 'cudss_cholesky', 'cudss_ldlt',
 ]
 
 
@@ -55,12 +72,15 @@ class BatchSparseLinearSolveSameLayout(Function):
             val = val_batch[i]
             b = b_batch[i]
             
-            if method == 'cg':
+            if method in _PYTORCH_METHODS:
+                # device-agnostic: CPU / CUDA / ROCm
                 from .backends.pytorch_backend import pytorch_solve
-                x = pytorch_solve(val, row, col, (m, n), b, method='cg', atol=atol, maxiter=maxiter)
-            elif method == 'bicgstab':
-                from .backends.pytorch_backend import pytorch_solve
-                x = pytorch_solve(val, row, col, (m, n), b, method='bicgstab', atol=atol, maxiter=maxiter)
+                x = pytorch_solve(val, row, col, (m, n), b, method=method, atol=atol, maxiter=maxiter)
+            elif method == 'strumpack':
+                # multifrontal direct, device-agnostic (CPU / CUDA / ROCm)
+                from .backends import strumpack_backend as _sp
+                crow, ccol, cval = _sp._coo_to_csr(val, row, col, (m, n))
+                x = _sp.solve(_sp.factor(crow, ccol, cval, n), b)
             elif method == 'cudss_lu':
                 _cudss = get_cudss_module()
                 x = _cudss.lu(torch.stack([row, col], 0), val, m, n, b)
@@ -104,12 +124,14 @@ class BatchSparseLinearSolveSameLayout(Function):
             gradu = gradu_batch[i]
             
             # Solve A^T * gradb = gradu
-            if method == 'cg':
+            if method in _PYTORCH_METHODS:
+                # transpose = swap (row, col); device-agnostic (CPU / CUDA / ROCm)
                 from .backends.pytorch_backend import pytorch_solve
-                gradb = pytorch_solve(val, col, row, (n, m), gradu, method='cg', atol=atol, maxiter=maxiter)
-            elif method == 'bicgstab':
-                from .backends.pytorch_backend import pytorch_solve
-                gradb = pytorch_solve(val, col, row, (n, m), gradu, method='bicgstab', atol=atol, maxiter=maxiter)
+                gradb = pytorch_solve(val, col, row, (n, m), gradu, method=method, atol=atol, maxiter=maxiter)
+            elif method == 'strumpack':
+                from .backends import strumpack_backend as _sp
+                crow, ccol, cval = _sp._coo_to_csr(val, row, col, (m, n))
+                gradb = _sp.solve_transpose(_sp.factor(crow, ccol, cval, n), gradu)
             elif method in ['cudss_lu']:
                 _cudss = get_cudss_module()
                 gradb = _cudss.lu(torch.stack([col, row], 0), val, n, m, gradu)
