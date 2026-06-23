@@ -12,7 +12,7 @@
 
    <ul class="feature-list">
      <li><span class="gradient-text">内存高效</span>: 仅存储非零元素 — 使用最少内存求解百万级未知数</li>
-     <li><span class="gradient-text">多后端支持</span>: 可选择 <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>、<a href="https://eigen.tuxfamily.org/">Eigen</a> (C++)、<a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a> 或 <a href="https://pytorch.org/">PyTorch原生</a></li>
+     <li><span class="gradient-text">多后端支持</span>: 可选择 <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>、<a href="https://pytorch.org/">PyTorch原生</a>、<a href="https://docs.cupy.dev/">CuPy</a> 或 <a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a></li>
      <li><span class="gradient-text">后端/方法分离</span>: 独立指定后端和求解方法</li>
      <li><span class="gradient-text">自动选择</span>: 根据设备、数据类型和问题规模自动选择最佳后端和方法</li>
      <li><span class="gradient-text">梯度支持</span>: 通过 PyTorch autograd 完整计算梯度，<span class="badge-gradient">O(1) 计算图节点</span></li>
@@ -132,10 +132,6 @@ LU 分解，用于同一矩阵的高效重复求解。
      - CPU
      - 使用 LU 或 UMFPACK 的 SciPy 后端直接求解器
      - **CPU 默认**
-   * - ``eigen``
-     - CPU
-     - Eigen C++ 后端迭代求解器 (CG, BiCGStab)
-     - 备选
    * - ``cudss``
      - CUDA
      - NVIDIA cuDSS 直接求解器 (LU, Cholesky, LDLT)
@@ -145,8 +141,8 @@ LU 分解，用于同一矩阵的高效重复求解。
      - CuPy GPU 求解器 (LU, CG, GMRES) 通过 cupyx.scipy
      - 备选
    * - ``pytorch``
-     - CUDA
-     - PyTorch 原生迭代求解器 (CG, BiCGStab) + Jacobi 预处理
+     - CPU/CUDA
+     - PyTorch 原生迭代求解器 (CG, BiCGStab, GMRES, MINRES) + Jacobi 预处理
      - **大规模问题 (>200万 DOF)**
 
 求解方法
@@ -188,15 +184,19 @@ LU 分解，用于同一矩阵的高效重复求解。
      - 描述
      - 精度
    * - ``cg``
-     - scipy, eigen, pytorch
+     - scipy, cupy, pytorch
      - 共轭梯度法（对称正定矩阵）+ Jacobi 预处理
      - ~1e-6
    * - ``bicgstab``
-     - scipy, eigen, pytorch
+     - scipy, pytorch
      - BiCGStab（一般矩阵）+ Jacobi 预处理
      - ~1e-6
+   * - ``minres``
+     - scipy, pytorch
+     - MINRES（对称不定矩阵）+ Jacobi 预处理
+     - ~1e-6
    * - ``gmres``
-     - scipy
+     - scipy, cupy, pytorch
      - GMRES（一般矩阵）
      - ~1e-6
 

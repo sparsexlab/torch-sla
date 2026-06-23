@@ -289,9 +289,9 @@ SafeTensors 格式
    * - ``scipy``
      - CPU
      - ``lu``, ``umfpack``, ``cg``, ``bicgstab``, ``gmres``
-   * - ``eigen``
-     - CPU
-     - ``cg``, ``bicgstab``
+   * - ``pytorch``
+     - CPU/CUDA
+     - ``cg``, ``bicgstab``, ``gmres``, ``minres``
    * - ``cupy``
      - CUDA
      - ``lu``, ``cg``, ``cgs``, ``gmres``, ``minres``

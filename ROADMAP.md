@@ -2,27 +2,18 @@
 
 Planned directions for torch-sla, roughly ordered by priority.
 
-_Last updated: 2026-05._
+_Last updated: 2026-06._
 
-## 1. Complex-valued solves (with correct complex adjoint)
+## 1. Complex-valued solves (with correct complex adjoint) — ✅ LANDED
 
-Support complex-valued sparse systems — in particular **complex-symmetric** matrices (`A = Aᵀ`, e.g. time-harmonic Helmholtz / PML / impedance) solved via cuDSS's LDLᵀ, and **Hermitian** matrices (`A = Aᴴ`) via LDLᴴ. cuDSS supports both natively; torch-sla just hasn't exposed the path yet. Top priority — it is what unblocks complex FEM in TensorMesh (Helmholtz / PML / metamaterial topology optimization). Two parts:
+Support complex-valued sparse systems — in particular **complex-symmetric** matrices (`A = Aᵀ`, e.g. time-harmonic Helmholtz / PML / impedance) solved via cuDSS's LDLᵀ, and **Hermitian** matrices (`A = Aᴴ`) via LDLᴴ. This is what unblocks complex FEM in TensorMesh (Helmholtz / PML / metamaterial topology optimization).
 
-Status today: the **scipy** backend already solves complex systems on CPU (direct `lu` + iterative, verified to machine precision) — a usable reference/validation path. The cuDSS work below is the high-performance **GPU** path. The `pytorch` (CG/BiCGStab use `torch.dot`, no conjugate; `<` ops break on complex) and `eigen` (C++ hard-codes `double`) backends don't support complex yet — separate gaps.
+**Status: done.** Both parts below shipped:
+- **(a) cuDSS complex** — `complex64`/`complex128` in `_DTYPE_MAP` and `HERMITIAN`/`HPD` in `_MTYPE_MAP` (`backends/nvmath_backend.py`).
+- **(b) complex adjoint** — `backends/.../autograd.py` uses `grad_val = -grad_b[row] * u[col].conj()` and solves `Aᴴ` per matrix type (general/LU, complex-symmetric LDLᵀ via the conjugation trick, Hermitian LDLᴴ). `torch.autograd.gradcheck` passes on complex inputs.
+- Backends with complex support: **scipy** (CPU direct + iterative), **cuDSS** (GPU direct), **pytorch-native** (CG / BiCGStab / GMRES / MINRES — verified relerr ~1e-13). The `eigen` C++ backend (real-only) has since been removed.
 
-**(a) Expose complex in the cuDSS backend** — small:
-- Add `complex64`/`complex128` to `_DTYPE_MAP` in `backends/nvmath_backend.py`.
-- Add `HERMITIAN` / `HPD` entries to `_MTYPE_MAP` (only `general/symmetric/spd` today).
-
-**(b) Fix the complex adjoint in the autograd backward** — small but **mathematically essential** (skipping it gives a correct forward solve but *silently wrong gradients*). `spsolve` is a custom `autograd.Function`, so PyTorch's complex-autograd rules stop at its `backward` boundary — the adjoint is hand-written and currently real-only. For `u = A⁻¹b` with a real loss, the complex adjoint (PyTorch's conjugate-gradient convention) is `λ = A⁻ᴴ ḡ`, `grad_b = λ`, `grad_A|ᵢⱼ = -λᵢ conj(uⱼ)`. Two corrections, both backward-compatible with the real path (`.conj()` is a no-op on real tensors):
-- Conjugate `u` in the outer product: `gradval = -gradb[row] * u[col].conj()`.
-- Use `Aᴴ` (not `Aᵀ`/`A`) for the adjoint solve, per matrix type:
-  - **general / LU**: `Aᴴ = conj(A)ᵀ` → transpose indices **and** `val.conj()`.
-  - **complex-symmetric (LDLᵀ)**: `Aᴴ = conj(A) ≠ A` → reuse the forward factorization via the conjugation trick `gradb = ldlt(indices, val, m, n, gradu.conj()).conj()`.
-  - **Hermitian (LDLᴴ)**: `Aᴴ = A` → reuse the factorization directly with `gradu`.
-- Validate with `torch.autograd.gradcheck` (supports complex inputs).
-
-Downstream (TensorMesh repo): the FEM assembly stack needs a few real-dtype assumptions unblocked before an end-to-end complex Helmholtz example works; see item 2 of the [TensorMesh ROADMAP](https://github.com/camlab-ethz/TensorMesh).
+Remaining: confirm complex paths for `det` / `eigs`. Downstream (TensorMesh repo): the FEM assembly stack still needs a few real-dtype assumptions unblocked before an end-to-end complex Helmholtz example works; see item 2 of the [TensorMesh ROADMAP](https://github.com/camlab-ethz/TensorMesh).
 
 ## 2. PETSc backend
 
@@ -39,7 +30,9 @@ References: [PETSc GPU Support Roadmap](https://petsc.org/release/overview/gpu_r
 
 ## 3. Multi-GPU linear solvers + TensorMesh multi-GPU assembly
 
-Wire up torch-sla's multi-GPU / distributed linear solvers (see `torch_sla/distributed.py`, `DSparseTensor`) with TensorMesh's multi-GPU assembly, so a domain-decomposed FEM problem can be assembled and solved across multiple GPUs end-to-end. **Status: still debugging.**
+Wire up torch-sla's multi-GPU / distributed linear solvers (see `torch_sla/distributed/`, `DSparseTensor`) with TensorMesh's multi-GPU assembly, so a domain-decomposed FEM problem can be assembled and solved across multiple GPUs end-to-end.
+
+**Status: torch-sla side done; TensorMesh end-to-end integration remaining.** Landed on the torch-sla side: distributed Krylov (`cg` / `bicgstab` / `gmres` / `fgmres` / `minres`, multiprocess tests match scipy), per-rank block-Jacobi + AMG preconditioners (PyAMG / torch-amgx), true comm/compute overlap via async P2P (`batch_isend_irecv` on NCCL, send/recv on gloo), benchmarked to **400M DOF on 4 GPUs**. The remaining work is the cross-repo piece: wiring this into TensorMesh's multi-GPU FEM assembly for an end-to-end domain-decomposed assemble+solve.
 
 ## 4. Ginkgo backend
 

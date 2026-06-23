@@ -298,9 +298,8 @@ Dictionary mapping backend names to available solver methods.
 .. code-block:: python
 
    BACKEND_METHODS = {
-       'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'minres'],
-       'eigen': ['cg', 'bicgstab'],
-       'pytorch': ['cg', 'bicgstab'],
+       'scipy': ['lu', 'umfpack', 'cg', 'bicgstab', 'gmres', 'lgmres', 'minres', 'qmr'],
+       'pytorch': ['cg', 'bicgstab', 'gmres', 'minres'],
        'cupy': ['lu', 'cg', 'cgs', 'gmres', 'minres', 'lsqr', 'lsmr'],
        'cudss': ['lu', 'cholesky', 'ldlt'],
    }
@@ -314,7 +313,6 @@ Dictionary mapping backend names to their default solver methods.
 
    DEFAULT_METHODS = {
        'scipy': 'lu',
-       'eigen': 'bicgstab',
        'pytorch': 'cg',
        'cupy': 'lu',
        'cudss': 'cholesky',
@@ -323,5 +321,5 @@ Dictionary mapping backend names to their default solver methods.
 Type Aliases
 ~~~~~~~~~~~~
 
-- ``BackendType``: Literal type for backend names: ``'scipy'``, ``'eigen'``, ``'pytorch'``, ``'cupy'``, ``'cudss'``
+- ``BackendType``: Literal type for backend names: ``'scipy'``, ``'pytorch'``, ``'cupy'``, ``'cudss'``
 - ``MethodType``: Literal type for solver methods: ``'lu'``, ``'umfpack'``, ``'cg'``, ``'cgs'``, ``'bicgstab'``, ``'gmres'``, ``'minres'``, ``'cholesky'``, ``'ldlt'``, ``'lsqr'``, ``'lsmr'``

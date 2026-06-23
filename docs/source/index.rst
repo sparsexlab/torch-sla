@@ -48,7 +48,7 @@ Key Features
    <ul class="feature-list">
      <li><span class="gradient-text">Memory efficient</span>: Only stores non-zero elements — a 1M×1M matrix with 1% density uses ~80MB instead of ~8TB</li>
      <li><span class="gradient-text">Full gradient support</span> via torch.autograd for end-to-end differentiable pipelines</li>
-     <li><span class="gradient-text">Multiple backends</span>: <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>, <a href="https://eigen.tuxfamily.org/">Eigen</a>, <a href="https://docs.cupy.dev/">CuPy</a>, <a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a></li>
+     <li><span class="gradient-text">Multiple backends</span>: <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>, <a href="https://pytorch.org/">PyTorch-native</a>, <a href="https://docs.cupy.dev/">CuPy</a>, <a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a></li>
      <li><span class="gradient-text">Batch solving</span>: Same-layout and different-layout sparse matrices</li>
      <li><span class="gradient-text">Distributed solving</span>: Domain decomposition with halo exchange</li>
      <li><span class="gradient-text">169M+ DOF tested</span>: Scales to very large problems with near-linear complexity</li>
@@ -148,8 +148,8 @@ What sparse solvers does torch-sla support?
 
 torch-sla supports multiple backends:
 
-- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES), Eigen (CG, BiCGStab)
-- **GPU**: CuPy (LU, CG, GMRES), cuDSS (LU, Cholesky, LDLT)
+- **CPU**: SciPy (LU, UMFPACK, CG, BiCGStab, GMRES, MINRES), PyTorch-native (CG, BiCGStab, GMRES, MINRES)
+- **GPU**: PyTorch-native (CG, BiCGStab, GMRES, MINRES), cuDSS (LU, Cholesky, LDLT), CuPy (LU, CG, GMRES)
 
 The library automatically selects the best solver based on your hardware and matrix properties.
 
