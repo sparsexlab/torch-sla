@@ -6,14 +6,15 @@ This module provides differentiable sparse linear equation solvers with multiple
 Backends:
 ---------
 - 'scipy': SciPy backend (CPU only) - Direct solvers via LU/UMFPACK
-- 'pytorch': PyTorch-native (CPU & CUDA) - Iterative solvers for large-scale problems
+- 'pytorch': PyTorch-native (CPU / CUDA / ROCm) - Iterative solvers for large-scale problems
+- 'strumpack': STRUMPACK multifrontal direct (CPU / CUDA / ROCm)
 - 'cudss': NVIDIA cuDSS (CUDA only) - Direct solvers (LU, Cholesky, LDLT)
 
 Methods:
 --------
 Direct solvers:
-- 'lu': LU factorization (scipy, cudss)
-- 'umfpack': UMFPACK direct solver (scipy only)
+- 'lu': LU factorization (scipy, strumpack, cudss)
+- 'umfpack': UMFPACK direct solver (CPU only, via scipy/scikit-umfpack; no GPU/ROCm build)
 - 'lu': LU decomposition
 - 'cholesky': Cholesky decomposition (SPD matrices)
 - 'ldlt': LDLT decomposition (symmetric matrices, cudss)
@@ -409,13 +410,15 @@ def spsolve(
         Backend to use:
         - 'auto': Auto-select based on device and problem size (default)
         - 'scipy': SciPy (CPU only, uses LU/UMFPACK)
-        - 'pytorch': PyTorch-native (CPU & CUDA, iterative) - best for large problems
+        - 'pytorch': PyTorch-native (CPU / CUDA / ROCm, iterative) - best for large problems
+        - 'strumpack': STRUMPACK multifrontal direct (CPU / CUDA / ROCm)
         - 'cudss': NVIDIA cuDSS (CUDA only, direct)
     method : str, optional
         Solver method. Available methods depend on backend:
         - 'auto': Auto-select based on matrix properties
-        - 'lu': LU factorization (scipy, cudss)
-        - 'umfpack': UMFPACK direct solver (scipy only)
+        - 'lu': LU factorization (scipy, strumpack, cudss)
+        - 'umfpack': UMFPACK direct solver (CPU only, via scipy/scikit-umfpack;
+          there is no GPU/ROCm UMFPACK -- for portable direct solves use 'strumpack')
         - 'cholesky', 'ldlt': Direct solvers (cudss)
         - 'cg', 'cgs', 'bicgstab', 'gmres': Iterative solvers
     atol : float, optional
