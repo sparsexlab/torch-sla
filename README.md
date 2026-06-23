@@ -559,3 +559,5 @@ If you find this library useful, please cite our paper:
   url={https://arxiv.org/abs/2601.13994}
 }
 ```
+
+<!-- pr-permission-check, auto, will be removed -->
