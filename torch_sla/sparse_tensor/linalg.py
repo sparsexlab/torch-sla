@@ -219,14 +219,15 @@ def nonlinear_solve(
     residual_fn,
     u0: torch.Tensor,
     *params,
-    method: Literal['newton', 'picard', 'anderson'] = 'newton',
-    tol: float = 1e-6,
-    atol: float = 1e-10,
+    jac_fn=None,
+    method: Literal['newton'] = 'newton',
+    tol: float = 1e-8,
+    atol: float = 1e-12,
     max_iter: int = 50,
     line_search: bool = True,
     verbose: bool = False,
-    linear_solver: BackendType = 'pytorch',
-    linear_method: MethodType = 'cg',
+    linear_solver: BackendType = 'auto',
+    linear_method: MethodType = 'auto',
 ) -> torch.Tensor:
     """
     Solve nonlinear equation F(u, A, θ) = 0 with adjoint-based gradients.
@@ -246,15 +247,18 @@ def nonlinear_solve(
     *params : torch.Tensor
         Additional parameters (e.g., boundary conditions, coefficients).
         Tensors with requires_grad=True will receive gradients.
-    method : {'newton', 'picard', 'anderson'}, optional
-        Nonlinear solver method:
-        - 'newton': Newton-Raphson with line search (default, fast)
-        - 'picard': Fixed-point iteration (simple, slow)
-        - 'anderson': Anderson acceleration (memory efficient)
+    jac_fn : Callable, optional
+        Optional explicit Jacobian ``J(u, A, *params) -> (val, row, col, shape)``
+        returning the sparse dF/du in COO form. If ``None`` (default) the
+        Jacobian is obtained via ``torch.autograd.functional.jacobian``.
+    method : {'newton'}, optional
+        Nonlinear solver method. Only Newton-Raphson (with implicit-diff
+        gradients) is supported; each step solves the sparse Jacobian
+        system via ``spsolve``.
     tol : float, optional
-        Relative convergence tolerance. Default: 1e-6.
+        Relative convergence tolerance on ``||F||``. Default: 1e-8.
     atol : float, optional
-        Absolute convergence tolerance. Default: 1e-10.
+        Absolute convergence tolerance on ``||F||``. Default: 1e-12.
     max_iter : int, optional
         Maximum nonlinear iterations. Default: 50.
     line_search : bool, optional
@@ -262,9 +266,11 @@ def nonlinear_solve(
     verbose : bool, optional
         Print convergence information. Default: False.
     linear_solver : str, optional
-        Backend for linear solves. Default: 'pytorch'.
+        Backend for the linear (Jacobian) solves. Default: 'auto'.
     linear_method : str, optional
-        Method for linear solves. Default: 'cg'.
+        Method for the linear (Jacobian) solves. Default: 'auto'. Note: the
+        Jacobian of a general nonlinear residual is NOT symmetric, so a
+        direct method (e.g. 'lu') is recommended over 'cg'.
     
     Returns
     -------
@@ -296,25 +302,39 @@ def nonlinear_solve(
     ...
     >>> u = K.nonlinear_solve(residual_elasticity, u0, F, material)
     """
-    from ..nonlinear_solve import nonlinear_solve as _nonlinear_solve
-    
-    # Wrap residual_fn to pass SparseTensor as matvec
+    if method != 'newton':
+        raise ValueError(
+            f"nonlinear_solve only supports method='newton', got {method!r}")
+    if self.is_batched:
+        raise NotImplementedError(
+            "nonlinear_solve not supported for batched SparseTensors")
+
+    from .autograd import NonlinearSolveFunction
+
     M, N = self.sparse_shape
-    
-    def wrapped_residual(u, *all_params):
-        # First param is the values tensor, rest are user params
-        # Reconstruct sparse matvec capability
-        return residual_fn(u, self, *all_params)
-    
-    # Include self.values in params if it requires grad
-    all_params = params
-    
-    return _nonlinear_solve(
-        wrapped_residual, u0, *all_params,
-        method=method, tol=tol, atol=atol, max_iter=max_iter,
-        line_search=line_search, verbose=verbose,
-        linear_solver=linear_solver, linear_method=linear_method,
-        )
+    row, col = self.row_indices, self.col_indices
+
+    # Residual seen by the autograd Function takes A's *values* as an
+    # explicit tensor argument so gradients can flow back to A. We rebuild
+    # the SparseTensor (sharing row/col/shape) inside the closure so the
+    # user still writes ``residual_fn(u, A, *params)``.
+    def residual_with_val(u, val, *user_params):
+        A = SparseTensor(val, row, col, (M, N))
+        return residual_fn(u, A, *user_params)
+
+    jac_with_val = None
+    if jac_fn is not None:
+        def jac_with_val(u, val, *user_params):
+            A = SparseTensor(val.detach(), row, col, (M, N))
+            return jac_fn(u, A, *user_params)
+
+    return NonlinearSolveFunction.apply(
+        u0, len(params), residual_with_val, jac_with_val,
+        row, col, (M, N),
+        tol, atol, max_iter, line_search, verbose,
+        linear_solver, linear_method,
+        self.values, *params,
+    )
 
 def eigs(
     self,

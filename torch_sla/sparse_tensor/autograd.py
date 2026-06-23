@@ -413,6 +413,223 @@ class SparseSolveFunction(Function):
         return grad_val, None, None, None, grad_b, None, None, None
 
 
+class NonlinearSolveFunction(Function):
+    """Differentiable nonlinear solve ``F(u, A, theta) = 0`` via Newton +
+    implicit-function-theorem gradients.
+
+    Forward runs Newton's method *detached* (no autograd graph through the
+    iterations -> O(1) graph nodes). Each Newton step solves the sparse
+    Jacobian system ``J du = -F`` through :func:`spsolve`. Convergence is
+    on the absolute residual ``||F||``.
+
+    Backward uses the implicit function theorem. At the converged ``u*``,
+    ``F(u*, theta) = 0`` implies ``dF/du . du + dF/dtheta . dtheta = 0``,
+    so for an upstream cotangent ``g = dL/du`` we solve the **adjoint**
+    system once
+
+        J^T lambda = g
+
+    and then ``dL/dtheta = -(dF/dtheta)^T lambda``, obtained for every
+    differentiable parameter (including ``A``'s values) by a single
+    ``torch.autograd.grad`` VJP through ``F`` evaluated at ``u*``. This
+    mirrors :class:`SparseSolveFunction` / :class:`DetAdjoint`: the
+    iterative forward never enters the graph, gradients flow through one
+    linear solve with the Jacobian transpose.
+
+    The residual passed in here has signature ``residual_fn(u, val, *params)``
+    where ``val`` is ``A``'s value tensor; the caller wires the SparseTensor
+    structure (row/col/shape) into the closure so ``val`` carries the
+    gradient path to ``A``.
+
+    Inputs (positional, to satisfy ``Function.apply``):
+        u0, num_params, residual_fn, jac_fn, row, col, shape,
+        newton_tol, newton_atol, max_iter, line_search, verbose,
+        linear_solver, linear_method, val, *params
+
+    ``val`` (A's values) and every tensor in ``*params`` are differentiable;
+    everything else returns a ``None`` gradient.
+    """
+
+    @staticmethod
+    def forward(ctx, u0, num_params, residual_fn, jac_fn, row, col, shape,
+                newton_tol, newton_atol, max_iter, line_search, verbose,
+                linear_solver, linear_method, val, *params):
+        from ..linear_solve import spsolve
+
+        n = u0.numel()
+        val_d = val.detach()
+        params_d = tuple(p.detach() if torch.is_tensor(p) else p for p in params)
+
+        def F_eval(u):
+            return residual_fn(u, val_d, *params_d)
+
+        def jacobian(u):
+            """Return (jval, jrow, jcol, jshape) of dF/du at u."""
+            if jac_fn is not None:
+                return jac_fn(u, val_d, *params_d)
+            # Dense autograd Jacobian, then sparsify (robust default).
+            with torch.enable_grad():
+                u_var = u.detach().requires_grad_(True)
+                J = torch.autograd.functional.jacobian(
+                    lambda uu: residual_fn(uu, val_d, *params_d), u_var,
+                    create_graph=False, vectorize=True,
+                )
+            J = J.reshape(n, n)
+            jrow, jcol = torch.nonzero(J.abs() > 0, as_tuple=True)
+            if jrow.numel() == 0:
+                jrow = torch.arange(n, device=J.device)
+                jcol = jrow.clone()
+            jval = J[jrow, jcol]
+            return jval, jrow, jcol, (n, n)
+
+        u = u0.detach().clone()
+        F = F_eval(u)
+        f0 = float(torch.linalg.vector_norm(F))
+        converged = False
+        for it in range(max_iter):
+            fnorm = float(torch.linalg.vector_norm(F))
+            if verbose:
+                print(f"  Newton iter {it}: ||F|| = {fnorm:.3e}")
+            if fnorm < newton_atol or (it > 0 and fnorm < newton_tol * f0):
+                converged = True
+                break
+            jval, jrow, jcol, jshape = jacobian(u)
+            du = spsolve(jval, jrow, jcol, jshape, -F,
+                         backend=linear_solver, method=linear_method)
+            # Armijo backtracking on ||F||.
+            if line_search:
+                alpha = 1.0
+                for _ in range(30):
+                    Fn = F_eval(u + alpha * du)
+                    if float(torch.linalg.vector_norm(Fn)) <= (1 - 1e-4 * alpha) * fnorm:
+                        break
+                    alpha *= 0.5
+            else:
+                alpha = 1.0
+            u = u + alpha * du
+            F = F_eval(u)
+        else:
+            fnorm = float(torch.linalg.vector_norm(F))
+
+        if not converged and float(torch.linalg.vector_norm(F)) >= max(
+                newton_atol, newton_tol * f0):
+            import warnings
+            warnings.warn(
+                f"NonlinearSolve (Newton) did not converge in {max_iter} "
+                f"iters: ||F|| = {float(torch.linalg.vector_norm(F)):.3e}",
+                RuntimeWarning, stacklevel=2,
+            )
+
+        ctx.save_for_backward(u, val, *[p for p in params if torch.is_tensor(p)])
+        ctx.residual_fn = residual_fn
+        ctx.jac_fn = jac_fn
+        ctx.row = row
+        ctx.col = col
+        ctx.shape = shape
+        ctx.linear_solver = linear_solver
+        ctx.linear_method = linear_method
+        ctx.num_params = num_params
+        ctx.params_is_tensor = [torch.is_tensor(p) for p in params]
+        ctx.params_nontensor = [None if torch.is_tensor(p) else p for p in params]
+        ctx.n = n
+        return u.detach()
+
+    @staticmethod
+    def backward(ctx, grad_u):
+        from ..linear_solve import spsolve
+
+        saved = ctx.saved_tensors
+        u = saved[0]
+        val = saved[1]
+        tensor_params = list(saved[2:])
+        residual_fn = ctx.residual_fn
+        jac_fn = ctx.jac_fn
+        n = ctx.n
+
+        # Rebuild the full params tuple (tensors + cached non-tensors).
+        params = []
+        ti = 0
+        for is_t, nt in zip(ctx.params_is_tensor, ctx.params_nontensor):
+            if is_t:
+                params.append(tensor_params[ti]); ti += 1
+            else:
+                params.append(nt)
+        params = tuple(params)
+
+        if grad_u is None:
+            n_extra = len(ctx.params_is_tensor)
+            return (None,) * (14 + 1 + n_extra)
+
+        # --- Jacobian J = dF/du at u* (detached) for the adjoint solve. ---
+        val_d = val.detach()
+        params_d = tuple(p.detach() if torch.is_tensor(p) else p for p in params)
+        if jac_fn is not None:
+            jval, jrow, jcol, jshape = jac_fn(u, val_d, *params_d)
+        else:
+            with torch.enable_grad():
+                u_var = u.detach().requires_grad_(True)
+                J = torch.autograd.functional.jacobian(
+                    lambda uu: residual_fn(uu, val_d, *params_d), u_var,
+                    create_graph=False, vectorize=True,
+                )
+            J = J.reshape(n, n)
+            jrow, jcol = torch.nonzero(J.abs() > 0, as_tuple=True)
+            if jrow.numel() == 0:
+                jrow = torch.arange(n, device=J.device)
+                jcol = jrow.clone()
+            jval = J[jrow, jcol]
+            jshape = (n, n)
+
+        # Adjoint solve  J^T lambda = grad_u  (swap row/col, conj for complex).
+        lam = spsolve(jval.conj(), jcol, jrow, (jshape[1], jshape[0]), grad_u,
+                      backend=ctx.linear_solver, method=ctx.linear_method)
+
+        # dL/dtheta = -(dF/dtheta)^T lambda  via one VJP through F at u*.
+        with torch.enable_grad():
+            u_const = u.detach()
+            diff_inputs = []
+            input_map = []  # ('val',) or ('param', idx)
+            val_var = val.detach().requires_grad_(True) if val.requires_grad else None
+            if val_var is not None:
+                diff_inputs.append(val_var)
+                input_map.append(('val', None))
+            param_vars = []
+            for i, p in enumerate(params):
+                if torch.is_tensor(p) and p.requires_grad:
+                    pv = p.detach().requires_grad_(True)
+                    param_vars.append(pv)
+                    diff_inputs.append(pv)
+                    input_map.append(('param', i))
+                else:
+                    param_vars.append(p)
+
+            grad_val = None
+            grad_params_map = {}
+            if diff_inputs:
+                F = residual_fn(u_const, val_var if val_var is not None else val_d,
+                                *param_vars)
+                grads = torch.autograd.grad(
+                    F, diff_inputs, grad_outputs=lam,
+                    retain_graph=False, allow_unused=True,
+                )
+                for (kind, idx), g in zip(input_map, grads):
+                    g = None if g is None else -g
+                    if kind == 'val':
+                        grad_val = g
+                    else:
+                        grad_params_map[idx] = g
+
+        # Assemble output gradient tuple aligned with forward's signature:
+        # (u0, num_params, residual_fn, jac_fn, row, col, shape,
+        #  newton_tol, newton_atol, max_iter, line_search, verbose,
+        #  linear_solver, linear_method, val, *params)
+        out = [None] * 14
+        out.append(grad_val)               # grad w.r.t. val (A's values)
+        for i in range(len(params)):
+            out.append(grad_params_map.get(i, None))
+        return tuple(out)
+
+
 class SparseSparseMatmulFunction(Function):
     """
     Differentiable Sparse @ Sparse multiplication with SPARSE gradients.
