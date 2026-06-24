@@ -17,22 +17,17 @@ import pytest
 import torch
 
 from torch_sla import spsolve
+from torch_sla.datasets import helmholtz_1d
 
 torch.set_default_dtype(torch.float64)
 
 
 def _helmholtz_1d(n, k=8.0, alpha=2.0):
-    h = 1.0 / (n + 1)
-    inv = 1.0 / (h * h)
-    rows, cols, vals = [], [], []
-    shift = -(k * k) - 1j * alpha
-    for i in range(n):
-        rows.append(i); cols.append(i); vals.append(2.0 * inv + shift)
-        if i + 1 < n:
-            rows.append(i); cols.append(i + 1); vals.append(-inv + 0j)
-            rows.append(i + 1); cols.append(i); vals.append(-inv + 0j)
-    return (torch.tensor(rows), torch.tensor(cols),
-            torch.tensor(vals, dtype=torch.complex128), (n, n))
+    """Complex-symmetric 1-D Helmholtz operator (from torch_sla.datasets).
+    Returns (row, col, val, (n, n)) as torch complex128."""
+    p = helmholtz_1d(n, k=k, alpha=alpha)
+    val, row, col, shape = p.coo()
+    return row, col, val, shape
 
 
 def test_helmholtz_1d_manufactured():

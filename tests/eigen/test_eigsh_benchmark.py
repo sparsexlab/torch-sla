@@ -18,32 +18,26 @@ import pytest
 import torch
 
 from torch_sla.sparse_tensor import SparseTensor
+from torch_sla.datasets import (
+    laplacian_1d,
+    laplacian_2d,
+    laplacian_1d_eigenvalues,
+)
 
 torch.set_default_dtype(torch.float64)
-
-
-def _laplacian_1d_coo(n):
-    rows, cols, vals = [], [], []
-    for i in range(n):
-        rows.append(i); cols.append(i); vals.append(2.0)
-        if i + 1 < n:
-            rows.append(i); cols.append(i + 1); vals.append(-1.0)
-            rows.append(i + 1); cols.append(i); vals.append(-1.0)
-    return (torch.tensor(rows), torch.tensor(cols),
-            torch.tensor(vals, dtype=torch.float64))
 
 
 def test_eigsh_1d_laplacian_analytical():
     """Smallest k eigenvalues of the 1-D Laplacian match the closed form."""
     n, k = 200, 6
-    row, col, val = _laplacian_1d_coo(n)
-    A = SparseTensor(val, row, col, (n, n))
+    prob = laplacian_1d(n)
+    val, row, col, shape = prob.coo()
+    A = SparseTensor(val, row, col, shape)
 
     evals, _ = A.eigsh(k=k, which="SA")
     got = torch.sort(evals.real).values
 
-    ks = torch.arange(1, k + 1, dtype=torch.float64)
-    exact = torch.sort(2 - 2 * torch.cos(ks * math.pi / (n + 1))).values
+    exact = torch.sort(laplacian_1d_eigenvalues(n)).values[:k]
 
     rel = (got - exact).abs() / exact
     assert rel.max() < 1e-5, f"eigsh vs analytical rel err = {rel.max():.2e}\n{got}\n{exact}"
@@ -54,8 +48,9 @@ def test_eigsh_1d_laplacian_vs_scipy():
     sla = pytest.importorskip("scipy.sparse.linalg")
     import scipy.sparse as sp
     n, k = 150, 5
-    row, col, val = _laplacian_1d_coo(n)
-    A = SparseTensor(val, row, col, (n, n))
+    prob = laplacian_1d(n)
+    val, row, col, shape = prob.coo()
+    A = SparseTensor(val, row, col, shape)
     evals, _ = A.eigsh(k=k, which="SA")
     got = np.sort(evals.real.numpy())
 
@@ -69,29 +64,16 @@ def test_eigsh_1d_laplacian_vs_scipy():
 def test_eigsh_2d_laplacian_analytical():
     """Smallest eigenvalues of the 2-D (m×m grid) Laplacian match λ_i+λ_j."""
     m, k = 20, 4
-    n = m * m
     # 5-point Laplacian on an m×m grid, Dirichlet (graph form: diag 4, -1 nbrs)
-    rows, cols, vals = [], [], []
-    def idx(i, j):
-        return i * m + j
-    for i in range(m):
-        for j in range(m):
-            p = idx(i, j)
-            rows.append(p); cols.append(p); vals.append(4.0)
-            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < m and 0 <= jj < m:
-                    rows.append(p); cols.append(idx(ii, jj)); vals.append(-1.0)
-    A = SparseTensor(torch.tensor(vals, dtype=torch.float64),
-                     torch.tensor(rows), torch.tensor(cols), (n, n))
+    prob = laplacian_2d(m)
+    val, row, col, shape = prob.coo()
+    A = SparseTensor(val, row, col, shape)
     evals, _ = A.eigsh(k=k, which="SA")
     got = torch.sort(evals.real).values
 
     # 1-D spectrum, then all pairwise sums; take the smallest k
-    ks = torch.arange(1, m + 1, dtype=torch.float64)
-    lam1d = 2 - 2 * torch.cos(ks * math.pi / (m + 1))
-    pair = (lam1d[:, None] + lam1d[None, :]).flatten()
-    exact = torch.sort(pair).values[:k]
+    from torch_sla.datasets import laplacian_2d_eigenvalues
+    exact = torch.sort(laplacian_2d_eigenvalues(m)).values[:k]
 
     rel = (got - exact).abs() / exact
     assert rel.max() < 1e-5, f"2D eigsh vs analytical rel err = {rel.max():.2e}\n{got}\n{exact}"

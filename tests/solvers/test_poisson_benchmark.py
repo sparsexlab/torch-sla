@@ -15,32 +15,17 @@ import pytest
 import torch
 
 from torch_sla import spsolve
+from torch_sla.datasets import poisson_2d
 
 torch.set_default_dtype(torch.float64)
 
 
 def _poisson_2d(m):
-    """5-point Poisson on an m×m interior grid. Returns (row,col,val,(n,n)),
-    rhs f, exact u — all as torch float64."""
-    n = m * m
-    h = 1.0 / (m + 1)
-    inv = 1.0 / (h * h)
-    idx = lambda i, j: i * m + j
-    rows, cols, vals = [], [], []
-    for i in range(m):
-        for j in range(m):
-            p = idx(i, j)
-            rows.append(p); cols.append(p); vals.append(4.0 * inv)
-            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < m and 0 <= jj < m:
-                    rows.append(p); cols.append(idx(ii, jj)); vals.append(-inv)
-    xs = torch.arange(1, m + 1, dtype=torch.float64) * h
-    X, Y = torch.meshgrid(xs, xs, indexing="ij")
-    u_exact = (torch.sin(math.pi * X) * torch.sin(math.pi * Y)).flatten()
-    f = (2 * math.pi ** 2 * torch.sin(math.pi * X) * torch.sin(math.pi * Y)).flatten()
-    return (torch.tensor(rows), torch.tensor(cols),
-            torch.tensor(vals, dtype=torch.float64), (n, n), f, u_exact)
+    """5-point Poisson on an m×m interior grid (from torch_sla.datasets).
+    Returns (row, col, val, (n,n)), rhs f, exact u — all as torch float64."""
+    p = poisson_2d(m)
+    val, row, col, shape = p.coo()
+    return row, col, val, shape, p.rhs, p.exact
 
 
 def test_poisson_2d_manufactured_convergence():

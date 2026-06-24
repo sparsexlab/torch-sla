@@ -35,7 +35,7 @@ import scipy.sparse as sp
 import torch
 from scipy.io import mmread
 
-from .benchmark import Benchmark, BenchmarkCollection
+from ..benchmark import Benchmark, BenchmarkCollection
 
 
 # ---------------------------------------------------------------------- #
