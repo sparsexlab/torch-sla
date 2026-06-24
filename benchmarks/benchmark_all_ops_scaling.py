@@ -426,7 +426,7 @@ def plot_time_per_op(out, results, slopes, device):
         plt.loglog(d0, anchor * d0, "k--", alpha=0.3, label="O(N) ref")
         plt.loglog(d0, anchor * d0[0] * (d0 / d0[0]) ** 2, "k:", alpha=0.3, label="O(N^2) ref")
         plt.xlabel("DOF (N)"); plt.ylabel("time [s]")
-        plt.title(f"{op}: time vs DOF ({device})")
+        plt.title(f"{NAMES.get(op, op)}: time vs DOF ({device})")
         plt.grid(True, which="both", alpha=0.3); plt.legend(); plt.tight_layout()
         p = out / f"allops_time_{op}.png"
         plt.savefig(p, dpi=110); plt.close()
@@ -457,8 +457,18 @@ BACKENDS = {
 }
 
 
+NAMES = {
+    "spmv": "sparse matvec (A@x)", "matmat": "sparse matmat (A@A)",
+    "norm": "Frobenius norm", "transpose": "transpose (A^T)",
+    "cc": "connected_components", "solve_cg": "linear solve (CG)",
+    "solve_lu": "linear solve (LU)", "solve_strumpack": "linear solve (STRUMPACK)",
+    "det": "determinant", "det_backward": "det backward (adjoint)",
+    "logdet": "log-determinant (Hutchinson)", "eigsh": "eigsh (smallest-k)",
+}
+
+
 def _lbl(op):
-    return f"{op} [{BACKENDS.get(op, '?')}]"
+    return f"{NAMES.get(op, op)} [{BACKENDS.get(op, '?')}]"
 
 
 def plot_combined_latency(out, results, device):
