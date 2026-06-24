@@ -6,6 +6,10 @@ dictionaries.  The matrices are built with the *exact* formulas used by the
 correctness tests so that benchmarks and tests can pull a single source of
 truth from here instead of building stencils inline.
 
+The structured-grid stencils are assembled with a single **vectorised** builder
+(:func:`_grid_coo`) -- meshgrid coordinates + boolean in-bounds masks, no
+per-node Python loops -- so even large grids build instantly.
+
 All matrices use ``torch.float64`` (or ``torch.complex128`` for the complex
 problems).
 """
@@ -14,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor
@@ -101,25 +105,67 @@ class SparseProblem:
 
 
 # --------------------------------------------------------------------------- #
-# Helpers for building stencils
+# Vectorised structured-grid stencil builder
 # --------------------------------------------------------------------------- #
-def _coo(rows, cols, vals, dtype=torch.float64):
-    return (
-        torch.tensor(vals, dtype=dtype),
-        torch.tensor(rows, dtype=torch.long),
-        torch.tensor(cols, dtype=torch.long),
-    )
+def _grid_coo(dims: Sequence[int], diag, edges, dtype=torch.float64):
+    """Assemble a structured-grid finite-difference stencil as COO, vectorised.
+
+    Parameters
+    ----------
+    dims : sequence of int
+        Per-axis grid sizes; nodes are flattened **row-major** (last axis
+        fastest), i.e. ``p = ((i0 * d1 + i1) * d2 + i2) ...`` -- matching
+        ``idx(i, j) = i * m + j`` / ``idx(i, j, k) = (i*m + j)*m + k``.
+    diag : number
+        Value placed on every diagonal entry.
+    edges : iterable of ``(axis, step, weight)``
+        Each coupling adds an off-diagonal entry from every node to its
+        neighbour ``step`` cells along ``axis`` (``step`` is +1/-1), with value
+        ``weight``, but only where the neighbour stays in-bounds. Multiple edges
+        to the same neighbour stay as separate entries (they sum on coalesce),
+        matching the inline stencils.
+    dtype : torch.dtype
+        ``float64`` (default) or ``complex128``.
+
+    Returns
+    -------
+    (val, row, col) : Tensors  (``col``/``row`` are long)
+    """
+    dims = tuple(int(d) for d in dims)
+    ndim = len(dims)
+    n = 1
+    for d in dims:
+        n *= d
+    # row-major strides (last axis fastest)
+    strides = [1] * ndim
+    for a in range(ndim - 2, -1, -1):
+        strides[a] = strides[a + 1] * dims[a + 1]
+
+    # per-node coordinate along each axis (each length n)
+    grids = torch.meshgrid(*[torch.arange(d) for d in dims], indexing="ij")
+    coords = [g.reshape(-1) for g in grids]
+    p = torch.arange(n)
+
+    rows = [p]
+    cols = [p]
+    vals = [torch.full((n,), diag, dtype=dtype)]
+    for axis, step, weight in edges:
+        nb = coords[axis] + step
+        mask = (nb >= 0) & (nb < dims[axis])
+        src = p[mask]
+        dst = src + step * strides[axis]
+        rows.append(src)
+        cols.append(dst)
+        vals.append(torch.full((src.numel(),), weight, dtype=dtype))
+
+    return (torch.cat(vals),
+            torch.cat(rows).to(torch.long),
+            torch.cat(cols).to(torch.long))
 
 
-def _tridiag_1d(n: int, scale: float = 1.0):
-    """``scale * tridiag(-1, 2, -1)`` (n interior nodes)."""
-    rows, cols, vals = [], [], []
-    for i in range(n):
-        rows.append(i); cols.append(i); vals.append(2.0 * scale)
-        if i + 1 < n:
-            rows.append(i); cols.append(i + 1); vals.append(-1.0 * scale)
-            rows.append(i + 1); cols.append(i); vals.append(-1.0 * scale)
-    return rows, cols, vals
+def _axis_edges(ndim: int, weight) -> List[tuple]:
+    """``(axis, +-1, weight)`` couplings along every axis (isotropic stencil)."""
+    return [(a, s, weight) for a in range(ndim) for s in (1, -1)]
 
 
 # --------------------------------------------------------------------------- #
@@ -151,8 +197,7 @@ def laplacian_1d(n: int = 200) -> SparseProblem:
 
     SPD + symmetric.  Eigenvalues are ``2 - 2 cos(k pi / (n+1))``.
     """
-    rows, cols, vals = _tridiag_1d(n, scale=1.0)
-    val, row, col = _coo(rows, cols, vals)
+    val, row, col = _grid_coo((n,), 2.0, _axis_edges(1, -1.0))
     return SparseProblem(
         name=f"laplacian_1d(n={n})",
         val=val, row=row, col=col, shape=(n, n),
@@ -170,17 +215,7 @@ def laplacian_2d(m: int = 30) -> SparseProblem:
     SPD + symmetric.  2-D spectrum = pairwise sums of the 1-D spectrum.
     """
     n = m * m
-    idx = lambda i, j: i * m + j
-    rows, cols, vals = [], [], []
-    for i in range(m):
-        for j in range(m):
-            p = idx(i, j)
-            rows.append(p); cols.append(p); vals.append(4.0)
-            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < m and 0 <= jj < m:
-                    rows.append(p); cols.append(idx(ii, jj)); vals.append(-1.0)
-    val, row, col = _coo(rows, cols, vals)
+    val, row, col = _grid_coo((m, m), 4.0, _axis_edges(2, -1.0))
     return SparseProblem(
         name=f"laplacian_2d(m={m})",
         val=val, row=row, col=col, shape=(n, n),
@@ -195,22 +230,7 @@ def laplacian_3d(m: int = 10) -> SparseProblem:
     SPD + symmetric.
     """
     n = m * m * m
-    idx = lambda i, j, k: (i * m + j) * m + k
-    rows, cols, vals = [], [], []
-    for i in range(m):
-        for j in range(m):
-            for k in range(m):
-                p = idx(i, j, k)
-                rows.append(p); cols.append(p); vals.append(6.0)
-                for di, dj, dk in (
-                    (1, 0, 0), (-1, 0, 0),
-                    (0, 1, 0), (0, -1, 0),
-                    (0, 0, 1), (0, 0, -1),
-                ):
-                    ii, jj, kk = i + di, j + dj, k + dk
-                    if 0 <= ii < m and 0 <= jj < m and 0 <= kk < m:
-                        rows.append(p); cols.append(idx(ii, jj, kk)); vals.append(-1.0)
-    val, row, col = _coo(rows, cols, vals)
+    val, row, col = _grid_coo((m, m, m), 6.0, _axis_edges(3, -1.0))
     return SparseProblem(
         name=f"laplacian_3d(m={m})",
         val=val, row=row, col=col, shape=(n, n),
@@ -229,17 +249,7 @@ def poisson_2d(m: int = 31) -> SparseProblem:
     n = m * m
     h = 1.0 / (m + 1)
     inv = 1.0 / (h * h)
-    idx = lambda i, j: i * m + j
-    rows, cols, vals = [], [], []
-    for i in range(m):
-        for j in range(m):
-            p = idx(i, j)
-            rows.append(p); cols.append(p); vals.append(4.0 * inv)
-            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < m and 0 <= jj < m:
-                    rows.append(p); cols.append(idx(ii, jj)); vals.append(-inv)
-    val, row, col = _coo(rows, cols, vals)
+    val, row, col = _grid_coo((m, m), 4.0 * inv, _axis_edges(2, -inv))
     xs = torch.arange(1, m + 1, dtype=torch.float64) * h
     X, Y = torch.meshgrid(xs, xs, indexing="ij")
     u_exact = (torch.sin(math.pi * X) * torch.sin(math.pi * Y)).flatten()
@@ -263,22 +273,7 @@ def poisson_3d(m: int = 10) -> SparseProblem:
     n = m * m * m
     h = 1.0 / (m + 1)
     inv = 1.0 / (h * h)
-    idx = lambda i, j, k: (i * m + j) * m + k
-    rows, cols, vals = [], [], []
-    for i in range(m):
-        for j in range(m):
-            for k in range(m):
-                p = idx(i, j, k)
-                rows.append(p); cols.append(p); vals.append(6.0 * inv)
-                for di, dj, dk in (
-                    (1, 0, 0), (-1, 0, 0),
-                    (0, 1, 0), (0, -1, 0),
-                    (0, 0, 1), (0, 0, -1),
-                ):
-                    ii, jj, kk = i + di, j + dj, k + dk
-                    if 0 <= ii < m and 0 <= jj < m and 0 <= kk < m:
-                        rows.append(p); cols.append(idx(ii, jj, kk)); vals.append(-inv)
-    val, row, col = _coo(rows, cols, vals)
+    val, row, col = _grid_coo((m, m, m), 6.0 * inv, _axis_edges(3, -inv))
     xs = torch.arange(1, m + 1, dtype=torch.float64) * h
     X, Y, Z = torch.meshgrid(xs, xs, xs, indexing="ij")
     u_exact = (torch.sin(math.pi * X) * torch.sin(math.pi * Y)
@@ -318,8 +313,7 @@ def bratu_1d(n: int = 100, lam: float = 1.0) -> SparseProblem:
     """
     h = 1.0 / (n + 1)
     inv = 1.0 / (h * h)
-    rows, cols, vals = _tridiag_1d(n, scale=inv)
-    val, row, col = _coo(rows, cols, vals)
+    val, row, col = _grid_coo((n,), 2.0 * inv, _axis_edges(1, -inv))
     x = torch.linspace(h, 1 - h, n, dtype=torch.float64)
     c = _bratu_c(lam)
     u_exact = -2.0 * torch.log(
@@ -344,14 +338,9 @@ def helmholtz_1d(n: int = 300, k: float = 8.0, alpha: float = 2.0) -> SparseProb
     """
     h = 1.0 / (n + 1)
     inv = 1.0 / (h * h)
-    shift = -(k * k) - 1j * alpha
-    rows, cols, vals = [], [], []
-    for i in range(n):
-        rows.append(i); cols.append(i); vals.append(2.0 * inv + shift)
-        if i + 1 < n:
-            rows.append(i); cols.append(i + 1); vals.append(-inv + 0j)
-            rows.append(i + 1); cols.append(i); vals.append(-inv + 0j)
-    val, row, col = _coo(rows, cols, vals, dtype=torch.complex128)
+    diag = 2.0 * inv - (k * k) - 1j * alpha
+    val, row, col = _grid_coo((n,), diag, _axis_edges(1, -inv + 0j),
+                              dtype=torch.complex128)
     return SparseProblem(
         name=f"helmholtz_1d(n={n}, k={k}, alpha={alpha})",
         val=val, row=row, col=col, shape=(n, n),
@@ -371,25 +360,10 @@ def anisotropic_diffusion_2d(m: int = 30, eps: float = 1e-2) -> SparseProblem:
     n = m * m
     h = 1.0 / (m + 1)
     inv = 1.0 / (h * h)
-    cx = eps * inv   # weight for x-direction (u_xx) couplings
-    cy = 1.0 * inv   # weight for y-direction (u_yy) couplings
-    idx = lambda i, j: i * m + j
-    rows, cols, vals = [], [], []
-    for i in range(m):
-        for j in range(m):
-            p = idx(i, j)
-            rows.append(p); cols.append(p); vals.append(2.0 * (cx + cy))
-            # x-neighbours (vary i)
-            for di in (1, -1):
-                ii = i + di
-                if 0 <= ii < m:
-                    rows.append(p); cols.append(idx(ii, j)); vals.append(-cx)
-            # y-neighbours (vary j)
-            for dj in (1, -1):
-                jj = j + dj
-                if 0 <= jj < m:
-                    rows.append(p); cols.append(idx(i, jj)); vals.append(-cy)
-    val, row, col = _coo(rows, cols, vals)
+    cx = eps * inv   # x-direction (u_xx) coupling weight (axis 0)
+    cy = 1.0 * inv   # y-direction (u_yy) coupling weight (axis 1)
+    edges = [(0, 1, -cx), (0, -1, -cx), (1, 1, -cy), (1, -1, -cy)]
+    val, row, col = _grid_coo((m, m), 2.0 * (cx + cy), edges)
     return SparseProblem(
         name=f"anisotropic_diffusion_2d(m={m}, eps={eps})",
         val=val, row=row, col=col, shape=(n, n),
@@ -410,27 +384,12 @@ def advection_diffusion_2d(m: int = 30, peclet: float = 20.0) -> SparseProblem:
     n = m * m
     h = 1.0 / (m + 1)
     inv = 1.0 / (h * h)
-    # convective coefficient (positive velocity -> upwind takes the "left" node)
-    b = peclet / h
-    idx = lambda i, j: i * m + j
-    rows, cols, vals = [], [], []
-    for i in range(m):
-        for j in range(m):
-            p = idx(i, j)
-            diag = 4.0 * inv + 2.0 * b
-            # diffusion neighbours
-            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < m and 0 <= jj < m:
-                    rows.append(p); cols.append(idx(ii, jj)); vals.append(-inv)
-            # upwind convection: velocity (+1,+1) -> backward difference,
-            # couples to (i-1, j) and (i, j-1) with -b
-            for di, dj in ((-1, 0), (0, -1)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < m and 0 <= jj < m:
-                    rows.append(p); cols.append(idx(ii, jj)); vals.append(-b)
-            rows.append(p); cols.append(p); vals.append(diag)
-    val, row, col = _coo(rows, cols, vals)
+    b = peclet / h   # convective coefficient
+    # diffusion (4-pt, weight -inv) + upwind convection toward (i-1,j),(i,j-1)
+    # (velocity (+1,+1) -> backward difference) with weight -b. Same-neighbour
+    # diffusion + convection entries are kept separate (they sum on coalesce).
+    edges = _axis_edges(2, -inv) + [(0, -1, -b), (1, -1, -b)]
+    val, row, col = _grid_coo((m, m), 4.0 * inv + 2.0 * b, edges)
     return SparseProblem(
         name=f"advection_diffusion_2d(m={m}, peclet={peclet})",
         val=val, row=row, col=col, shape=(n, n),
