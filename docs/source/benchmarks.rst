@@ -796,7 +796,13 @@ each op exercises is shown in every plot legend.
 **Latency** (wall time) is the primary y-axis — throughput in ``DOF/s`` mixes
 work-units across ops (matvec ~ ``nnz``, solve ~ ``iter·nnz``) and reads ambiguously.
 
-Measured on CPU (16-core / 44 GB), 2-D Poisson sweep to ~10\ :sup:`6` DOF:
+**Test environment** (recorded in each run's JSON ``env`` block): CPU =
+**AMD Ryzen 7 255** (16 cores / 44 GB); CUDA = **NVIDIA RTX 4070 Ti SUPER**
+(torch 2.6 + cu124); ROCm = **AMD Radeon 780M** iGPU (torch 2.10 + rocm7.2,
+``HSA_OVERRIDE_GFX_VERSION=11.0.0``). All timings are **eager** — no
+``torch.compile``.
+
+Measured on the Ryzen 7 255 CPU, 2-D Poisson sweep to ~10\ :sup:`6` DOF:
 
 .. list-table::
    :widths: 24 16 18 42

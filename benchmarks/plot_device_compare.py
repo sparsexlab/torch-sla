@@ -47,6 +47,14 @@ BACKENDS = {
 }
 
 
+# Hardware behind each device label (eager mode, no torch.compile).
+HW = {
+    "CPU": "AMD Ryzen 7 255 (16c)",
+    "CUDA": "RTX 4070 Ti SUPER",
+    "ROCm": "Radeon 780M (iGPU)",
+}
+
+
 def _load(path):
     if not path or not Path(path).exists():
         return {}
@@ -84,14 +92,14 @@ def main():
             dofs = [r["dof"] for r in rows]
             times = [r["time_s"] * 1e3 for r in rows]  # ms
             ax.loglog(dofs, times, "o-",
-                      label=f"{dev} [{BACKENDS.get(op, '?')}]  (slope={_slope([r['dof'] for r in rows], [r['time_s'] for r in rows]):.2f})")
+                      label=f"{dev} · {HW.get(dev, '')} [{BACKENDS.get(op, '?')}]  (slope={_slope([r['dof'] for r in rows], [r['time_s'] for r in rows]):.2f})")
             plotted = True
         if not plotted:
             plt.close(fig); continue
         # O(N) reference anchored at the first CPU point
         ref = series["CPU"].get(op) or next(iter([r for r in series.values() if r.get(op)]), None)
         ax.set_xlabel("DOF (N)"); ax.set_ylabel("time [ms]")
-        ax.set_title(f"{NAMES.get(op, op)} — CPU vs CUDA")
+        ax.set_title(f"{NAMES.get(op, op)} — across devices (eager, no torch.compile)")
         ax.grid(True, which="both", alpha=0.3); ax.legend()
         fig.tight_layout()
         p = out / f"cmp_{op}.png"

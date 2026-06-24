@@ -563,8 +563,36 @@ def print_capacity(probe):
               f"{p['time_s']:>9.2f}  {p['stop_reason']}")
 
 
+def _env(device):
+    """Hardware / software metadata for reproducibility (recorded in the JSON
+    and printed). The benchmark times EAGER ops -- no torch.compile."""
+    import platform
+    cpu = platform.processor() or platform.machine()
+    try:  # Linux: a readable model name
+        for line in open("/proc/cpuinfo"):
+            if line.startswith("model name"):
+                cpu = line.split(":", 1)[1].strip(); break
+    except OSError:
+        pass
+    env = {
+        "cpu": cpu,
+        "cpu_count": os.cpu_count(),
+        "ram_gb": round(psutil.virtual_memory().total / 1e9, 1) if _HAVE_PSUTIL else None,
+        "device": device,
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "hip": getattr(torch.version, "hip", None),
+        "compiled": False,  # eager; no torch.compile
+        "os": platform.platform(),
+    }
+    if device == "cuda" and torch.cuda.is_available():
+        env["gpu"] = torch.cuda.get_device_name(0)
+    return env
+
+
 def write_json(out, results, slopes, probe, device):
-    payload = dict(device=device, results=results, slopes=slopes, probe=probe)
+    payload = dict(device=device, env=_env(device), results=results,
+                   slopes=slopes, probe=probe)
     p = out / "allops_results.json"
     p.write_text(json.dumps(payload, indent=2, default=str))
     return p
@@ -596,7 +624,11 @@ def main():
     op_names = list(OPS) if args.ops == "all" else args.ops.split(",")
 
     nthreads = torch.get_num_threads()
-    print(f"device={device}  quick={args.quick}  max_probe={args.max_probe}")
+    _e = _env(device)
+    print(f"device={device}  quick={args.quick}  max_probe={args.max_probe}  (eager, no torch.compile)")
+    print(f"cpu={_e['cpu']}  cores={_e['cpu_count']}  ram={_e['ram_gb']}GB"
+          + (f"  gpu={_e.get('gpu')}" if _e.get('gpu') else ""))
+    print(f"torch={_e['torch']}  cuda={_e['cuda']}  hip={_e['hip']}")
     print(f"torch threads={nthreads}  psutil={_HAVE_PSUTIL}  "
           f"strumpack={is_strumpack_available()}")
 
