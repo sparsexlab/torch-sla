@@ -53,6 +53,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch_sla.datasets as d  # noqa: E402
 from torch_sla import SparseTensor, spsolve, DetConfig  # noqa: E402
 from torch_sla.backends import is_strumpack_available, is_cudss_available  # noqa: E402
+try:
+    from torch_sla.backends import is_pyamg_available  # noqa: E402
+except Exception:  # pragma: no cover
+    def is_pyamg_available():
+        return False
 
 try:
     import psutil
@@ -132,6 +137,13 @@ def _setup_solve_cudss(A, dof, device):
     return lambda: spsolve(val, row, col, shape, b, backend="cudss")
 
 
+def _setup_solve_pyamg(A, dof, device):
+    val, row, col = A.values, A.row_indices, A.col_indices
+    shape = A.sparse_shape
+    b = torch.ones(dof, dtype=A.dtype, device=device)
+    return lambda: spsolve(val, row, col, shape, b, backend="pyamg", method="ruge_stuben")
+
+
 def _verify_solve(backend, **kw):
     """Returns f(A, dof, device) -> relative residual ||A x - b|| / ||b|| for the
     Ax=b solve. Used to assert the *timed* solves actually produce correct answers
@@ -203,6 +215,9 @@ OPS = {
     "solve_cudss":     dict(setup=_setup_solve_cudss,     reps=2,
                             avail=lambda dev: dev == "cuda" and is_cudss_available(),
                             verify=_verify_solve("cudss")),
+    "solve_pyamg":     dict(setup=_setup_solve_pyamg,     reps=2,
+                            avail=lambda dev: is_pyamg_available(),
+                            verify=_verify_solve("pyamg", method="ruge_stuben")),
     "det":             dict(setup=_setup_det,            reps=2, avail=lambda dev: True),
     "det_backward":    dict(setup=_setup_det_backward,   reps=2, avail=lambda dev: True),
     "logdet":          dict(setup=_setup_logdet,         reps=2, avail=lambda dev: True),
@@ -501,6 +516,7 @@ BACKENDS = {
     "spmv": "torch", "matmat": "torch", "norm": "torch", "transpose": "torch",
     "cc": "torch (pure)", "solve_cg": "pytorch/cg", "solve_lu": "scipy/lu",
     "solve_strumpack": "strumpack", "solve_cudss": "cudss",
+    "solve_pyamg": "pyamg/ruge_stuben",
     "det": "scipy", "det_backward": "adjoint",
     "logdet": "hutchinson", "eigsh": "lobpcg",
 }
@@ -511,7 +527,7 @@ NAMES = {
     "norm": "Frobenius norm", "transpose": "transpose (A^T)",
     "cc": "connected_components", "solve_cg": "linear solve (CG)",
     "solve_lu": "linear solve (LU)", "solve_strumpack": "linear solve (STRUMPACK)",
-    "solve_cudss": "linear solve (cuDSS)",
+    "solve_cudss": "linear solve (cuDSS)", "solve_pyamg": "linear solve (PyAMG)",
     "det": "determinant", "det_backward": "det backward (adjoint)",
     "logdet": "log-determinant (Hutchinson)", "eigsh": "eigsh (smallest-k)",
 }
@@ -690,7 +706,7 @@ def main():
         "spmv": cheap, "norm": cheap, "transpose": cheap, "cc": cheap, "matmat": cheap,
         "solve_cg": mid, "logdet": mid, "solve_strumpack": mid,
         "solve_lu": direct, "det": direct, "det_backward": direct,
-        "solve_cudss": mid,
+        "solve_cudss": mid, "solve_pyamg": mid,
         "eigsh": eig,
     }
     sides_map = {op: sides_map[op] for op in op_names}

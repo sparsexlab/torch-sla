@@ -882,8 +882,9 @@ parallel rounds flatten on both GPUs. ROCm runs in the ``rocm/pytorch`` /
 small DOF only (the 780M iGPU OOMs ``hipsparse`` at scale).
 
 **Backend comparison (linear solve):** ``solve_cg`` (pytorch, iterative),
-``solve_lu`` (scipy, CPU direct), ``solve_strumpack`` (portable direct), and
-``solve_cudss`` (NVIDIA direct, ``--device cuda``) are separate ops, so a single
+``solve_lu`` (scipy, CPU direct), ``solve_pyamg`` (PyAMG, classical AMG),
+``solve_strumpack`` (portable direct), and ``solve_cudss`` (NVIDIA direct,
+``--device cuda``) are separate ops, so a single
 ``linear solve`` figure can overlay backends on the same SPD problem. On a 4070 Ti
 SUPER over a well-conditioned Poisson, CG beats cuDSS (few iterations vs a full
 factorization); cuDSS's edge is robustness on ill-conditioned / non-symmetric systems.
