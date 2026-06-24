@@ -867,6 +867,21 @@ differ (matvec ~ ``nnz``, solve ~ ``iter·nnz``, eigsh ~ iterations), which make
 cross-op comparison meaningless. A combined ``allops_memory.png`` is kept (MB is a
 comparable unit). GPU runs are prefixed ``cuda_``.
 
+``benchmarks/plot_device_compare.py`` overlays the **same op across devices**
+(CPU / CUDA / ROCm) on one axes per op (``cmp_<op>.png``) — this comparison *is*
+meaningful (same work, different hardware). Measured: ``connected_components`` slope
+0.76 (CPU) → 0.16 (CUDA, RTX 4070 Ti SUPER) → 0.10 (ROCm, Radeon 780M); the FastSV
+parallel rounds flatten on both GPUs. ROCm runs in the ``rocm/pytorch`` /
+``torch-strumpack:rocm-gfx1100`` container (``HSA_OVERRIDE_GFX_VERSION=11.0.0``),
+small DOF only (the 780M iGPU OOMs ``hipsparse`` at scale).
+
+**Backend comparison (linear solve):** ``solve_cg`` (pytorch, iterative),
+``solve_lu`` (scipy, CPU direct), ``solve_strumpack`` (portable direct), and
+``solve_cudss`` (NVIDIA direct, ``--device cuda``) are separate ops, so a single
+``linear solve`` figure can overlay backends on the same SPD problem. On a 4070 Ti
+SUPER over a well-conditioned Poisson, CG beats cuDSS (few iterations vs a full
+factorization); cuDSS's edge is robustness on ill-conditioned / non-symmetric systems.
+
 Distributed scaling (DSparseTensor)
 -----------------------------------
 

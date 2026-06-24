@@ -65,10 +65,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cpu", default="benchmarks/results/allops_results.json")
     ap.add_argument("--cuda", default="benchmarks/results/cuda_allops_results.json")
+    ap.add_argument("--rocm", default="benchmarks/results/rocm_allops_results.json")
     ap.add_argument("--out", default="benchmarks/results")
     args = ap.parse_args()
 
-    series = {"CPU": _load(args.cpu), "CUDA": _load(args.cuda)}
+    series = {"CPU": _load(args.cpu), "CUDA": _load(args.cuda), "ROCm": _load(args.rocm)}
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
     ops = sorted({op for s in series.values() for op in s})
