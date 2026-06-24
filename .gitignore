@@ -85,3 +85,4 @@ logs/
 # Profiling
 *.prof
 *.lprof
+benchmarks/_probe_worker.py
