@@ -778,3 +778,57 @@ To reproduce these benchmarks:
 
 Results are saved to ``benchmarks/results/``.
 
+Scaling & capacity (per-op)
+---------------------------
+
+``benchmarks/benchmark_all_ops_scaling.py`` sweeps DOF for **every** public op and
+records latency, throughput, peak memory and CPU utilisation; ``--max-probe`` grows
+each op until it OOMs or exceeds a time cap to report the largest problem it sustains.
+Problems come from :mod:`torch_sla.datasets` (no hand-built matrices). The backend
+each op exercises is shown in every plot legend.
+
+.. code-block:: bash
+
+   python benchmarks/benchmark_all_ops_scaling.py                 # full sweep
+   python benchmarks/benchmark_all_ops_scaling.py --quick --max-probe
+   python benchmarks/benchmark_all_ops_scaling.py --device cuda   # GPU (run on a CUDA box)
+
+**Latency** (wall time) is the primary y-axis — throughput in ``DOF/s`` mixes
+work-units across ops (matvec ~ ``nnz``, solve ~ ``iter·nnz``) and reads ambiguously.
+
+Measured on CPU (16-core / 44 GB), 2-D Poisson sweep to ~10\ :sup:`6` DOF:
+
+.. list-table::
+   :widths: 24 16 18 42
+   :header-rows: 1
+
+   * - op
+     - backend
+     - time slope
+     - notes
+   * - ``transpose``
+     - torch
+     - ~0 (O(1))
+     - index/axis swap; flat ~0.02 ms
+   * - ``norm`` / ``spmv``
+     - torch
+     - ~1 (linear)
+     - healthy; throughput rises then plateaus
+   * - ``connected_components``
+     - torch (pure)
+     - 0.76
+     - FastSV: O(log N) rounds, no diameter upturn; ~4–5× scipy.csgraph
+   * - ``solve_cg``
+     - pytorch / cg
+     - ~1.1
+     - iterative; grows with conditioning
+   * - ``solve_lu``
+     - scipy / lu
+     - ~1.2–1.5
+     - direct; 2-D fill-in is super-linear (caps capacity earliest)
+
+GPU numbers (``--device cuda``) should be produced on an NVIDIA/AMD GPU box — the
+pytorch-native and STRUMPACK paths are device-agnostic. Plots land in
+``benchmarks/results/`` (``allops_latency.png``, ``allops_throughput.png``,
+``allops_memory.png``, per-op ``allops_time_<op>.png``).
+

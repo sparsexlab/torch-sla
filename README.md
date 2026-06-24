@@ -527,6 +527,25 @@ det = A_cuda.cpu().det()  # 1.3 ms (1.9x faster!)
 
 See `benchmarks/README.md` for detailed performance analysis.
 
+### Per-op scaling & capacity
+
+`benchmarks/benchmark_all_ops_scaling.py` sweeps DOF for **every** op (spmv, matmat,
+solve cg/lu/strumpack, det, logdet, eigsh, norm, transpose, `connected_components`)
+and records **latency / throughput / peak memory / CPU util**, plus `--max-probe` for
+the largest problem each op sustains. Problems come from `torch_sla.datasets`; the
+backend each op uses is shown in every plot legend (`solve_cg → pytorch/cg`,
+`solve_lu → scipy/lu`, graph/spmv/norm/transpose → torch-native).
+
+```bash
+python benchmarks/benchmark_all_ops_scaling.py --quick --max-probe   # CPU
+python benchmarks/benchmark_all_ops_scaling.py --device cuda         # GPU box
+```
+
+On CPU (16-core / 44 GB) to ~10⁶ DOF: `transpose` is O(1), `norm`/`spmv` linear,
+`connected_components` runs in O(log N) FastSV rounds (~4–5× scipy.csgraph),
+`solve_lu` is direct/super-linear (caps capacity first). Latency (ms) is the primary
+metric. Plots in `benchmarks/results/`.
+
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
