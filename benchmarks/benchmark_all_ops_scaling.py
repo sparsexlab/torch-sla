@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch_sla.datasets as d  # noqa: E402
 from torch_sla import SparseTensor, spsolve, DetConfig  # noqa: E402
-from torch_sla.backends import is_strumpack_available  # noqa: E402
+from torch_sla.backends import is_strumpack_available, is_cudss_available  # noqa: E402
 
 try:
     import psutil
@@ -125,6 +125,13 @@ def _setup_solve_strumpack(A, dof, device):
     return lambda: spsolve(val, row, col, shape, b, backend="strumpack")
 
 
+def _setup_solve_cudss(A, dof, device):
+    val, row, col = A.values, A.row_indices, A.col_indices
+    shape = A.sparse_shape
+    b = torch.ones(dof, dtype=A.dtype, device=device)
+    return lambda: spsolve(val, row, col, shape, b, backend="cudss")
+
+
 def _setup_det(A, dof, device):
     return lambda: A.det()
 
@@ -169,6 +176,8 @@ OPS = {
     "solve_lu":        dict(setup=_setup_solve_lu,       reps=2, avail=lambda dev: True),
     "solve_strumpack": dict(setup=_setup_solve_strumpack, reps=2,
                             avail=lambda dev: is_strumpack_available()),
+    "solve_cudss":     dict(setup=_setup_solve_cudss,     reps=2,
+                            avail=lambda dev: dev == "cuda" and is_cudss_available()),
     "det":             dict(setup=_setup_det,            reps=2, avail=lambda dev: True),
     "det_backward":    dict(setup=_setup_det_backward,   reps=2, avail=lambda dev: True),
     "logdet":          dict(setup=_setup_logdet,         reps=2, avail=lambda dev: True),
@@ -452,7 +461,8 @@ def plot_combined_mem(out, results, device):
 BACKENDS = {
     "spmv": "torch", "matmat": "torch", "norm": "torch", "transpose": "torch",
     "cc": "torch (pure)", "solve_cg": "pytorch/cg", "solve_lu": "scipy/lu",
-    "solve_strumpack": "strumpack", "det": "scipy", "det_backward": "adjoint",
+    "solve_strumpack": "strumpack", "solve_cudss": "cudss",
+    "det": "scipy", "det_backward": "adjoint",
     "logdet": "hutchinson", "eigsh": "lobpcg",
 }
 
@@ -462,6 +472,7 @@ NAMES = {
     "norm": "Frobenius norm", "transpose": "transpose (A^T)",
     "cc": "connected_components", "solve_cg": "linear solve (CG)",
     "solve_lu": "linear solve (LU)", "solve_strumpack": "linear solve (STRUMPACK)",
+    "solve_cudss": "linear solve (cuDSS)",
     "det": "determinant", "det_backward": "det backward (adjoint)",
     "logdet": "log-determinant (Hutchinson)", "eigsh": "eigsh (smallest-k)",
 }
@@ -608,6 +619,7 @@ def main():
         "spmv": cheap, "norm": cheap, "transpose": cheap, "cc": cheap, "matmat": cheap,
         "solve_cg": mid, "logdet": mid, "solve_strumpack": mid,
         "solve_lu": direct, "det": direct, "det_backward": direct,
+        "solve_cudss": mid,
         "eigsh": eig,
     }
     sides_map = {op: sides_map[op] for op in op_names}
