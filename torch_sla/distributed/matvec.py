@@ -97,7 +97,7 @@ def matmul_row_shard(D, x: Any) -> Any:
     """Row-sharded ``D @ x``. Pad owned -> local, halo exchange, local
     SpMV, slice back to owned-row range. Returns ``DTensor[Shard(0)]``
     if ``x`` is a DTensor, else a plain owned-row tensor."""
-    from .core import _is_dtensor, DTensor, Shard
+    from .core import _is_dtensor, _wrap_owned_shard
 
     partition = D._spec.placement.partition
     if partition is None:
@@ -121,7 +121,8 @@ def matmul_row_shard(D, x: Any) -> Any:
     y_owned = (D._local_tensor @ x_padded)[:num_owned]
 
     if _is_dtensor(x):
-        return DTensor.from_local(y_owned, D._spec.mesh, [Shard(0)])
+        return _wrap_owned_shard(
+            y_owned, D._spec.mesh, partition, int(D._spec.global_shape[0]))
     return y_owned
 
 

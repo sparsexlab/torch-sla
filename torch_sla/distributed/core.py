@@ -77,6 +77,61 @@ def _is_dtensor(x) -> bool:
     return isinstance(x, DTensor)
 
 
+# ---------------------------------------------------------------------- #
+# Owned-aware Shard(0) DTensor.
+#
+# A plain ``DTensor[Shard(0)]`` reconstructs the global vector in
+# ``full_tensor()`` by concatenating each rank's local slice **in rank
+# order**. That is only correct when every rank's owned global node-ids
+# form a contiguous, rank-monotone block (``simple`` partitions). For
+# geometric / graph partitions (``rcb`` / ``hilbert`` / real ``metis``)
+# ownership is NOT globally sorted, so rank-order concatenation returns
+# a *permuted* -- silently wrong -- vector.
+#
+# ``_OwnedShardDTensor`` carries the partition's global ``owned_nodes``
+# indices and overrides ``full_tensor()`` to scatter each rank's slice
+# into its true global positions via ``gather_owned_to_global`` (the
+# same ``index_put_`` reconstruction used elsewhere in the codebase).
+# It is a thin subclass produced by re-tagging a real ``DTensor`` so
+# ``to_local`` / matmul / the Krylov solvers keep working unchanged.
+# ---------------------------------------------------------------------- #
+if DTENSOR_AVAILABLE and DTensor is not None:
+
+    class _OwnedShardDTensor(DTensor):
+        """``DTensor[Shard(0)]`` that reconstructs the global vector
+        through its partition's ``owned_nodes`` instead of relying on
+        rank-order concatenation."""
+
+        @staticmethod
+        def _wrap(local_slice, mesh, owned_nodes, n_global):
+            obj = DTensor.from_local(local_slice, mesh, [Shard(0)])
+            obj.__class__ = _OwnedShardDTensor
+            obj._owned_nodes = owned_nodes
+            obj._n_global = int(n_global)
+            return obj
+
+        def full_tensor(self):  # type: ignore[override]
+            from .collectives import gather_owned_to_global
+            local = self.to_local().contiguous()
+            owned = self._owned_nodes.to(device=local.device,
+                                         dtype=torch.int64)
+            return gather_owned_to_global(owned, local, self._n_global)
+
+else:
+    _OwnedShardDTensor = None
+
+
+def _wrap_owned_shard(local_slice, mesh, partition, n_global):
+    """Build an owned-aware ``DTensor[Shard(0)]`` if the subclass is
+    available, else fall back to a plain ``DTensor`` (single-process /
+    no-DTensor builds where rank-order == global order)."""
+    if _OwnedShardDTensor is not None:
+        return _OwnedShardDTensor._wrap(
+            local_slice, mesh,
+            partition.owned_nodes, n_global)
+    return DTensor.from_local(local_slice, mesh, [Shard(0)])
+
+
 # Partition struct + partitioning algorithms (METIS / simple / RCB /
 # slicing / Hilbert) + halo discovery live in :mod:`torch_sla.partition`
 # now. Re-exported here so existing ``from torch_sla.distributed import
@@ -615,9 +670,8 @@ class DSparseTensor:
         owned = partition.owned_nodes.to(device=global_vec.device,
                                           dtype=torch.int64)
         local_slice = global_vec[owned].contiguous()
-        _DTensor = DTensor  # use module-level import with fallback
-        return _DTensor.from_local(local_slice, self._spec.mesh,
-                                    [Shard(0)])
+        return _wrap_owned_shard(local_slice, self._spec.mesh,
+                                 partition, int(self._shape[0]))
 
     def _partition_for_dispatch(self) -> Optional["Partition"]:
         """Return the active :class:`Partition` from the spec, or
@@ -1607,9 +1661,9 @@ class DSparseTensor:
             )
 
         if wrap_output:
-            _DTensor = DTensor  # use module-level import with fallback
-            return _DTensor.from_local(
-                x_owned, self._spec.mesh, [Shard(0)])
+            return _wrap_owned_shard(
+                x_owned, self._spec.mesh,
+                self._spec.placement.partition, int(self._shape[0]))
         return x_owned
 
     # ------------------------------------------------------------------ #
