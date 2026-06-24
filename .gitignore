@@ -85,4 +85,10 @@ logs/
 # Profiling
 *.prof
 *.lprof
-benchmarks/_probe_worker.py
+**/_probe_worker.py
+
+# Benchmark scratch output dirs (generated, regenerate by running benchmarks)
+benchmarks/cpu_eigsh_out/
+benchmarks/rocm_out/
+benchmarks/rocm_sp/
+benchmarks/rocm_vfy/

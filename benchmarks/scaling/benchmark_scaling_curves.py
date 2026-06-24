@@ -39,7 +39,7 @@ import torch
 
 warnings.filterwarnings("ignore")  # silence pytorch sparse beta/invariant warnings
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch_sla.datasets as d  # noqa: E402
 from torch_sla import SparseTensor, spsolve  # noqa: E402
@@ -310,7 +310,7 @@ def main():
 
     out = Path(args.out)
     if not out.is_absolute():
-        out = Path(__file__).resolve().parents[1] / out
+        out = Path(__file__).resolve().parents[2] / out
     out.mkdir(parents=True, exist_ok=True)
 
     # ---- sweeps ----

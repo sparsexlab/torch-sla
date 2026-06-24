@@ -48,7 +48,7 @@ import torch
 
 warnings.filterwarnings("ignore")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch_sla.datasets as d  # noqa: E402
 from torch_sla import SparseTensor, spsolve, DetConfig  # noqa: E402
@@ -402,10 +402,10 @@ def max_probe(op_names, device, time_cap=60.0, headroom_mb=12000, start_side=64)
     Each candidate runs in a fresh subprocess so a hard OOM can't kill us.
     Returns probe[op] = dict(max_dof, max_nnz, peak_mb, time_s, stop_reason).
     """
-    repo = str(Path(__file__).resolve().parents[1])
+    repo = str(Path(__file__).resolve().parents[2])
     modpath = str(Path(__file__).resolve())
     worker = PROBE_WORKER.format(repo=repo, modpath=modpath)
-    worker_path = Path(repo) / "benchmarks" / "_probe_worker.py"
+    worker_path = Path(__file__).resolve().parent / "_probe_worker.py"
     worker_path.write_text(worker)
 
     probe = {}
@@ -673,7 +673,7 @@ def main():
 
     out = Path(args.out)
     if not out.is_absolute():
-        out = Path(__file__).resolve().parents[1] / out
+        out = Path(__file__).resolve().parents[2] / out
     out.mkdir(parents=True, exist_ok=True)
 
     op_names = list(OPS) if args.ops == "all" else args.ops.split(",")

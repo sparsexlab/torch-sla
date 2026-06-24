@@ -2,22 +2,33 @@
 
 This directory contains performance benchmarks for torch-sla.
 
+## Layout
+
+Benchmarks are organized by domain:
+
+- `scaling/`     — op/device scaling curves (`benchmark_all_ops_scaling.py`, `benchmark_scaling_curves.py`, `benchmark_op_scaling.py`, `benchmark_single_gpu_scaling.py`, `benchmark_multi_gpu_scaling.py`, `plot_device_compare.py`)
+- `distributed/` — multi-GPU / distributed (`benchmark_distributed.py`, `benchmark_distributed_4gpu.py`, `benchmark_distributed_perf.py`, `benchmark_distributed_scaling.py`)
+- `solvers/`     — sparse solvers (`benchmark_solvers.py`, `benchmark_large_scale.py`, `benchmark_complex_solve.py`, `benchmark_suitesparse.py`)
+- `ops/`         — individual ops (`benchmark_mm.py`, `benchmark_determinant.py`, `benchmark_adjoint_vs_naive.py`, `benchmark_inverse_coefficient.py`)
+- `results/`     — shared generated output dir (gitignored)
+- `dev/`         — experimental / in-progress benchmarks
+
 ## Running Benchmarks
 
 ```bash
 # Run specific benchmark
-python benchmarks/benchmark_determinant.py
+python benchmarks/ops/benchmark_determinant.py
 
 # Results are saved to
-ls ../results/benchmark_determinant/
+ls benchmarks/results/benchmark_determinant/
 ```
 
 ## Available Benchmarks
 
 ### 1. Determinant Computation
 
-**Script**: `benchmark_determinant.py`  
-**Results**: `../results/benchmark_determinant/`
+**Script**: `ops/benchmark_determinant.py`  
+**Results**: `results/benchmark_determinant/`
 
 #### Key Findings
 
@@ -48,19 +59,19 @@ det = A_cuda.cpu().det()  # 1.3 ms (1.9x faster!)
 
 #### Visualization
 
-![Determinant Benchmark](../results/benchmark_determinant/benchmark_determinant.png)
+![Determinant Benchmark](results/benchmark_determinant/benchmark_determinant.png)
 
 ### 2. Distributed Computing
 
-**Script**: `benchmark_distributed.py`  
-**Results**: `../results/benchmark_distributed/`
+**Script**: `distributed/benchmark_distributed.py`  
+**Results**: `results/benchmark_distributed/`
 
 See distributed benchmark results for scaling analysis.
 
 ## Adding New Benchmarks
 
-1. Create `benchmark_<feature>.py` in this directory
-2. Results will be saved to `../results/benchmark_<feature>/`
+1. Create `benchmark_<feature>.py` in the appropriate domain subdir (`scaling/`, `distributed/`, `solvers/`, `ops/`)
+2. Results will be saved to `results/benchmark_<feature>/`
 3. Follow the template in `CONTRIBUTING.md`
 4. Update this README with your findings
 
