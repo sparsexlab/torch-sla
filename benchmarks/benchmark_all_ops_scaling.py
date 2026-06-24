@@ -132,6 +132,27 @@ def _setup_solve_cudss(A, dof, device):
     return lambda: spsolve(val, row, col, shape, b, backend="cudss")
 
 
+def _verify_solve(backend, **kw):
+    """Returns f(A, dof, device) -> relative residual ||A x - b|| / ||b|| for the
+    Ax=b solve. Used to assert the *timed* solves actually produce correct answers
+    (a fast wrong solver would otherwise look great)."""
+    def v(A, dof, device):
+        val, row, col = A.values, A.row_indices, A.col_indices
+        b = torch.ones(dof, dtype=A.dtype, device=device)
+        x = spsolve(val, row, col, A.sparse_shape, b, backend=backend, **kw)
+        x = x.to(device=device, dtype=A.dtype)
+        r = (A @ x - b).norm() / b.norm()
+        return float(r.detach().cpu())
+    return v
+
+
+def _verify_eigsh(A, dof, device):
+    """Smallest-k eigenvalues of an SPD-ish Laplacian must be real and > 0."""
+    evals, _ = A.eigsh(k=6, which="SA")
+    ev = evals.real
+    return float(ev.min().detach().cpu())  # caller checks > 0
+
+
 def _setup_det(A, dof, device):
     return lambda: A.det()
 
@@ -172,16 +193,21 @@ def _setup_cc(A, dof, device):
 OPS = {
     "spmv":            dict(setup=_setup_spmv,            reps=5, avail=lambda dev: True),
     "matmat":          dict(setup=_setup_matmat,         reps=3, avail=lambda dev: True),
-    "solve_cg":        dict(setup=_setup_solve_cg,       reps=2, avail=lambda dev: True),
-    "solve_lu":        dict(setup=_setup_solve_lu,       reps=2, avail=lambda dev: True),
+    "solve_cg":        dict(setup=_setup_solve_cg,       reps=2, avail=lambda dev: True,
+                            verify=_verify_solve("pytorch", method="cg", is_spd=True, tol=1e-8, maxiter=20000)),
+    "solve_lu":        dict(setup=_setup_solve_lu,       reps=2, avail=lambda dev: True,
+                            verify=_verify_solve("scipy", method="lu")),
     "solve_strumpack": dict(setup=_setup_solve_strumpack, reps=2,
-                            avail=lambda dev: is_strumpack_available()),
+                            avail=lambda dev: is_strumpack_available(),
+                            verify=_verify_solve("strumpack")),
     "solve_cudss":     dict(setup=_setup_solve_cudss,     reps=2,
-                            avail=lambda dev: dev == "cuda" and is_cudss_available()),
+                            avail=lambda dev: dev == "cuda" and is_cudss_available(),
+                            verify=_verify_solve("cudss")),
     "det":             dict(setup=_setup_det,            reps=2, avail=lambda dev: True),
     "det_backward":    dict(setup=_setup_det_backward,   reps=2, avail=lambda dev: True),
     "logdet":          dict(setup=_setup_logdet,         reps=2, avail=lambda dev: True),
-    "eigsh":           dict(setup=_setup_eigsh,          reps=2, avail=lambda dev: True),
+    "eigsh":           dict(setup=_setup_eigsh,          reps=2, avail=lambda dev: True,
+                            verify=_verify_eigsh),
     "norm":            dict(setup=_setup_norm,           reps=5, avail=lambda dev: True),
     "transpose":       dict(setup=_setup_transpose,      reps=5, avail=lambda dev: True),
     "cc":              dict(setup=_setup_cc,             reps=3, avail=lambda dev: True),
@@ -284,9 +310,22 @@ def run_sweep(op_names, sides_map, device):
             row = dict(rec)  # time_s, peak_tm_mb, rss_delta_mb, cpu_util, cuda_peak_mb
             row.update(op=op, dof=dof, nnz=nnz,
                        tput=dof / rec["time_s"], peak_mb=pm)
+            # Correctness check: a fast-but-wrong solve would otherwise look great.
+            chk_tag = ""
+            if "verify" in spec:
+                chk = spec["verify"](A, dof, device)
+                row["check"] = chk
+                if op == "eigsh":
+                    ok = chk > 0; chk_tag = f"  min_eig={chk:.2e}"
+                else:
+                    ok = chk < 1e-3; chk_tag = f"  resid={chk:.1e}"
+                if not ok:
+                    row["correctness_fail"] = True
+                    chk_tag += "  *** WRONG RESULT ***"
+                    print(f"    !!! CORRECTNESS FAIL {op} dof={dof}: {chk_tag}", flush=True)
             results[op].append(row)
             print(f"    dof={dof:>8d} nnz={nnz:>9d}  t={rec['time_s']*1e3:>9.2f}ms "
-                  f"tput={row['tput']:.2e}  peak={pm:>8.1f}MB  cpu={rec['cpu_util']:>5.0f}%",
+                  f"tput={row['tput']:.2e}  peak={pm:>8.1f}MB  cpu={rec['cpu_util']:>5.0f}%{chk_tag}",
                   flush=True)
             del A, run
             gc.collect()
