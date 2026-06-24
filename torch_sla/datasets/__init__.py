@@ -20,8 +20,8 @@ re-exported for backward compatibility.
 from __future__ import annotations
 
 # --- new problem package -------------------------------------------------- #
+from .sparse_problem import SparseProblem
 from .problems import (
-    SparseProblem,
     laplacian_1d,
     laplacian_2d,
     laplacian_3d,
