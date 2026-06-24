@@ -621,10 +621,13 @@ def main():
     # --- plots ---
     print("\nGenerating plots ...", flush=True)
     paths = []
+    # Per-op plots are the primary output: different ops have different work
+    # units (matvec ~ nnz, solve ~ iter*nnz, eigsh ~ iterations), so overlaying
+    # them on one latency/throughput axes is not meaningful. Each per-op plot
+    # carries O(N)/O(N^2) reference lines + the fitted slope + the backend.
     paths += plot_time_per_op(out, results, slopes, device)
-    paths.append(plot_combined_latency(out, results, device))
+    # Memory is in MB (a comparable unit), so a combined view is still useful.
     paths.append(plot_combined_mem(out, results, device))
-    paths.append(plot_combined_tput(out, results, device))
     if probe:
         cp = plot_capacity(out, probe, device)
         if cp:

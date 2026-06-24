@@ -858,9 +858,14 @@ device-agnostic and run unchanged with ``--device cuda``. Highlights vs CPU at
 
 On GPU, ``peak_MB`` is real device memory (``torch.cuda.max_memory_allocated``,
 e.g. ``connected_components`` ~333 MB at 10⁶ DOF) — unlike the CPU path where
-``tracemalloc`` under-captures the torch allocator. Plots land in
-``benchmarks/results/`` (``allops_latency.png``, ``allops_throughput.png``,
-``allops_memory.png``, per-op ``allops_time_<op>.png``; GPU runs prefixed ``cuda_``).
+``tracemalloc`` under-captures the torch allocator.
+
+The primary plots are **per-op** — ``benchmarks/results/allops_time_<op>.png``, one
+per op, each with O(N)/O(N²) reference lines, the fitted slope, and the backend label.
+Ops are *not* overlaid on a shared latency/throughput axes because their work units
+differ (matvec ~ ``nnz``, solve ~ ``iter·nnz``, eigsh ~ iterations), which makes a
+cross-op comparison meaningless. A combined ``allops_memory.png`` is kept (MB is a
+comparable unit). GPU runs are prefixed ``cuda_``.
 
 Distributed scaling (DSparseTensor)
 -----------------------------------
