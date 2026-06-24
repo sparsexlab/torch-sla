@@ -1766,6 +1766,91 @@ class DSparseTensor:
         from .graph import connected_components_shard
         return connected_components_shard(self)
 
+    # ====================================================================== #
+    # Clean "syntactic sugar" layer.
+    #
+    # These thin wrappers mirror the single-process :class:`SparseTensor`
+    # API (``solve`` / ``nonlinear_solve`` / ``connected_components`` /
+    # ``lsqr`` / ``lsmr``) so callers never reach for the ``*_shard``
+    # implementation names. Each forwards verbatim to the matching
+    # distributed routine -- no shape recompute, repartition, or gather --
+    # so they add zero per-call overhead over calling the delegate directly.
+    # ====================================================================== #
+    def solve(self, b: Any, **kwargs) -> Any:
+        """``D.solve(b)`` -- distributed Krylov solve in Shard(0) space.
+
+        Sugar for :meth:`solve_distributed_shard`; mirrors the top-level
+        :func:`torch_sla.solve`. ``b`` is a ``DTensor[Shard(0)]`` (most
+        common) or a raw owned-slice ``torch.Tensor``; the return value
+        matches the input's wrapper. Method / preconditioner / tolerances
+        resolve through the active :class:`SolverConfig` scope unless
+        passed explicitly (see :meth:`solve_distributed_shard`)."""
+        return self.solve_distributed_shard(b, **kwargs)
+
+    def solve_batch(self, b: torch.Tensor, **kwargs) -> torch.Tensor:
+        """``D.solve_batch(b)`` -- per-batch solve under :class:`BatchShard`.
+
+        Sugar for :meth:`solve_batch_shard`. Returns this rank's batch
+        slice of the solution; zero inter-rank communication."""
+        return self.solve_batch_shard(b, **kwargs)
+
+    def nonlinear_solve(self, residual_fn: Any, u0: Any, *,
+                        jac_diag_fn: Any, **kwargs) -> Any:
+        """``D.nonlinear_solve(residual, u0, jac_diag_fn=...)`` --
+        distributed Newton solve for ``F(u) = 0`` in Shard(0) space.
+
+        Sugar for :meth:`nonlinear_solve_distributed_shard`; mirrors the
+        single-process :meth:`SparseTensor.nonlinear_solve`. Returns the
+        solution mirroring the input wrapper, or ``(u, λ)`` when an
+        ``adjoint_dLdu`` kwarg requests the IFT adjoint."""
+        return self.nonlinear_solve_distributed_shard(
+            residual_fn, u0, jac_diag_fn=jac_diag_fn, **kwargs)
+
+    def connected_components(self) -> Tuple[torch.Tensor, int]:
+        """``D.connected_components()`` -- distributed connected components.
+
+        Sugar for :func:`torch_sla.distributed.graph.connected_components_shard`;
+        mirrors the single-process :meth:`SparseTensor.connected_components`.
+
+        Returns
+        -------
+        labels : torch.Tensor
+            This rank's owned-slice of the contiguous component labelling
+            (``0..n_components-1``, identical to the scipy labelling).
+        n_components : int
+            Global component count (identical on every rank).
+        """
+        from .graph import connected_components_shard
+        return connected_components_shard(self)
+
+    def lsqr(self, b: torch.Tensor, *, atol: float = 1e-8, btol: float = 1e-8,
+             maxiter: int = 10000, damp: float = 0.0, conlim: float = 1e8,
+             verbose: bool = False) -> torch.Tensor:
+        """``D.lsqr(b)`` -- distributed LSQR least-squares solve.
+
+        Sugar for :func:`torch_sla.distributed.solve.lsqr_shard`; the
+        distributed counterpart of single-process ``spsolve(method='lsqr')``
+        (defaults match its ``lsqr_solve``). ``b`` is this rank's
+        owned-slice ``torch.Tensor``; returns the owned slice of
+        ``argmin ||Ax - b||`` (damped variant when ``damp > 0``)."""
+        from .solve import lsqr_shard
+        return lsqr_shard(self, b, atol=atol, btol=btol, maxiter=maxiter,
+                          damp=damp, conlim=conlim, verbose=verbose)
+
+    def lsmr(self, b: torch.Tensor, *, atol: float = 1e-8, btol: float = 1e-8,
+             maxiter: int = 10000, damp: float = 0.0, conlim: float = 1e8,
+             verbose: bool = False) -> torch.Tensor:
+        """``D.lsmr(b)`` -- distributed LSMR least-squares solve.
+
+        Sugar for :func:`torch_sla.distributed.solve.lsmr_shard`; the
+        distributed counterpart of single-process ``spsolve(method='lsmr')``
+        (defaults match its ``lsmr_solve``). ``b`` is this rank's
+        owned-slice ``torch.Tensor``; returns the owned slice of the
+        least-squares solution (more robust than LSQR when ill-conditioned)."""
+        from .solve import lsmr_shard
+        return lsmr_shard(self, b, atol=atol, btol=btol, maxiter=maxiter,
+                          damp=damp, conlim=conlim, verbose=verbose)
+
     # ------------------------------------------------------------------ #
     # Shard(0)-space primitives reused by every Krylov method.
     # ------------------------------------------------------------------ #
