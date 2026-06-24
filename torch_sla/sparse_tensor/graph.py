@@ -57,17 +57,46 @@ def _connected_components_labels(
         unique, inverse = torch.unique(labels, return_inverse=True)
         return inverse.to(torch.long), unique.numel()
 
+    # FastSV / Shiloach-Vishkin style connected components.
+    #
+    # Each round does (1) one min-label hooking step over every undirected
+    # edge, then (2) FULL pointer jumping (path compression) so every node
+    # points straight at the current root of its tree. Compressing all the
+    # way to the root every round contracts components in O(log N) rounds
+    # regardless of graph DIAMETER -- the old code jumped pointers only once
+    # per round, so a long path / big grid needed O(diameter) rounds.
+    #
+    # Convergence is detected with a single scalar reduction (the sum of all
+    # labels can only decrease and is constant once stable) instead of a full
+    # ``torch.equal`` scan over N nodes every round.
+    def _compress_to_roots(lab: torch.Tensor) -> torch.Tensor:
+        # Repeated pointer jumping: lab[i] = lab[lab[i]] until every node
+        # points at a root (lab[i] == lab[lab[i]] for all i). Each jump at
+        # least halves the remaining tree height, so this is O(log N) jumps.
+        while True:
+            parent = lab[lab]
+            if torch.equal(parent, lab):
+                break
+            lab = parent
+        return lab
+
+    labels = _compress_to_roots(labels)
+    prev_checksum = labels.sum()
     while True:
-        prev = labels
-        # Propagate the minimum label across every (undirected) edge.
+        # Hooking: propagate the minimum root-label across every edge.
         new_labels = labels.clone()
         new_labels.scatter_reduce_(
             0, dst, labels[src], reduce="amin", include_self=True
         )
-        # Pointer jumping: compress chains so a node adopts its label's label.
-        labels = new_labels[new_labels]
-        if torch.equal(labels, prev):
+        # Full path compression so the next round's hooking sees roots.
+        labels = _compress_to_roots(new_labels)
+        checksum = labels.sum()
+        # The total of all labels is monotonically non-increasing and stops
+        # changing exactly when the partition is stable -> cheap O(1)-reduce
+        # convergence test instead of an O(N) equality scan.
+        if checksum == prev_checksum:
             break
+        prev_checksum = checksum
 
     # Relabel to contiguous 0..num_components-1 (unique sorts ascending, so
     # the component with the smallest node index becomes id 0).
