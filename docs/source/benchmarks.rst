@@ -832,3 +832,25 @@ pytorch-native and STRUMPACK paths are device-agnostic. Plots land in
 ``benchmarks/results/`` (``allops_latency.png``, ``allops_throughput.png``,
 ``allops_memory.png``, per-op ``allops_time_<op>.png``).
 
+Distributed scaling (DSparseTensor)
+-----------------------------------
+
+``benchmarks/benchmark_distributed_scaling.py`` measures **strong** and **weak**
+scaling of the distributed ops (matvec, ``cg`` solve, ``eigsh``) across ranks via
+multiprocess ``gloo``:
+
+.. code-block:: bash
+
+   python benchmarks/benchmark_distributed_scaling.py --ranks 1,2,4
+
+It emits ``dist_strong_scaling.png`` (speedup vs ranks), ``dist_weak_scaling.png``
+(time vs ranks, ideal flat) and ``dist_throughput.png``.
+
+On a single multi-core CPU box over ``gloo``, adding ranks does **not** speed things
+up — there is no real interconnect or GPU, so halo-exchange / all-reduce communication
+dominates and strong scaling is negative (e.g. 65 K-DOF Poisson: ``cg`` 0.54 s → 4.06 s
+from 2 → 4 ranks). What the benchmark verifies is that the result is **rank-invariant**
+(the same smallest eigenvalue and ``cg`` residual ~2e-9 at every world size, including
+non-monotone partitions). Real speedup needs multiple GPUs with NCCL and a
+communication-hiding problem size; see the multi-GPU benchmarks for that regime.
+

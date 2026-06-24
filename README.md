@@ -546,6 +546,12 @@ On CPU (16-core / 44 GB) to ~10⁶ DOF: `transpose` is O(1), `norm`/`spmv` linea
 `solve_lu` is direct/super-linear (caps capacity first). Latency (ms) is the primary
 metric. Plots in `benchmarks/results/`.
 
+`benchmarks/benchmark_distributed_scaling.py` adds strong/weak scaling for the
+distributed ops (matvec, cg, eigsh) across ranks. On a single CPU box over `gloo`
+scaling is communication-bound (no real interconnect), but results are rank-invariant
+(same eigenvalue / residual at every world size, incl. non-monotone partitions) —
+real speedup needs multi-GPU + NCCL.
+
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
