@@ -827,10 +827,40 @@ Measured on CPU (16-core / 44 GB), 2-D Poisson sweep to ~10\ :sup:`6` DOF:
      - ~1.2–1.5
      - direct; 2-D fill-in is super-linear (caps capacity earliest)
 
-GPU numbers (``--device cuda``) should be produced on an NVIDIA/AMD GPU box — the
-pytorch-native and STRUMPACK paths are device-agnostic. Plots land in
+**GPU (CUDA, RTX 4070 Ti SUPER):** the pytorch-native and graph ops are
+device-agnostic and run unchanged with ``--device cuda``. Highlights vs CPU at
+~10\ :sup:`6` DOF:
+
+.. list-table::
+   :widths: 24 26 26 24
+   :header-rows: 1
+
+   * - op
+     - CPU throughput
+     - GPU throughput
+     - note
+   * - ``transpose``
+     - 4.4×10¹⁰ DOF/s
+     - 4.1×10¹⁰ DOF/s
+     - view op; device-independent
+   * - ``connected_components``
+     - ~1×10⁷ DOF/s (slope 0.76)
+     - 2.3×10⁸ DOF/s (slope 0.16)
+     - **~20× faster** on GPU; FastSV rounds parallelise well
+   * - ``solve_cg``
+     - 1.2×10⁵ DOF/s
+     - 1.4×10⁶ DOF/s
+     - ~10× on GPU (SpMV-bound)
+   * - ``eigsh``
+     - —
+     - slow (LOBPCG comm/launch overhead)
+     - GPU win needs larger blocks / shift-invert
+
+On GPU, ``peak_MB`` is real device memory (``torch.cuda.max_memory_allocated``,
+e.g. ``connected_components`` ~333 MB at 10⁶ DOF) — unlike the CPU path where
+``tracemalloc`` under-captures the torch allocator. Plots land in
 ``benchmarks/results/`` (``allops_latency.png``, ``allops_throughput.png``,
-``allops_memory.png``, per-op ``allops_time_<op>.png``).
+``allops_memory.png``, per-op ``allops_time_<op>.png``; GPU runs prefixed ``cuda_``).
 
 Distributed scaling (DSparseTensor)
 -----------------------------------

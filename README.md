@@ -546,6 +546,12 @@ On CPU (16-core / 44 GB) to ~10⁶ DOF: `transpose` is O(1), `norm`/`spmv` linea
 `solve_lu` is direct/super-linear (caps capacity first). Latency (ms) is the primary
 metric. Plots in `benchmarks/results/`.
 
+On **GPU** (`--device cuda`, RTX 4070 Ti SUPER) the device-agnostic ops run unchanged:
+`connected_components` is **~20× faster** than CPU at 10⁶ DOF (FastSV rounds
+parallelise; slope 0.16 vs 0.76), `solve_cg` ~10×, `transpose` unchanged (view op);
+and `peak_MB` becomes real device memory (`cuda.max_memory_allocated`). GPU plots are
+prefixed `cuda_`.
+
 `benchmarks/benchmark_distributed_scaling.py` adds strong/weak scaling for the
 distributed ops (matvec, cg, eigsh) across ranks. On a single CPU box over `gloo`
 scaling is communication-bound (no real interconnect), but results are rank-invariant
