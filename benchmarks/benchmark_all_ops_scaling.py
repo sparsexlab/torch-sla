@@ -420,7 +420,7 @@ def plot_time_per_op(out, results, slopes, device):
         dofs = [r["dof"] for r in rows]
         times = [r["time_s"] for r in rows]
         plt.figure(figsize=(7, 5))
-        plt.loglog(dofs, times, "o-", label=f"{op} (slope={slopes[op]:.2f})")
+        plt.loglog(dofs, times, "o-", label=f"{_lbl(op)} (slope={slopes[op]:.2f})")
         d0 = np.array(dofs, float)
         anchor = times[0] / d0[0]
         plt.loglog(d0, anchor * d0, "k--", alpha=0.3, label="O(N) ref")
@@ -448,12 +448,41 @@ def plot_combined_mem(out, results, device):
     return p
 
 
+# Backend / method actually exercised by each op (shown in plot legends).
+BACKENDS = {
+    "spmv": "torch", "matmat": "torch", "norm": "torch", "transpose": "torch",
+    "cc": "torch (pure)", "solve_cg": "pytorch/cg", "solve_lu": "scipy/lu",
+    "solve_strumpack": "strumpack", "det": "scipy", "det_backward": "adjoint",
+    "logdet": "hutchinson", "eigsh": "lobpcg",
+}
+
+
+def _lbl(op):
+    return f"{op} [{BACKENDS.get(op, '?')}]"
+
+
+def plot_combined_latency(out, results, device):
+    """Latency (wall time) vs DOF -- the primary metric. Backend in the legend."""
+    plt.figure(figsize=(8, 6))
+    for op, rows in results.items():
+        if len(rows) < 2:
+            continue
+        plt.loglog([r["dof"] for r in rows],
+                   [r["time_s"] * 1e3 for r in rows], "o-", label=_lbl(op))
+    plt.xlabel("DOF (N)"); plt.ylabel("latency [ms]")
+    plt.title(f"Latency vs DOF (all ops, {device})")
+    plt.grid(True, which="both", alpha=0.3); plt.legend(fontsize=8); plt.tight_layout()
+    p = out / "allops_latency.png"
+    plt.savefig(p, dpi=110); plt.close()
+    return p
+
+
 def plot_combined_tput(out, results, device):
     plt.figure(figsize=(8, 6))
     for op, rows in results.items():
         if len(rows) < 2:
             continue
-        plt.loglog([r["dof"] for r in rows], [r["tput"] for r in rows], "o-", label=op)
+        plt.loglog([r["dof"] for r in rows], [r["tput"] for r in rows], "o-", label=_lbl(op))
     plt.xlabel("DOF (N)"); plt.ylabel("throughput [DOF / s]")
     plt.title(f"Throughput vs DOF (all ops, {device})")
     plt.grid(True, which="both", alpha=0.3); plt.legend(fontsize=8); plt.tight_layout()
@@ -593,6 +622,7 @@ def main():
     print("\nGenerating plots ...", flush=True)
     paths = []
     paths += plot_time_per_op(out, results, slopes, device)
+    paths.append(plot_combined_latency(out, results, device))
     paths.append(plot_combined_mem(out, results, device))
     paths.append(plot_combined_tput(out, results, device))
     if probe:
