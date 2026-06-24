@@ -333,7 +333,7 @@ def avail_ram_mb():
     return float("inf")
 
 
-def max_probe(op_names, device, time_cap=60.0, headroom_mb=6000, start_side=64):
+def max_probe(op_names, device, time_cap=60.0, headroom_mb=12000, start_side=64):
     """For each op, increase side until OOM / error / time-cap / RAM guard.
 
     Each candidate runs in a fresh subprocess so a hard OOM can't kill us.
@@ -586,7 +586,7 @@ def main():
         print("\n" + "=" * 60)
         print("MAX-CAPACITY PROBE (subprocess-isolated)")
         print("=" * 60)
-        time_cap = 20.0 if args.quick else 60.0
+        time_cap = 8.0 if args.quick else 30.0
         probe = max_probe(op_names, device, time_cap=time_cap)
 
     # --- plots ---
