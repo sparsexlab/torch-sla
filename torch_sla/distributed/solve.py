@@ -15,7 +15,7 @@ data layout and lets the Krylov implementations evolve independently.
 from __future__ import annotations
 
 import math
-from typing import Any, Callable
+from typing import Any, Callable, Tuple
 
 import torch
 
@@ -643,4 +643,483 @@ def minres_shard(D, b_owned: torch.Tensor, *, M_apply: Callable,
                       f"||r||~={rnorm:.3e}")
             break
 
+    return x
+
+
+# ====================================================================== #
+# Generic operator GMRES (matvec closure) -- used by the Newton solver   #
+# ====================================================================== #
+def gmres_shard_op(D, b_owned: torch.Tensor, matvec: Callable, *,
+                    atol: float, rtol: float, maxiter: int, restart: int = 30,
+                    verbose: bool = False) -> torch.Tensor:
+    """Restarted GMRES(m) in Shard(0) space against an arbitrary owned-space
+    linear operator ``matvec(v_owned) -> w_owned``.
+
+    Identical Arnoldi/Givens machinery to :func:`gmres_shard` but the
+    matvec is supplied by the caller rather than fixed to
+    ``D._shard_matvec``. The Newton solver passes the Jacobian operator
+    ``J v = A v + diag_shift * v`` here. ``D`` is only used for the
+    distributed inner products (``_shard_dot`` / ``_shard_norm``).
+    """
+    no = D._num_owned()
+    dtype, device = b_owned.dtype, b_owned.device
+    m = restart
+    x = torch.zeros_like(b_owned)
+    b_norm = float(D._shard_norm(b_owned).item())
+    if b_norm == 0.0:
+        return x
+    tol = max(atol, rtol * b_norm)
+
+    total_iters = 0
+    for cycle in range((maxiter + m - 1) // m):
+        r = b_owned - matvec(x)
+        beta = float(D._shard_norm(r).item())
+        if beta < tol:
+            return x
+        V = torch.zeros((m + 1, no), dtype=dtype, device=device)
+        V[0] = r / beta
+        H = torch.zeros((m + 1, m), dtype=dtype, device=device)
+        g = torch.zeros(m + 1, dtype=dtype, device=device)
+        g[0] = beta
+        cs = torch.zeros(m, dtype=dtype, device=device)
+        sn = torch.zeros(m, dtype=dtype, device=device)
+        j_max = 0
+        for j in range(m):
+            w = matvec(V[j])
+            for i in range(j + 1):
+                H[i, j] = D._shard_dot(V[i], w)
+                w = w - H[i, j] * V[i]
+            H[j + 1, j] = D._shard_norm(w)
+            if float(H[j + 1, j].abs().item()) > 1e-30:
+                V[j + 1] = w / H[j + 1, j]
+            else:
+                V[j + 1] = w
+            for i in range(j):
+                h_ij = H[i, j].clone()
+                h_ipj = H[i + 1, j].clone()
+                H[i, j] = cs[i] * h_ij + sn[i] * h_ipj
+                H[i + 1, j] = -sn[i] * h_ij + cs[i] * h_ipj
+            denom = (H[j, j] * H[j, j] + H[j + 1, j] * H[j + 1, j]).sqrt()
+            if float(denom.abs().item()) < 1e-30:
+                cs[j] = torch.tensor(1.0, dtype=dtype, device=device)
+                sn[j] = torch.tensor(0.0, dtype=dtype, device=device)
+            else:
+                cs[j] = H[j, j] / denom
+                sn[j] = H[j + 1, j] / denom
+            H[j, j] = cs[j] * H[j, j] + sn[j] * H[j + 1, j]
+            H[j + 1, j] = torch.tensor(0.0, dtype=dtype, device=device)
+            g_j = g[j].clone()
+            g[j] = cs[j] * g_j
+            g[j + 1] = -sn[j] * g_j
+            total_iters += 1
+            j_max = j + 1
+            if float(g[j + 1].abs().item()) < tol:
+                break
+            if total_iters >= maxiter:
+                break
+        y = torch.zeros(j_max, dtype=dtype, device=device)
+        for i in range(j_max - 1, -1, -1):
+            s = g[i].clone()
+            for k in range(i + 1, j_max):
+                s = s - H[i, k] * y[k]
+            y[i] = s / H[i, i]
+        for i in range(j_max):
+            x = x + y[i] * V[i]
+        if total_iters >= maxiter:
+            break
+    return x
+
+
+# ====================================================================== #
+# Distributed nonlinear solve: Newton + IFT adjoint                      #
+# ====================================================================== #
+def newton_shard(
+    D,
+    residual_fn: Callable,
+    u0_owned: torch.Tensor,
+    *,
+    jac_diag_fn: Callable = None,
+    tol: float = 1e-10,
+    atol: float = 1e-12,
+    max_iter: int = 50,
+    line_search: bool = True,
+    lin_atol: float = 1e-12,
+    lin_rtol: float = 1e-10,
+    lin_maxiter: int = 1000,
+    restart: int = None,
+    verbose: bool = False,
+) -> torch.Tensor:
+    """Distributed Newton-Raphson in Shard(0) space.
+
+    Solves ``F(u) = 0`` where ``F`` is a residual whose linear part is
+    the distributed operator ``A = D`` and whose nonlinear part is a
+    **diagonal** (pointwise) function of ``u`` -- the structure shared by
+    Bratu, reaction-diffusion, and most semilinear elliptic PDEs.
+
+    Parameters
+    ----------
+    residual_fn : Callable
+        ``residual_fn(u_owned, D) -> F_owned``. Must be implemented with
+        distributed ops (``D._shard_matvec`` for ``A u`` plus pointwise
+        owned-slice arithmetic). The owned slices on every rank together
+        form the global residual.
+    u0_owned : torch.Tensor
+        Initial guess, this rank's owned slice.
+    jac_diag_fn : Callable
+        ``jac_diag_fn(u_owned, D) -> d_owned`` returning the **diagonal
+        shift** ``d`` such that the Jacobian acts as
+        ``J v = A v + d * v`` (i.e. ``d = -∂(nonlinear part)/∂u``). For
+        Bratu ``F = A u - lam exp(u)`` this is ``d = -lam exp(u)``.
+        The Newton step solves ``J du = -F`` via distributed GMRES.
+
+    The Newton scalars (residual norm, line-search alpha) are global and
+    consistent across ranks because they come from ``D._shard_norm`` /
+    ``D._shard_dot``.
+    """
+    if jac_diag_fn is None:
+        raise ValueError("newton_shard requires jac_diag_fn (diagonal Jacobian shift)")
+
+    # Restarted GMRES(m) can stagnate well above the requested tolerance
+    # on a benign RHS (observed: GMRES(50) stalling at ~1e-4 on a
+    # 200-node Bratu Jacobian split across 4 ranks). The Newton-step and
+    # adjoint linear solves must be *correct*, not just fast, so default
+    # to full GMRES (Krylov subspace up to the global dimension, capped
+    # by lin_maxiter) which converges within N steps in exact arithmetic.
+    if restart is None:
+        restart = min(lin_maxiter, int(D.shape[0]))
+
+    u = u0_owned.clone()
+    F = residual_fn(u, D)
+    F_norm0 = float(D._shard_norm(F).item())
+    F_norm = F_norm0
+
+    for it in range(max_iter):
+        if verbose:
+            print(f"[shard-Newton] iter {it}: ||F||={F_norm:.3e}")
+        if F_norm < atol or (it > 0 and F_norm < tol * F_norm0):
+            break
+
+        d = jac_diag_fn(u, D)        # Jacobian diagonal shift, owned slice
+
+        def J(v, _d=d):
+            return D._shard_matvec(v) + _d * v
+
+        du = gmres_shard_op(D, -F, J, atol=lin_atol, rtol=lin_rtol,
+                            maxiter=lin_maxiter, restart=restart,
+                            verbose=False)
+
+        # Armijo backtracking line search on the global residual norm.
+        alpha = 1.0
+        if line_search:
+            for _ls in range(20):
+                u_trial = u + alpha * du
+                F_trial = residual_fn(u_trial, D)
+                if float(D._shard_norm(F_trial).item()) < (1.0 - 1e-4 * alpha) * F_norm:
+                    break
+                alpha *= 0.5
+            else:
+                alpha = 1.0
+        u = u + alpha * du
+        F = residual_fn(u, D)
+        F_norm = float(D._shard_norm(F).item())
+
+    if verbose:
+        print(f"[shard-Newton] done: ||F||={F_norm:.3e}")
+    return u
+
+
+def newton_adjoint_shard(
+    D,
+    u_owned: torch.Tensor,
+    dLdu_owned: torch.Tensor,
+    jac_diag_fn: Callable,
+    *,
+    lin_atol: float = 1e-12,
+    lin_rtol: float = 1e-10,
+    lin_maxiter: int = 1000,
+    restart: int = None,
+) -> torch.Tensor:
+    """Distributed IFT adjoint solve.
+
+    Given the converged solution ``u`` and the loss sensitivity
+    ``dL/du`` (owned slice), return the adjoint ``λ`` solving the
+    transposed Jacobian system ``Jᵀ λ = dL/du`` where
+    ``Jᵀ v = Aᵀ v + d * v`` (the diagonal shift is symmetric). Downstream
+    parameter gradients follow from ``-λᵀ ∂F/∂θ`` as in the
+    single-process :class:`NonlinearSolveAdjoint`. Returns ``λ`` on the
+    owned slice.
+    """
+    d = jac_diag_fn(u_owned, D)
+
+    # Full GMRES (see newton_shard): restarted GMRES(m) stagnates above
+    # tolerance on this transposed-Jacobian system, leaving the IFT
+    # adjoint wrong; cap the Krylov subspace at the global dimension.
+    if restart is None:
+        restart = min(lin_maxiter, int(D.shape[0]))
+
+    def JT(v, _d=d):
+        return D._shard_rmatvec(v) + _d * v
+
+    lam = gmres_shard_op(D, dLdu_owned, JT, atol=lin_atol, rtol=lin_rtol,
+                         maxiter=lin_maxiter, restart=restart)
+    return lam
+
+
+# ====================================================================== #
+# Least-squares Krylov: LSQR (Paige & Saunders 1982)                     #
+# ====================================================================== #
+def _sym_ortho(a: float, b: float) -> Tuple[float, float, float]:
+    """Stable Givens rotation (Choi). Returns ``(c, s, r)`` on real
+    scalars. Identical to ``backends.pytorch_backend._sym_ortho`` -- kept
+    local so the distributed solver has no cross-module dependency."""
+    if b == 0:
+        return (math.copysign(1.0, a) if a != 0 else 1.0), 0.0, abs(a)
+    if a == 0:
+        return 0.0, math.copysign(1.0, b), abs(b)
+    if abs(b) > abs(a):
+        tau = a / b
+        s = math.copysign(1.0, b) / math.sqrt(1 + tau * tau)
+        return s * tau, s, b / s
+    tau = b / a
+    c = math.copysign(1.0, a) / math.sqrt(1 + tau * tau)
+    return c, c * tau, a / c
+
+
+def lsqr_shard(D, b_owned: torch.Tensor, *, atol: float, btol: float,
+                maxiter: int, damp: float = 0.0, conlim: float = 1e8,
+                verbose: bool = False, **_ignored) -> torch.Tensor:
+    """Distributed LSQR (Paige & Saunders 1982) in Shard(0) space.
+
+    Faithful port of :func:`torch_sla.backends.pytorch_backend.lsqr_solve`
+    with every ``.norm()`` routed through ``D._shard_norm`` (local norm
+    + ``all_reduce(SUM)``), ``matvec`` -> ``D._shard_matvec`` and
+    ``rmatvec`` -> ``D._shard_rmatvec``. Solves ``min ||Ax - b||`` (or
+    the damped variant). ``A`` is assumed square here (range and domain
+    share the owned-row partition); both ``u`` (range) and ``v``
+    (domain) live in owned-row space.
+
+    The Krylov scalars (``alfa``, ``beta``, Givens rotations, stopping
+    estimates) are global and identical on every rank, so the loop runs
+    in lock-step; the only collectives are the norms inside the
+    bidiagonalisation and the two distributed matvecs.
+    """
+    no = D._num_owned()
+    if b_owned.shape[0] != no:
+        raise ValueError(
+            f"b_owned size {b_owned.shape[0]} != num_owned {no}")
+    dtype, device = b_owned.dtype, b_owned.device
+    eps = float(torch.finfo(dtype).eps)
+    dampsq = damp * damp
+    ctol = 1.0 / conlim if conlim > 0 else 0.0
+    anorm = ddnorm = res2 = xnorm = xxnorm = z = 0.0
+    cs2, sn2 = -1.0, 0.0
+
+    x = torch.zeros_like(b_owned)
+    u = b_owned.clone()
+    beta = float(D._shard_norm(u).item())
+    if beta > 0:
+        u = u / beta
+    v = D._shard_rmatvec(u)
+    alfa = float(D._shard_norm(v).item())
+    if alfa > 0:
+        v = v / alfa
+    w = v.clone()
+    rhobar, phibar, bnorm, rnorm = alfa, beta, beta, beta
+    if alfa * beta == 0:
+        return x
+
+    istop = 0
+    itn = 0
+    for itn in range(1, maxiter + 1):
+        u = D._shard_matvec(v) - alfa * u
+        beta = float(D._shard_norm(u).item())
+        if beta > 0:
+            u = u / beta
+            anorm = math.sqrt(anorm ** 2 + alfa ** 2 + beta ** 2 + dampsq)
+            v = D._shard_rmatvec(u) - beta * v
+            alfa = float(D._shard_norm(v).item())
+            if alfa > 0:
+                v = v / alfa
+        if damp > 0:
+            rhobar1 = math.sqrt(rhobar ** 2 + dampsq)
+            cs1, sn1 = rhobar / rhobar1, damp / rhobar1
+            psi, phibar = sn1 * phibar, cs1 * phibar
+        else:
+            rhobar1, psi = rhobar, 0.0
+        cs, sn, rho = _sym_ortho(rhobar1, beta)
+        theta = sn * alfa
+        rhobar = -cs * alfa
+        phi = cs * phibar
+        phibar = sn * phibar
+        tau = sn * phi
+        dk = (1.0 / rho) * w
+        x = x + (phi / rho) * w
+        w = v + (-theta / rho) * w
+        # ddnorm accumulates ||dk||^2 globally.
+        ddnorm = ddnorm + float(D._shard_norm(dk).item()) ** 2
+        delta = sn2 * rho
+        gambar = -cs2 * rho
+        rhs = phi - delta * z
+        zbar = rhs / gambar
+        xnorm = math.sqrt(xxnorm + zbar ** 2)
+        gamma = math.sqrt(gambar ** 2 + theta ** 2)
+        cs2, sn2 = gambar / gamma, theta / gamma
+        z = rhs / gamma
+        xxnorm = xxnorm + z ** 2
+        acond = anorm * math.sqrt(ddnorm)
+        rnorm = math.sqrt(phibar ** 2 + res2)
+        res2 = res2 + psi ** 2
+        arnorm = alfa * abs(tau)
+        test1 = rnorm / bnorm if bnorm > 0 else 0.0
+        test2 = arnorm / (anorm * rnorm + eps)
+        test3 = 1.0 / (acond + eps)
+        t1c = test1 / (1 + anorm * xnorm / bnorm) if bnorm > 0 else test1
+        rtol = btol + atol * anorm * xnorm / bnorm if bnorm > 0 else btol
+        if itn >= maxiter:
+            istop = 7
+        if 1 + test3 <= 1:
+            istop = 6
+        if 1 + test2 <= 1:
+            istop = 5
+        if 1 + t1c <= 1:
+            istop = 4
+        if test3 <= ctol:
+            istop = 3
+        if test2 <= atol:
+            istop = 2
+        if test1 <= rtol:
+            istop = 1
+        if verbose and (itn % 50 == 0 or itn < 5):
+            print(f"[shard-LSQR] iter {itn}: rnorm={rnorm:.3e} istop={istop}")
+        if istop:
+            break
+    if verbose:
+        print(f"[shard-LSQR] stop itn={itn} istop={istop} rnorm={rnorm:.3e}")
+    return x
+
+
+# ====================================================================== #
+# Least-squares Krylov: LSMR (Fong & Saunders 2011)                      #
+# ====================================================================== #
+def lsmr_shard(D, b_owned: torch.Tensor, *, atol: float, btol: float,
+                maxiter: int, damp: float = 0.0, conlim: float = 1e8,
+                verbose: bool = False, **_ignored) -> torch.Tensor:
+    """Distributed LSMR (Fong & Saunders 2011) in Shard(0) space.
+
+    Port of :func:`torch_sla.backends.pytorch_backend.lsmr_solve`; same
+    distributed substitutions as :func:`lsqr_shard`. LSMR minimises
+    ``||Aᵀ r||`` monotonically and is generally more robust than LSQR
+    on ill-conditioned least-squares problems.
+    """
+    no = D._num_owned()
+    if b_owned.shape[0] != no:
+        raise ValueError(
+            f"b_owned size {b_owned.shape[0]} != num_owned {no}")
+    dtype, device = b_owned.dtype, b_owned.device
+    eps = float(torch.finfo(dtype).eps)
+    ctol = 1.0 / conlim if conlim > 0 else 0.0
+
+    x = torch.zeros_like(b_owned)
+    u = b_owned.clone()
+    beta = float(D._shard_norm(u).item())
+    if beta > 0:
+        u = u / beta
+    v = D._shard_rmatvec(u)
+    alpha = float(D._shard_norm(v).item())
+    if alpha > 0:
+        v = v / alpha
+
+    itn = 0
+    zetabar = alpha * beta
+    alphabar = alpha
+    rho = rhobar = cbar = 1.0
+    sbar = 0.0
+    h = v.clone()
+    hbar = torch.zeros_like(b_owned)
+    betadd = beta
+    betad = 0.0
+    rhodold = 1.0
+    tautildeold = thetatilde = zeta = d = 0.0
+    normA2 = alpha * alpha
+    maxrbar, minrbar = 0.0, 1e100
+    normb = beta
+    normr = beta
+    normar = alpha * beta
+    if normar == 0:
+        return x
+    if normb == 0:
+        return x
+
+    istop = 0
+    for itn in range(1, maxiter + 1):
+        u = D._shard_matvec(v) - alpha * u
+        beta = float(D._shard_norm(u).item())
+        if beta > 0:
+            u = u / beta
+            v = D._shard_rmatvec(u) - beta * v
+            alpha = float(D._shard_norm(v).item())
+            if alpha > 0:
+                v = v / alpha
+        chat, shat, alphahat = _sym_ortho(alphabar, damp)
+        rhoold = rho
+        c, s, rho = _sym_ortho(alphahat, beta)
+        thetanew = s * alpha
+        alphabar = c * alpha
+        rhobarold = rhobar
+        zetaold = zeta
+        thetabar = sbar * rho
+        rhotemp = cbar * rho
+        cbar, sbar, rhobar = _sym_ortho(cbar * rho, thetanew)
+        zeta = cbar * zetabar
+        zetabar = -sbar * zetabar
+        hbar = h + (-(thetabar * rho / (rhoold * rhobarold))) * hbar
+        x = x + (zeta / (rho * rhobar)) * hbar
+        h = v + (-(thetanew / rho)) * h
+        betaacute = chat * betadd
+        betacheck = -shat * betadd
+        betahat = c * betaacute
+        betadd = -s * betaacute
+        thetatildeold = thetatilde
+        ctildeold, stildeold, rhotildeold = _sym_ortho(rhodold, thetabar)
+        thetatilde = stildeold * rhobar
+        rhodold = ctildeold * rhobar
+        betad = -stildeold * betad + ctildeold * betahat
+        tautildeold = (zetaold - thetatildeold * tautildeold) / rhotildeold
+        taud = (zeta - thetatilde * tautildeold) / rhodold
+        d = d + betacheck * betacheck
+        normr = math.sqrt(d + (betad - taud) ** 2 + betadd * betadd)
+        normA2 = normA2 + beta * beta
+        normA = math.sqrt(normA2)
+        normA2 = normA2 + alpha * alpha
+        maxrbar = max(maxrbar, rhobarold)
+        if itn > 1:
+            minrbar = min(minrbar, rhobarold)
+        condA = max(maxrbar, rhotemp) / min(minrbar, rhotemp)
+        normar = abs(zetabar)
+        normx = float(D._shard_norm(x).item())
+        test1 = normr / normb if normb > 0 else 0.0
+        test2 = normar / (normA * normr + eps)
+        test3 = 1.0 / (condA + eps)
+        t1c = test1 / (1 + normA * normx / normb) if normb > 0 else test1
+        rtol = btol + atol * normA * normx / normb if normb > 0 else btol
+        if itn >= maxiter:
+            istop = 7
+        if 1 + test3 <= 1:
+            istop = 6
+        if 1 + test2 <= 1:
+            istop = 5
+        if 1 + t1c <= 1:
+            istop = 4
+        if test3 <= ctol:
+            istop = 3
+        if test2 <= atol:
+            istop = 2
+        if test1 <= rtol:
+            istop = 1
+        if verbose and (itn % 50 == 0 or itn < 5):
+            print(f"[shard-LSMR] iter {itn}: normr={normr:.3e} istop={istop}")
+        if istop:
+            break
+    if verbose:
+        print(f"[shard-LSMR] stop itn={itn} istop={istop} normr={normr:.3e}")
     return x

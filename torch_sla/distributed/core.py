@@ -1654,10 +1654,19 @@ class DSparseTensor:
                 flexible=(method_l == "fgmres"), **common)
         elif method_l == "minres":
             x_owned = _ds.minres_shard(self, b_owned, **common)
+        elif method_l in ("lsqr", "lsmr"):
+            # Least-squares Krylov: btol plays rtol's role; preconditioner
+            # is not applied (normal-equations Krylov). atol defaults
+            # rather small so the LS stopping tests engage.
+            ls_atol = atol if atol is not None else 1e-8
+            ls_btol = rtol if (rtol is not None and rtol > 0) else 1e-8
+            ls_fn = _ds.lsqr_shard if method_l == "lsqr" else _ds.lsmr_shard
+            x_owned = ls_fn(self, b_owned, atol=ls_atol, btol=ls_btol,
+                            maxiter=maxiter, verbose=verbose)
         else:
             raise ValueError(
                 f"Unknown distributed solve method {method!r}; expected "
-                "one of cg, bicgstab, gmres, fgmres, minres."
+                "one of cg, bicgstab, gmres, fgmres, minres, lsqr, lsmr."
             )
 
         if wrap_output:
@@ -1665,6 +1674,97 @@ class DSparseTensor:
                 x_owned, self._spec.mesh,
                 self._spec.placement.partition, int(self._shape[0]))
         return x_owned
+
+    def nonlinear_solve_distributed_shard(
+        self,
+        residual_fn: Any,
+        u0: Any,
+        *,
+        jac_diag_fn: Any,
+        tol: Any = 1e-10,
+        atol: Any = 1e-12,
+        max_iter: Any = 50,
+        line_search: bool = True,
+        lin_maxiter: int = 1000,
+        verbose: bool = False,
+        adjoint_dLdu: Any = None,
+    ) -> Any:
+        """Distributed Newton solve for ``F(u) = 0`` in Shard(0) space.
+
+        ``F`` must have the structure ``F(u) = A u + g(u)`` with ``A`` the
+        distributed operator (this :class:`DSparseTensor`) and ``g`` a
+        pointwise (diagonal) nonlinearity. The Newton step solves the
+        Jacobian system ``J du = -F``, ``J v = A v + d * v``, via
+        distributed GMRES; the diagonal shift ``d = g'(u)`` is supplied by
+        ``jac_diag_fn``.
+
+        Parameters
+        ----------
+        residual_fn : Callable
+            ``residual_fn(u_owned, D) -> F_owned`` using distributed ops.
+        u0 : DTensor[Shard(0)] | torch.Tensor
+            Initial guess (owned slice or wrapped).
+        jac_diag_fn : Callable
+            ``jac_diag_fn(u_owned, D) -> d_owned``; Jacobian diagonal shift.
+        adjoint_dLdu : DTensor | torch.Tensor, optional
+            If given, also solve the IFT adjoint ``Jᵀ λ = dL/du`` at the
+            converged ``u`` and return ``(u, λ)`` instead of just ``u``.
+
+        Returns the solution mirroring the input wrapper (DTensor in ->
+        DTensor out). With ``adjoint_dLdu`` set returns ``(u, λ)``.
+        """
+        if self._spec is None or not isinstance(
+                self._spec.placement, _VERTEX_SHARDS):
+            raise RuntimeError(
+                "nonlinear_solve_distributed_shard() requires a VertexShard "
+                "DSparseTensor.")
+        from . import solve as _ds
+
+        if _is_dtensor(u0):
+            u0_owned = u0.to_local()
+            wrap = True
+        else:
+            u0_owned = u0
+            wrap = False
+
+        u_owned = _ds.newton_shard(
+            self, residual_fn, u0_owned,
+            jac_diag_fn=jac_diag_fn, tol=tol, atol=atol,
+            max_iter=max_iter, line_search=line_search,
+            lin_maxiter=lin_maxiter, verbose=verbose)
+
+        def _wrap(v):
+            if wrap:
+                return _wrap_owned_shard(
+                    v, self._spec.mesh,
+                    self._spec.placement.partition, int(self._shape[0]))
+            return v
+
+        if adjoint_dLdu is not None:
+            dLdu_owned = (adjoint_dLdu.to_local()
+                          if _is_dtensor(adjoint_dLdu) else adjoint_dLdu)
+            lam = _ds.newton_adjoint_shard(
+                self, u_owned, dLdu_owned, jac_diag_fn,
+                lin_maxiter=lin_maxiter)
+            return _wrap(u_owned), _wrap(lam)
+        return _wrap(u_owned)
+
+    def connected_components_distributed_shard(self):
+        """Distributed connected components on the VertexShard graph.
+
+        Treats the matrix as an undirected adjacency and returns
+        ``(labels_owned, num_components)`` for this rank's owned slice;
+        ``num_components`` and the labelling agree with the
+        single-process / scipy result. See
+        :func:`torch_sla.distributed.graph.connected_components_shard`.
+        """
+        if self._spec is None or not isinstance(
+                self._spec.placement, _VERTEX_SHARDS):
+            raise RuntimeError(
+                "connected_components_distributed_shard() requires a "
+                "VertexShard DSparseTensor.")
+        from .graph import connected_components_shard
+        return connected_components_shard(self)
 
     # ------------------------------------------------------------------ #
     # Shard(0)-space primitives reused by every Krylov method.
@@ -1688,6 +1788,14 @@ class DSparseTensor:
         :func:`distributed_matvec.shard_matvec`."""
         from .matvec import shard_matvec
         return shard_matvec(self, x_owned)
+
+    def _shard_rmatvec(self, y_owned: torch.Tensor) -> torch.Tensor:
+        """Hot-path transpose matvec ``Aᵀ @ y`` in Shard(0) space.
+        See :func:`distributed_matvec.shard_rmatvec`. Requires a
+        structurally symmetric sparsity pattern (all PDE stencils
+        here qualify)."""
+        from .matvec import shard_rmatvec
+        return shard_rmatvec(self, y_owned)
 
     # ------------------------------------------------------------------ #
     # The preconditioner factory + four Krylov methods (CG / BiCGStab /

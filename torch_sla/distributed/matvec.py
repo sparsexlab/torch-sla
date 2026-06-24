@@ -93,6 +93,83 @@ def halo_exchange(D, x: torch.Tensor, partition) -> torch.Tensor:
     return x
 
 
+def reverse_halo_exchange(D, w: torch.Tensor, partition) -> torch.Tensor:
+    """Reverse of :func:`halo_exchange` for transpose matvecs.
+
+    In the forward ``A @ x`` matvec each rank pulls owned-node values
+    from neighbours into its halo slots (``recv_indices``). In a
+    transpose ``Aᵀ @ y`` the local product produces *contributions*
+    sitting in this rank's halo slots that actually belong to the
+    neighbour who owns those nodes; they must be sent back and
+    **accumulated** into the owner's owned slots.
+
+    Communication is the mirror image of the forward exchange:
+
+    * we now **send** the values sitting at ``recv_indices[nid]``
+      (our halo slots for neighbour ``nid``) back to ``nid``;
+    * we **receive** into a scratch buffer and ``index_add_`` them onto
+      ``send_indices[nid]`` (the owned slots neighbour ``nid`` pulled
+      from us in the forward direction).
+
+    This relies on the graph being structurally symmetric (an edge
+    ``i->j`` implies ``j->i`` in the sparsity pattern), which holds for
+    every PDE stencil here. ``w`` is modified in place on the owned
+    slots and returned.
+    """
+    if not _DIST_AVAILABLE or not dist.is_initialized():
+        return w
+
+    device = w.device
+    dtype = w.dtype
+
+    backend = dist.get_backend()
+    my_id = int(partition.partition_id)
+    ordered = sorted(partition.neighbor_partitions, key=int)
+
+    # Build per-neighbour send buffers (values at OUR halo slots) and
+    # recv scratch buffers (incoming contributions to OUR owned slots).
+    send_bufs, send_locs = {}, {}
+    recv_bufs, recv_locs = {}, {}
+    for nid in partition.neighbor_partitions:
+        # In forward exchange recv_indices[nid] are local halo slots we
+        # filled from nid; send_indices[nid] are local owned slots we
+        # sent to nid. For the reverse we swap the two.
+        halo_loc = partition.recv_indices[nid].to(device=device, dtype=torch.int64)
+        owned_loc = partition.send_indices[nid].to(device=device, dtype=torch.int64)
+        send_locs[nid] = halo_loc
+        recv_locs[nid] = owned_loc
+        send_bufs[nid] = torch.empty(int(halo_loc.numel()), dtype=dtype, device=device)
+        recv_bufs[nid] = torch.empty(int(owned_loc.numel()), dtype=dtype, device=device)
+
+    for nid in partition.neighbor_partitions:
+        torch.index_select(w, 0, send_locs[nid], out=send_bufs[nid])
+
+    if backend == "nccl":
+        ops = []
+        for nid in ordered:
+            ops.append(dist.P2POp(dist.isend, send_bufs[nid], int(nid)))
+            ops.append(dist.P2POp(dist.irecv, recv_bufs[nid], int(nid)))
+        if ops:
+            for req in dist.batch_isend_irecv(ops):
+                req.wait()
+    else:
+        for nid in ordered:
+            nid_i = int(nid)
+            if my_id < nid_i:
+                dist.send(send_bufs[nid], dst=nid_i)
+                dist.recv(recv_bufs[nid], src=nid_i)
+            else:
+                dist.recv(recv_bufs[nid], src=nid_i)
+                dist.send(send_bufs[nid], dst=nid_i)
+
+    # Accumulate incoming contributions onto our owned slots. Zero the
+    # halo slots afterwards (they have been shipped off; the owned-row
+    # slice is what the caller keeps anyway).
+    for nid in partition.neighbor_partitions:
+        w.index_add_(0, recv_locs[nid], recv_bufs[nid])
+    return w
+
+
 def matmul_row_shard(D, x: Any) -> Any:
     """Row-sharded ``D @ x``. Pad owned -> local, halo exchange, local
     SpMV, slice back to owned-row range. Returns ``DTensor[Shard(0)]``
@@ -224,6 +301,51 @@ def shard_matvec(D, x_owned: torch.Tensor) -> torch.Tensor:
         D._y_full_cache = yf
     torch.mv(csr, x_padded, out=yf)
     return yf[:num_owned]
+
+
+def shard_rmatvec(D, y_owned: torch.Tensor) -> torch.Tensor:
+    """Hot-path transpose matvec ``Aᵀ @ y`` in Shard(0) space.
+
+    Mirror of :func:`shard_matvec` using the **reverse** halo exchange.
+    The local block is ``A_local`` of shape ``(num_owned, num_local)``
+    (owned rows, owned+halo cols). Its transpose maps an owned-row
+    vector to a length-``num_local`` contribution vector whose halo
+    entries belong to neighbouring ranks; those are shipped back and
+    accumulated via :func:`reverse_halo_exchange`.
+
+    Steps:
+      1. ``w_full = A_localᵀ @ y_owned``         (num_local entries)
+      2. reverse-halo-exchange: send halo-slot contributions to owners,
+         accumulate incoming contributions onto owned slots
+      3. slice ``[:num_owned]`` -> the owned-row slice of ``Aᵀ y``
+
+    Caches the transposed local CSR on ``D._local_csrT_cache``.
+    """
+    partition = D._spec.placement.partition
+    num_owned = int(partition.owned_nodes.numel())
+    num_local = int(partition.local_to_global.numel())
+    dtype, device = y_owned.dtype, y_owned.device
+
+    if y_owned.shape[0] != num_owned:
+        raise ValueError(
+            f"y shape[0]={y_owned.shape[0]}, expected num_owned={num_owned}")
+
+    # Cache Aᵀ as a (num_local, num_owned) CSR: swap (row, col) of the
+    # local COO. Mirrors the forward CSR-build int32 fast path.
+    csrT = getattr(D, "_local_csrT_cache", None)
+    if csrT is None:
+        st = D._local_tensor
+        # Transpose: rows <- cols (range num_local), cols <- rows (num_owned)
+        indices = torch.stack([st.col_indices.to(torch.int64),
+                               st.row_indices.to(torch.int64)])
+        coo = torch.sparse_coo_tensor(
+            indices, st.values, (num_local, num_owned)).coalesce()
+        csrT = coo.to_sparse_csr()
+        D._local_csrT_cache = csrT
+
+    w_full = torch.mv(csrT, y_owned)        # (num_local,)
+    reverse_halo_exchange(D, w_full, partition)
+    return w_full[:num_owned].contiguous()
 
 
 def matmul_batch_shard(D, x):
