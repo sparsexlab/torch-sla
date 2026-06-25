@@ -115,6 +115,7 @@ torch-sla 非常适合:
    operations
    architecture
    backends
+   tips
    examples
    benchmarks
    torch_sla

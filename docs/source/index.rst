@@ -99,6 +99,7 @@ To take gradients, set ``requires_grad`` on the values (or use the functional
    operations
    architecture
    backends
+   tips
    examples
    benchmarks
    torch_sla
