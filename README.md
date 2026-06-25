@@ -18,23 +18,23 @@
 </p>
 
 <p align="center">
-  <a href="https://www.torchsla.com/introduction.html">📖 Introduction</a> •
-  <a href="https://www.torchsla.com/installation.html">🔧 Installation</a> •
-  <a href="https://www.torchsla.com/torch_sla.html">📚 API Reference</a> •
-  <a href="https://www.torchsla.com/examples.html">💡 Examples</a> •
-  <a href="https://www.torchsla.com/benchmarks.html">📊 Benchmarks</a>
+  <a href="https://www.torchsla.com/introduction.html">Introduction</a> •
+  <a href="https://www.torchsla.com/installation.html">Installation</a> •
+  <a href="https://www.torchsla.com/torch_sla.html">API Reference</a> •
+  <a href="https://www.torchsla.com/examples.html">Examples</a> •
+  <a href="https://www.torchsla.com/benchmarks.html">Benchmarks</a>
 </p>
 
 ## Features
 
-- 🔥 **Differentiable**: Full gradient support through `torch.autograd`
-- 🚀 **6 Verified Backends**: `pytorch` native Krylov (CPU/CUDA/ROCm), `scipy` (CPU), `cudss` (NVIDIA CUDA), `strumpack` direct (CPU/CUDA/ROCm), `pyamg` (CPU), `amgx` (NVIDIA CUDA) — all checked to ‖Ax−b‖/‖b‖ at/near machine precision
-- 📦 **Batched Operations**: Support for batched sparse tensors `[..., M, N, ...]`
-- 🎯 **Property Detection**: Auto-detect symmetry and positive definiteness
-- ⚡ **High Performance**: Auto-selects best solver based on device, dtype, and problem size
-- 🌐 **Distributed**: Domain decomposition with halo exchange (CFD/FEM style)
-- 🔧 **Easy to Use**: `SparseTensor` class with solve, norm, eigs methods
-- 🧮 **Nonlinear Solve**: Adjoint-based Newton/Anderson solvers with implicit differentiation
+- **Differentiable**: gradients flow through solves, factorizations, and eigensolves via `torch.autograd`
+- **Six verified backends**: `pytorch` native Krylov (CPU/CUDA/ROCm), `scipy` (CPU), `cudss` (NVIDIA CUDA), `strumpack` direct (CPU/CUDA/ROCm), `pyamg` (CPU), `amgx` (NVIDIA CUDA) — each checked to ‖Ax−b‖/‖b‖ at or near machine precision
+- **Batched operations**: batched sparse tensors `[..., M, N, ...]`
+- **Property detection**: auto-detect symmetry and positive definiteness
+- **Solver auto-selection**: picks a backend and method from the device, dtype, and problem size
+- **Distributed**: domain decomposition with halo exchange (CFD/FEM style)
+- **Two classes**: `SparseTensor` (single process) and `DSparseTensor` (distributed), exposing solve, norm, eigs, and more
+- **Nonlinear solve**: adjoint-based Newton/Anderson with implicit differentiation
 
 ## Installation
 
@@ -369,7 +369,7 @@ print(f.grad)  # ∂L/∂f via implicit differentiation
 - Memory-efficient adjoint method (no Jacobian storage)
 - Jacobian-free Newton-Krylov via autograd
 - Multiple parameters with mixed requires_grad
-- Seamless integration with `SparseTensor` class
+- Integrates with the `SparseTensor` class
 
 ## Matrix Operations
 
