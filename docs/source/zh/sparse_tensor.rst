@@ -1,5 +1,9 @@
+SparseTensor
+============
+
 .. note::
 
-   **中文翻译进行中 (Translation in progress).** 以下为英文原文内容。
+   本页中文翻译尚未完成,请查看 `英文版本 <../sparse_tensor.html>`_。
 
-.. include:: ../sparse_tensor.rst
+   This page has not been translated yet — please see the
+   `English version <../sparse_tensor.html>`_.
