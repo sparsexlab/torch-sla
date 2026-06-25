@@ -1,6 +1,15 @@
 #!/usr/bin/env python
 """Comprehensive scaling + capacity benchmark for EVERY public torch-sla op.
 
+NOTE: each headline op now ALSO has its own thin, independently-runnable scaling
+benchmark under ``benchmarks/scaling/ops/`` (e.g. ``ops/solve_cg.py``,
+``ops/eigsh.py``, ``ops/svd.py``), each emitting its own
+``assets/benchmarks/<op>_scaling.png``. Those per-op files REUSE the setup/verify
+functions defined in this module (imported via ``ops/setups.py``). Run them all
+with ``python benchmarks/scaling/ops/run_all.py``. This module is kept as the
+combined multi-panel + max-capacity-probe view and as the home of the shared
+setup functions.
+
 For each op, over a poisson_2d size sweep (DOF = side**2, nnz ~ 5*DOF), measure
   - time (median of reps, after warmup)
   - throughput (DOF / s)
