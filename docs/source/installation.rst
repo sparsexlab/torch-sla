@@ -40,6 +40,11 @@ run CPU solvers out of the box. GPU users can pick the backend(s) they need:
     # CPU users (all platforms, including macOS):
     pip install torch-sla[pyamg]    # + PyAMG (CPU AMG setup + on-device V-cycle)
 
+    # STRUMPACK direct solver (CPU/CUDA/ROCm) and AmgX (NVIDIA GPU AMG/Krylov)
+    # are NOT pip extras — they are prebuilt wheels on GitHub Releases (see below):
+    #   https://github.com/sparsexlab/torch-strumpack/releases
+    #   https://github.com/sparsexlab/torch-amgx/releases
+
     # Full installation with all *PyPI-installable* runtime backends
     # (does not include dev/docs; the native torch-amgx / torch-strumpack
     #  backends are GitHub-Release wheels — see "Prebuilt wheels" below)
@@ -54,8 +59,9 @@ run CPU solvers out of the box. GPU users can pick the backend(s) they need:
 .. note::
 
    The two **native (compiled) backends** — ``torch-amgx`` (NVIDIA AmgX)
-   and ``torch-strumpack`` (STRUMPACK) — are **not on PyPI**. They are
-   PyTorch C++/CUDA extensions and are published as prebuilt wheels on
+   and ``torch-strumpack`` (STRUMPACK) — are **not on PyPI** and are **not
+   pip extras**. In particular, ``torch-sla[all]`` does **not** pull them in.
+   They are PyTorch C++/CUDA extensions published as prebuilt wheels on
    **GitHub Releases**. Pick the wheel that matches *both* your CUDA
    version *and* your installed PyTorch version — see
    :ref:`prebuilt-native-wheels` below.
@@ -74,8 +80,10 @@ Prebuilt wheels: torch-amgx & torch-strumpack
   ``0_cu128``. The cu12.8 wheels include NVIDIA Blackwell (``sm_100`` /
   ``sm_120``).
 * **torch-strumpack** — https://github.com/sparsexlab/torch-strumpack/releases —
-  Linux (cpu / cuda / rocm) + macOS arm64, Python 3.10-3.13. **No Windows
-  build** — STRUMPACK needs a Fortran compiler, which MSVC does not provide.
+  Linux (cpu / cuda / rocm) + macOS arm64, Python 3.10-3.13. **Windows (CPU) is
+  supported** — STRUMPACK builds on Windows with ``clang-cl`` (C/C++) + ``flang``
+  (Fortran) from conda-forge, linked against MSVC-built PyTorch (a clean-env solve
+  gives relative residual ~1.7e-16). A prebuilt Windows wheel via CI is being added.
 
 .. warning::
 
@@ -108,14 +116,15 @@ try to resolve a non-existent PyPI package):
 
 After install, confirm the backend loaded with ``torch_sla.show_backends()``.
 
-.. raw:: html
+.. admonition:: Verify your environment
 
-   <div class="recommendation-box">
-     <h4><span class="gradient-text">Verify your environment</span></h4>
-     <p>After installation, you can inspect which backends are available on your machine:</p>
-     <pre><code>import torch_sla
-torch_sla.show_backends()</code></pre>
-   </div>
+   After installation, you can inspect which backends are available on your
+   machine:
+
+   .. code-block:: python
+
+      import torch_sla
+      torch_sla.show_backends()
 
 Backend Requirements
 --------------------
@@ -140,7 +149,9 @@ Backend Requirements
      - Portable multifrontal sparse **direct** solver (multifrontal LU,
        real + complex, full autograd). Runs on **CPU / CUDA / ROCm**
        (Linux) + macOS arm64 — the direct-solver path on AMD ROCm where
-       cuDSS is unavailable. **No PyPI / Windows wheel** (needs Fortran).
+       cuDSS is unavailable. **Not on PyPI.** Windows (CPU) is supported —
+       STRUMPACK builds with ``clang-cl`` + ``flang``; a prebuilt Windows
+       wheel via CI is being added.
    * - ``cudss``
      - ``pip install nvmath-python[cu12]``
      - Best for medium-scale GPU problems (10K-2M DOF). NVIDIA CUDA only.
@@ -182,9 +193,9 @@ the fastest path for each environment.
    * - **Windows + NVIDIA GPU**
      - ``pip install torch-sla[cudss]`` + AmgX release wheel
        (:ref:`prebuilt-native-wheels`)
-     - cuDSS + AmgX ship Windows wheels. **STRUMPACK has no Windows build**
-       (it needs a Fortran compiler MSVC lacks) — use cuDSS / pytorch for
-       direct / iterative solves there.
+     - cuDSS + AmgX ship Windows wheels. **STRUMPACK now builds on Windows
+       (CPU)** via ``clang-cl`` + ``flang`` (prebuilt Windows wheel via CI
+       pending); cuDSS / pytorch cover GPU direct / iterative solves there.
    * - **Linux + AMD / Intel GPU**
      - ``pip install torch-sla[pyamg]`` + STRUMPACK rocm release wheel
        (:ref:`prebuilt-native-wheels`)

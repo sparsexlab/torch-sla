@@ -24,12 +24,52 @@ def solve(
     tol: float = 1e-12,
     verbose: bool = False,
 ) -> torch.Tensor:
-    """
-    Solve the sparse linear system Ax = b.
-    
+    r"""
+    Solve the sparse linear system :math:`Ax = b`.
+
+    .. math::
+
+        A x = b \quad\Longrightarrow\quad x = A^{-1} b
+
     Automatically handles batched tensors: if A is [...batch, M, N] and
     b is [...batch, M], returns x with shape [...batch, N].
-    
+
+    Algorithm
+    ---------
+    Dispatches (via :func:`torch_sla.linear_solve.spsolve`) to either a
+    **direct** factorization (sparse LU / Cholesky / LDLᵀ) or a **Krylov**
+    iterative method (CG for SPD, MINRES for symmetric-indefinite,
+    BiCGStab / GMRES for general). ``method="auto"`` inspects symmetry and
+    positive-definiteness to pick one. Krylov CG sketch:
+
+    .. code-block:: text
+
+        r = b - A @ x;  p = r;  rs = <r, r>
+        repeat until ||r|| <= atol:
+            Ap   = A @ p                 # one sparse matvec / iteration
+            alpha = rs / <p, Ap>
+            x    += alpha * p
+            r    -= alpha * Ap
+            rs_new = <r, r>
+            p    = r + (rs_new / rs) * p
+            rs   = rs_new
+
+    Complexity
+    ----------
+    Krylov: time :math:`O(m \cdot nnz)` for ``m`` iterations, space
+    :math:`O(n + nnz)`. Direct factorization: time between
+    :math:`O(n^{1.5})` (2-D) and :math:`O(n^{2})` (3-D), space
+    :math:`O(n\log n)` to :math:`O(n^{4/3})` for the fill-in factors.
+
+    Backward
+    --------
+    Differentiable via the **adjoint method**: the backward pass solves
+    :math:`A^{H}\lambda = \partial L/\partial x` (reusing the same
+    factorization / Krylov operator) and accumulates
+    :math:`\partial L/\partial A = -\lambda\, x^{H}`. This adds only
+    :math:`O(1)` autograd graph nodes regardless of the iteration count
+    ``m`` (one extra solve, not ``m`` recorded matvecs).
+
     Parameters
     ----------
     b : torch.Tensor
@@ -70,17 +110,24 @@ def solve(
     
     Examples
     --------
-    >>> # Simple solve
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> # 3x3 SPD matrix  A = diag(2,3,4)  (stored as 3 diagonal entries)
+    >>> val = torch.tensor([2.0, 3.0, 4.0])
+    >>> row = torch.tensor([0, 1, 2])
+    >>> col = torch.tensor([0, 1, 2])
     >>> A = SparseTensor(val, row, col, (3, 3))
-    >>> b = torch.randn(3)
-    >>> x = A.solve(b)
-    
-    >>> # Batched solve
-    >>> A_batch = SparseTensor(val_batch, row, col, (4, 3, 3))
-    >>> b_batch = torch.randn(4, 3)
-    >>> x_batch = A_batch.solve(b_batch)
-    
-    >>> # Specify backend
+    >>> b = torch.tensor([2.0, 3.0, 4.0])
+    >>> A.solve(b)
+    tensor([1., 1., 1.])
+
+    >>> # Batched solve: A is [4, 3, 3], b is [4, 3] -> x is [4, 3]
+    >>> A_batch = SparseTensor(val.expand(4, 3).clone(), row, col, (4, 3, 3))
+    >>> x_batch = A_batch.solve(b.expand(4, 3).clone())
+    >>> x_batch.shape
+    torch.Size([4, 3])
+
+    >>> # Specify backend / method explicitly
     >>> x = A.solve(b, backend='scipy', method='cg')
     """
     if not self.is_square:
@@ -137,12 +184,37 @@ def solve_batch(
     maxiter: int = 10000,
     tol: float = 1e-12
 ) -> torch.Tensor:
-    """
+    r"""
     Solve with different values but same sparsity structure.
-    
+
+    .. math::
+
+        A_i x_i = b_i,\quad i = 1\ldots B
+        \qquad\text{with } \mathrm{pattern}(A_i)\equiv(\text{row},\text{col})
+
     This is efficient when you have the same structure but different values
-    (e.g., time-stepping, optimization, parameter sweeps).
-    
+    (e.g., time-stepping, optimization, parameter sweeps): the symbolic
+    factorization / sparsity analysis is shared across the batch.
+
+    Algorithm
+    ---------
+    Detect symmetry/SPD once from the first batch element, then loop over
+    the ``B`` value-vectors, calling :func:`spsolve` per system (each reuses
+    the same ``row``/``col`` indices):
+
+    .. code-block:: text
+
+        props = analyze(values[0], row, col)      # symmetry / SPD, once
+        for i in 1..B:
+            x[i] = spsolve(values[i], row, col, b[i], props)
+
+    Complexity
+    ----------
+    ``B`` independent solves: time :math:`O(B \cdot m \cdot nnz)` (Krylov)
+    or :math:`O(B \cdot n^{1.5..2})` (direct); space :math:`O(n + nnz)` per
+    system. Backward mirrors :meth:`solve` (one adjoint solve per system,
+    :math:`O(1)` extra graph nodes each).
+
     Parameters
     ----------
     values : torch.Tensor
@@ -228,19 +300,58 @@ def nonlinear_solve(
     linear_solver: BackendType = 'auto',
     linear_method: MethodType = 'auto',
 ) -> torch.Tensor:
-    """
-    Solve nonlinear equation F(u, A, θ) = 0 with adjoint-based gradients.
-    
+    r"""
+    Solve nonlinear equation :math:`F(u, A, \theta) = 0` with adjoint gradients.
+
+    .. math::
+
+        F(u^\*, A, \theta) = 0,\qquad
+        u_{n+1} = u_n - J(u_n)^{-1} F(u_n),\quad
+        J = \frac{\partial F}{\partial u}
+
     The SparseTensor A is automatically passed as the first parameter to
     the residual function, enabling gradients to flow through A's values.
-    
+
+    Algorithm
+    ---------
+    **Newton-Raphson**: at each step assemble the sparse Jacobian
+    :math:`J = \partial F/\partial u` (explicit ``jac_fn`` or
+    ``torch.autograd.functional.jacobian``) and solve the linear update via
+    :func:`spsolve`; an optional Armijo line search damps the step.
+
+    .. code-block:: text
+
+        u = u0
+        for it in 1..max_iter:
+            F = residual(u, A, *params)
+            if ||F|| <= atol or ||F|| <= tol*||F0||: break
+            J  = jacobian(F, u)            # sparse dF/du
+            du = spsolve(J, -F)            # Newton direction
+            a  = armijo_line_search(u, du) # if line_search
+            u  = u + a * du
+
+    Complexity
+    ----------
+    Time :math:`O(m \cdot \text{solve})` for ``m`` Newton steps, where each
+    ``solve`` is one sparse linear solve (Krylov :math:`O(m'\,nnz)` or
+    direct); space :math:`O(\text{solve})`, i.e. that of a single linear
+    solve plus the Jacobian.
+
+    Backward
+    --------
+    Gradients use the **implicit-function theorem** (not unrolled Newton):
+    backward solves one adjoint system :math:`J^{H}\lambda = \partial L/\partial u`
+    at the converged :math:`u^\*` and back-propagates
+    :math:`\partial L/\partial(\cdot) = -\lambda^{H}\,\partial F/\partial(\cdot)`.
+    This is :math:`O(1)` extra graph nodes regardless of ``m``.
+
     Parameters
     ----------
     residual_fn : Callable
-        Function F(u, A, *params) -> residual tensor.
+        Function ``F(u, A, *params)`` -> residual tensor.
         - u: Current solution estimate
         - A: This SparseTensor (passed automatically)
-        - *params: Additional parameters with requires_grad=True
+        - ``*params``: Additional parameters with requires_grad=True
     u0 : torch.Tensor
         Initial guess for solution.
     *params : torch.Tensor
@@ -342,12 +453,47 @@ def eigs(
     sigma: Optional[float] = None,
     return_eigenvectors: bool = True
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """
-    Compute k eigenvalues and eigenvectors.
-    
-    For batched tensors, computes for each batch element.
-    For CUDA tensors, uses LOBPCG algorithm.
-    
+    r"""
+    Compute k eigenvalues and eigenvectors of a (general) sparse matrix.
+
+    .. math::
+
+        A v_i = \lambda_i v_i,\qquad i = 1\ldots k
+
+    For batched tensors, computes for each batch element. Symmetric
+    matrices (and ``which`` in ``{"LA","SA"}``) are routed to the more
+    efficient :meth:`eigsh`.
+
+    Algorithm
+    ---------
+    A subspace iteration (**LOBPCG** for symmetric / Hermitian operators;
+    see :func:`_lobpcg_core`) projects ``A`` onto a small search space and
+    repeatedly solves the tiny dense Rayleigh-Ritz problem:
+
+    .. code-block:: text
+
+        X = orthonormal random block, columns ~ k
+        repeat until Ritz residual small:
+            AX = A @ X                       # k sparse matvecs
+            H  = X^H A X                     # small (m x m) Gram matrix
+            (theta, C) = eigh(H)             # dense Rayleigh-Ritz
+            X  = orthonormalize([X | (AX - X theta) | P])  # X | residual | conj-dir
+        return theta[:k], X[:k]
+
+    Complexity
+    ----------
+    Time :math:`O(m\,k\,nnz)` (``m`` outer iterations, ``k`` matvecs each);
+    space :math:`O(k n + nnz)` for the block of ``k`` Ritz vectors plus the
+    matrix.
+
+    Backward
+    --------
+    Differentiable via the **adjoint method** with
+    :math:`\partial L/\partial A = \sum_i (\partial L/\partial\lambda_i)\,
+    v_i v_i^{H}` (eigenvalue part); :math:`O(1)` extra graph nodes,
+    independent of the iteration count. For complex eigenvalues only the
+    real part is differentiable.
+
     Parameters
     ----------
     k : int, optional
@@ -366,9 +512,9 @@ def eigs(
     Returns
     -------
     eigenvalues : torch.Tensor
-        Shape [k] for non-batched, [*batch_shape, k] for batched.
+        Shape [k] for non-batched, ``[*batch_shape, k]`` for batched.
     eigenvectors : torch.Tensor or None
-        Shape [M, k] for non-batched, [*batch_shape, M, k] for batched.
+        Shape [M, k] for non-batched, ``[*batch_shape, M, k]`` for batched.
         None if return_eigenvectors is False.
     
     Notes
@@ -384,10 +530,16 @@ def eigs(
     
     Examples
     --------
-    >>> A = SparseTensor(val.requires_grad_(True), row, col, (n, n))
-    >>> eigenvalues, eigenvectors = A.eigs(k=3)
-    >>> loss = eigenvalues.real.sum()  # For complex eigenvalues
-    >>> loss.backward()
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> # A = diag(1, 2, 3, 4): eigenvalues are the diagonal entries
+    >>> d = torch.tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+    >>> idx = torch.arange(4)
+    >>> A = SparseTensor(d, idx, idx, (4, 4))
+    >>> evals, evecs = A.eigs(k=2, which="LM")  # two largest-magnitude
+    >>> evals.detach().sort().values
+    tensor([3., 4.])
+    >>> evals.real.sum().backward()  # differentiable w.r.t. A.values
     """
     M, N = self.sparse_shape
     
@@ -428,11 +580,44 @@ def eigsh(
     sigma: Optional[float] = None,
     return_eigenvectors: bool = True
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """
-    Compute k eigenvalues for symmetric matrices.
-    
-    More efficient than eigs() for symmetric matrices.
-    
+    r"""
+    Compute k eigenvalues for symmetric / Hermitian matrices.
+
+    .. math::
+
+        A v_i = \lambda_i v_i,\quad A = A^{H},\qquad i = 1\ldots k
+
+    More efficient than :meth:`eigs` for symmetric matrices: it exploits
+    :math:`A=A^{H}` so all Ritz values are real and a single ``eigh`` per
+    iteration suffices.
+
+    Algorithm
+    ---------
+    **LOBPCG** (Knyazev 2001; see :func:`_lobpcg_core`) -- locally optimal
+    block preconditioned conjugate gradient. Maintains a 3-block subspace
+    ``[X | residual | conjugate-direction]`` and minimizes the Rayleigh
+    quotient over it each step:
+
+    .. code-block:: text
+
+        X = orthonormal random block (m >= k columns)
+        repeat until ||A x_i - lambda_i x_i|| <= tol*|lambda_i|:
+            theta, X = rayleigh_ritz(A, [X | R | P])  # dense eigh on Gram
+            R = A @ X - X * theta                     # block residual
+            P = conjugate direction (Knyazev eq. 7)
+        return theta[:k], X[:k]
+
+    Complexity
+    ----------
+    Time :math:`O(m\,k\,nnz)`; space :math:`O(k n + nnz)`.
+
+    Backward
+    --------
+    Adjoint method:
+    :math:`\partial L/\partial A = \sum_i (\partial L/\partial\lambda_i)\,
+    v_i v_i^{\top}`; :math:`O(1)` extra graph nodes regardless of the
+    iteration count.
+
     Parameters
     ----------
     k : int, optional
@@ -450,9 +635,9 @@ def eigsh(
     Returns
     -------
     eigenvalues : torch.Tensor
-        Shape [k] for non-batched, [*batch_shape, k] for batched.
+        Shape [k] for non-batched, ``[*batch_shape, k]`` for batched.
     eigenvectors : torch.Tensor or None
-        Shape [M, k] for non-batched, [*batch_shape, M, k] for batched.
+        Shape [M, k] for non-batched, ``[*batch_shape, M, k]`` for batched.
     
     Notes
     -----
@@ -473,10 +658,16 @@ def eigsh(
     
     Examples
     --------
-    >>> A = SparseTensor(val.requires_grad_(True), row, col, (n, n))
-    >>> eigenvalues, eigenvectors = A.eigsh(k=3)
-    >>> loss = eigenvalues.sum()
-    >>> loss.backward()  # Computes ∂loss/∂val
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> # Symmetric A = diag(1, 2, 3, 4)
+    >>> d = torch.tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+    >>> idx = torch.arange(4)
+    >>> A = SparseTensor(d, idx, idx, (4, 4))
+    >>> evals, evecs = A.eigsh(k=2, which="SA")  # two smallest algebraic
+    >>> evals.detach().sort().values
+    tensor([1., 2.])
+    >>> evals.sum().backward()   # computes d(loss)/d(A.values)
     """
     M, N = self.sparse_shape
     
@@ -507,31 +698,78 @@ def eigsh(
     )
 
 def svd(self, k: int = 6) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Compute truncated SVD.
-    
+    r"""
+    Compute truncated (rank-``k``) singular value decomposition.
+
+    .. math::
+
+        A \approx U \Sigma V^{\top},\qquad
+        \Sigma = \mathrm{diag}(\sigma_1 \ge \cdots \ge \sigma_k \ge 0)
+
+    Algorithm
+    ---------
+    A **Lanczos bidiagonalization** (``scipy.sparse.linalg.svds`` / ARPACK
+    on CPU) builds a Krylov subspace from sparse matvecs against ``A`` and
+    ``Aᵀ`` and extracts the ``k`` dominant singular triplets from the small
+    bidiagonal factor:
+
+    .. code-block:: text
+
+        build Krylov basis via alternating  v -> A v,  u -> A^T u
+        B = bidiagonal projection of A onto that basis
+        (U_b, S, V_b) = dense_svd(B)         # small problem
+        U = Q_left @ U_b;  V = Q_right @ V_b
+        return U[:, :k], S[:k], V[:, :k]^T
+
+    Complexity
+    ----------
+    Time :math:`O(m\,k\,nnz)` (``m`` Lanczos steps); space
+    :math:`O(k n + nnz)`.
+
+    Backward
+    --------
+    Adjoint method: the singular-value gradient flows through the stored
+    pattern as
+    :math:`\partial L/\partial A_{rc} = \sum_i (\partial L/\partial\sigma_i)\,
+    U_{r i} V_{c i}`; :math:`O(1)` extra graph nodes.
+
     Parameters
     ----------
     k : int, optional
         Number of singular values to compute. Default: 6.
-        
+
     Returns
     -------
     U : torch.Tensor
-        Left singular vectors. Shape [M, k] or [*batch_shape, M, k].
+        Left singular vectors. Shape [M, k] or ``[*batch_shape, M, k]``.
     S : torch.Tensor
-        Singular values. Shape [k] or [*batch_shape, k].
+        Singular values. Shape [k] or ``[*batch_shape, k]``.
     Vt : torch.Tensor
-        Right singular vectors. Shape [k, N] or [*batch_shape, k, N].
-    
+        Right singular vectors. Shape [k, N] or ``[*batch_shape, k, N]``.
+
     Notes
     -----
     **Gradient Support:**
-    
-    - CUDA: Fully differentiable (uses power iteration with PyTorch operations)
-    - CPU: NOT differentiable (uses SciPy which breaks gradient chain)
-    
-    For differentiable SVD on CPU, use `A.to_dense()` and `torch.linalg.svd()`.
+
+    - CUDA: not currently supported (raises ``NotImplementedError``; move
+      to CPU first).
+    - CPU: singular values are differentiable via the adjoint above; the
+      singular *vectors* break the gradient chain (SciPy forward).
+
+    For fully differentiable SVD on CPU, use ``A.to_dense()`` and
+    ``torch.linalg.svd()``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> # A = diag(4, 1, 3): singular values are |diagonal|, sorted desc
+    >>> d = torch.tensor([4.0, 1.0, 3.0])
+    >>> idx = torch.arange(3)
+    >>> A = SparseTensor(d, idx, idx, (3, 3))
+    >>> U, S, Vt = A.svd(k=2)
+    >>> S.detach().round().sort().values
+    tensor([3., 4.])
     """
     M, N = self.sparse_shape
 
@@ -602,18 +840,56 @@ def svd(self, k: int = 6) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return U, S, Vt
 
 def condition_number(self, ord: int = 2) -> torch.Tensor:
-    """
-    Estimate condition number.
-    
+    r"""
+    Estimate the condition number :math:`\kappa(A)`.
+
+    .. math::
+
+        \kappa_2(A) = \frac{\sigma_{\max}(A)}{\sigma_{\min}(A)},\qquad
+        \kappa_p(A) = \lVert A\rVert_p\,\lVert A^{-1}\rVert_p
+
+    Algorithm
+    ---------
+    For ``ord=2`` take the ratio of the extreme singular values from a
+    truncated :meth:`svd` (Lanczos). For other orders, estimate
+    :math:`\lVert A^{-1}\rVert` from a single linear solve against a
+    random unit vector:
+
+    .. code-block:: text
+
+        if ord == 2:
+            S = svd(A).singular_values
+            return S.max() / S.min()
+        else:
+            e = random_unit_vector()
+            x = A.solve(e)                  # ~ ||A^{-1}|| estimate
+            return ||A||_ord * ||x|| / ||e||
+
+    Complexity
+    ----------
+    Time :math:`O(m\,nnz)` (one Lanczos SVD or one Krylov solve), space
+    :math:`O(n + nnz)`.
+
     Parameters
     ----------
     ord : int, optional
         Norm order for condition number. Default: 2 (spectral).
-        
+
     Returns
     -------
     torch.Tensor
-        Condition number. Shape [] or [*batch_shape].
+        Condition number. Shape [] or ``[*batch_shape]``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> # A = diag(1, 2, 4): kappa_2 = sigma_max / sigma_min = 4 / 1
+    >>> d = torch.tensor([1.0, 2.0, 4.0])
+    >>> idx = torch.arange(3)
+    >>> A = SparseTensor(d, idx, idx, (3, 3))
+    >>> A.condition_number(ord=2).round()
+    tensor(4.)
     """
     M, N = self.sparse_shape
     
@@ -645,17 +921,44 @@ def condition_number(self, ord: int = 2) -> torch.Tensor:
     return norm_A * x.norm() / e.norm()
 
 def det(self) -> torch.Tensor:
-    """
+    r"""
     Compute determinant of the sparse matrix with gradient support.
-    
-    Uses LU decomposition (CPU) or dense conversion (CUDA) to compute 
+
+    .. math::
+
+        \det(A) = \prod_i U_{ii}\quad\text{from } PA = LU,
+        \qquad U_{ii} = \text{pivots}
+
+    Uses LU decomposition (CPU) or dense conversion (CUDA) to compute
     the determinant efficiently. Supports automatic differentiation via
     the adjoint method.
-    
+
+    Algorithm
+    ---------
+    Sparse LU factorize :math:`PA = LU` and multiply the pivots (``L`` is
+    unit-diagonal), correcting the sign by the permutation parity:
+
+    .. code-block:: text
+
+        P, L, U = sparse_lu(A)
+        det = sign(P) * prod(diag(U))
+
+    Complexity
+    ----------
+    Time :math:`O(n^{1.5})` (2-D fill) to :math:`O(n^{2})` (3-D);
+    space :math:`O(n\log n)` to :math:`O(n^{4/3})` for the LU factors.
+
+    Backward
+    --------
+    Adjoint via Jacobi's formula:
+    :math:`\partial\det(A)/\partial A = \det(A)\,(A^{-\top})`, i.e. the
+    backward reuses the factorization for one transposed solve;
+    :math:`O(1)` extra graph nodes.
+
     Returns
     -------
     torch.Tensor
-        Determinant value. Shape [] for single matrix or [*batch_shape] for batched.
+        Determinant value. Shape [] for single matrix or ``[*batch_shape]`` for batched.
         
     Raises
     ------
@@ -760,30 +1063,107 @@ def det(self) -> torch.Tensor:
 
 
 def logdet(self, **kwargs) -> torch.Tensor:
-    """Log-determinant of this matrix. See :mod:`torch_sla.det`.
+    r"""Log-determinant :math:`\log|\det A|` of this matrix. See :mod:`torch_sla.det`.
 
-    For large SPD matrices, the default ``method='auto'`` selects the
-    Hutchinson stochastic estimator (pure matvec, distributed-friendly).
-    Smaller matrices use Cholesky / LU.
+    .. math::
+
+        \log\lvert\det A\rvert = \sum_i \log\lvert U_{ii}\rvert
+        \;=\; \mathrm{tr}\,\log A
+        \;\approx\; \frac{1}{p}\sum_{j=1}^{p} z_j^{\top}\log(A)\,z_j
+
+    Numerically stable alternative to :meth:`det` (no overflow): works in
+    log-space directly.
+
+    Algorithm
+    ---------
+    Two regimes. **Direct** (small / general): factorize and sum
+    ``log|diag(U)|`` (or ``2*sum log diag(L)`` for Cholesky on SPD).
+    **Stochastic** (large SPD, default ``method='auto'``): the
+    **Hutchinson** estimator approximates :math:`\mathrm{tr}\log A` with
+    matvec-only probes (no factorization, distributed-friendly):
+
+    .. code-block:: text
+
+        # direct
+        P, L, U = sparse_lu(A);  return sum(log|diag(U)|)
+        # stochastic (Hutchinson + matvec log(A) z)
+        for j in 1..p:  acc += z_j^T (log A) z_j   # z_j Rademacher probes
+        return acc / p
+
+    Complexity
+    ----------
+    Direct: time :math:`O(n^{1.5})`–:math:`O(n^{2})`, space
+    :math:`O(n\log n)`–:math:`O(n^{4/3})`. Stochastic: dominated by ``p``
+    matvec sequences, :math:`O(p\,m\,nnz)` time, :math:`O(n+nnz)` space.
+
+    Backward
+    --------
+    Adjoint :math:`\partial \log\lvert\det A\rvert/\partial A = A^{-\top}`;
+    :math:`O(1)` extra graph nodes.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> # A = diag(1, e, e^2): logdet = 0 + 1 + 2 = 3
+    >>> import math
+    >>> d = torch.tensor([1.0, math.e, math.e ** 2])
+    >>> idx = torch.arange(3)
+    >>> A = SparseTensor(d, idx, idx, (3, 3))
+    >>> A.logdet().round()
+    tensor(3.)
     """
     from ..det import logdet as _logdet
     return _logdet(self, **kwargs)
 
 def lu(self) -> "LUFactorization":
-    """
-    Compute LU decomposition for repeated solves.
-    
+    r"""
+    Compute the LU decomposition for repeated solves.
+
+    .. math::
+
+        P A Q = L U
+
+    with ``L`` unit-lower-triangular, ``U`` upper-triangular, and ``P``/``Q``
+    row/column permutations chosen to limit fill-in.
+
+    Algorithm
+    ---------
+    Sparse Gaussian elimination with a fill-reducing reordering (SuperLU /
+    UMFPACK via SciPy). The returned object caches the factors so each
+    subsequent :meth:`~LUFactorization.solve` is just two cheap triangular
+    sweeps:
+
+    .. code-block:: text
+
+        Q = fill_reducing_order(A)          # symbolic
+        P, L, U = factorize(A[:, Q])        # numeric
+        # later, per RHS:
+        solve(b): y = L \\ (P b);  x = Q (U \\ y)
+
+    Complexity
+    ----------
+    Factorization (once): time :math:`O(n^{1.5})`–:math:`O(n^{2})`, space
+    :math:`O(n\log n)`–:math:`O(n^{4/3})` for the factors. Each reuse:
+    :math:`O(nnz(L)+nnz(U))` per right-hand side.
+
     Returns
     -------
     LUFactorization
-        Factorization object with solve() method.
-    
+        Factorization object with a ``solve()`` method.
+
     Examples
     --------
-    >>> A = SparseTensor(val, row, col, (10, 10))
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> d = torch.tensor([2.0, 4.0])
+    >>> idx = torch.arange(2)
+    >>> A = SparseTensor(d, idx, idx, (2, 2))
     >>> lu = A.lu()
-    >>> x1 = lu.solve(b1)
-    >>> x2 = lu.solve(b2)  # Reuses factorization
+    >>> lu.solve(torch.tensor([2.0, 4.0]))
+    tensor([1., 1.])
+    >>> lu.solve(torch.tensor([4.0, 8.0]))   # reuses the factorization
+    tensor([2., 2.])
     """
     if self.is_batched:
         raise NotImplementedError("lu() not supported for batched tensors")

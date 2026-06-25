@@ -6,23 +6,38 @@ for sparse ``A``, computes eigenvalues, SVDs and determinants, and lets
 gradients flow through all of these via ``torch.autograd``. It runs on CPU and
 GPU and dispatches to several solver backends.
 
-What it covers
---------------
+Key features
+------------
 
-- Sparse storage — only the non-zeros are kept, so problems with millions of
-  unknowns stay in memory.
-- Backends — `SciPy <https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html>`_
-  and `PyTorch-native <https://pytorch.org/>`_ on CPU, `cuDSS
-  <https://docs.nvidia.com/cuda/cudss/>`_ on NVIDIA, and STRUMPACK as a portable
-  direct solver on CPU/CUDA/ROCm. Backend and method are chosen independently,
-  and ``solve()`` auto-selects a sensible pair from the device, dtype, and size.
-- Gradients — the backward pass for ``solve``, ``eigsh`` and ``svd`` uses the
-  adjoint method, adding O(1) nodes to the autograd graph rather than one per
-  iteration.
-- Batching — batched sparse tensors with shape ``[..., M, N, ...]``.
-- Property detection — symmetry and positive-definiteness checks feed the
-  automatic solver choice.
-- Distribution — sharded matrices with halo exchange for multi-GPU solves.
+.. list-table::
+   :widths: 22 78
+   :header-rows: 0
+   :class: feature-grid
+
+   * - **Sparse storage**
+     - Only the non-zeros are kept, so problems with millions of unknowns stay
+       in memory; the matrix is stored in COO/CSR, never densified.
+   * - **Multi-backend**
+     - `SciPy <https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html>`_
+       and `PyTorch-native <https://pytorch.org/>`_ on CPU, `cuDSS
+       <https://docs.nvidia.com/cuda/cudss/>`_ on NVIDIA, and STRUMPACK as a
+       portable direct solver on CPU/CUDA/ROCm. Backend and method are chosen
+       independently, and ``solve()`` auto-selects a sensible pair from the
+       device, dtype, and size.
+   * - **Gradients / adjoint**
+     - The backward pass for ``solve``, ``eigsh``, ``svd`` and ``det`` uses the
+       adjoint method, adding O(1) nodes to the autograd graph rather than one
+       per iteration.
+   * - **Batching**
+     - Batched sparse tensors with shape ``[..., M, N, ...]``, plus
+       :class:`~torch_sla.SparseTensorList` for collections with *different*
+       sparsity patterns.
+   * - **Property detection**
+     - Symmetry and positive-definiteness checks feed the automatic solver
+       choice (``matrix_type="auto"``).
+   * - **Distribution**
+     - Row-sharded :class:`~torch_sla.DSparseTensor` with halo exchange for
+       multi-process / multi-GPU solves.
 
 In the 2D Poisson benchmarks below, the PyTorch CG path reaches 169M DOF on one
 GPU; numbers and hardware are in :doc:`benchmarks`.
@@ -39,24 +54,23 @@ From the 2D Poisson benchmarks (measured up to 169M DOF on a single H200):
    * - Problem Size
      - CPU
      - CUDA (NVIDIA)
-     - ROCm (AMD) / Notes
+     - ROCm (AMD)
    * - Small (< 100K DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - Direct solvers, machine precision. ROCm: ``strumpack`` direct solve
-       (cuDSS is NVIDIA-only).
+     - ``strumpack``
    * - Medium (100K - 2M DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - cuDSS is fastest on NVIDIA. ROCm: ``strumpack`` for a GPU direct solve.
+     - ``strumpack``
    * - Large (2M - 169M DOF)
-     - N/A
      - ``pytorch+cg``
-     - **Iterative only**, ~1e-6 precision. ``pytorch+cg`` runs on ROCm too.
+     - ``pytorch+cg``
+     - ``pytorch+cg``
    * - Very Large (> 169M DOF)
-     - N/A
+     - ``DSparseTensor`` multi-process
      - ``DSparseTensor`` multi-GPU
-     - Multi-GPU domain decomposition (CUDA / ROCm)
+     - ``DSparseTensor`` multi-GPU
 
 Key Insights
 ~~~~~~~~~~~~
@@ -248,6 +262,34 @@ CUDA Usage
     
     # For very large problems (DOF > 2M), use iterative
     x = A_cuda.solve(b_cuda, backend='pytorch', method='cg')
+
+.. _configuring-solves:
+
+Configuring solves
+~~~~~~~~~~~~~~~~~~~
+
+:class:`~torch_sla.SolverConfig` bundles a set of :func:`~torch_sla.solve`
+defaults (backend, method, preconditioner, tolerances) and applies them to
+every ``solve`` inside its scope, as a context manager or a decorator.
+Explicit kwargs on a call always win over the scope:
+
+.. code-block:: python
+
+    from torch_sla import solve, SolverConfig
+
+    # Context manager: every solve in the block uses these defaults
+    with SolverConfig(backend="pytorch", method="cg",
+                      preconditioner="amg", atol=1e-8, maxiter=200):
+        for theta in parameters:
+            x = solve(A(theta), b)          # picks up cg + amg + atol
+            x_fast = solve(A(theta), b, atol=1e-4)   # kwarg overrides atol
+
+    # Decorator form attaches the defaults to a function
+    @SolverConfig(backend="cudss", matrix_type="auto")
+    def gpu_step(A, b):
+        return solve(A, b)                  # direct GPU solve by default
+
+For scoped determinant defaults, see :class:`~torch_sla.DetConfig`.
 
 Nonlinear Solve
 ~~~~~~~~~~~~~~~
@@ -465,53 +507,73 @@ nodes rather than one per iteration.
 
 **SparseTensor Gradient Support**
 
+The adjoint column gives the backward rule. For a scalar loss
+:math:`L`, write :math:`g = \partial L/\partial x` for the incoming
+gradient; :math:`A^{H}` is the conjugate transpose.
+
 .. list-table::
-   :widths: 30 10 10 50
+   :widths: 26 8 8 28 30
    :header-rows: 1
 
    * - Operation
      - CPU
      - CUDA
+     - Adjoint / gradient
      - Notes
-   * - ``solve()``
+   * - :meth:`solve() <torch_sla.SparseTensor.solve>`
      - ✓
      - ✓
+     - :math:`A^{H}\lambda = g,\ \partial L/\partial A = -\lambda x^{H}`
      - Adjoint method, O(1) graph nodes
-   * - ``eigsh()`` / ``eigs()``
+   * - :meth:`eigsh() <torch_sla.SparseTensor.eigsh>` / :meth:`eigs() <torch_sla.SparseTensor.eigs>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = \sum_i \bar g_{\lambda_i}\, v_i v_i^{H}` (+ eigenvector term)
      - Adjoint method, O(1) graph nodes
-   * - ``svd()``
+   * - :meth:`det() <torch_sla.SparseTensor.det>` / :meth:`logdet() <torch_sla.SparseTensor.logdet>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = \bar g\,\det(A)\,A^{-\top}` (det); :math:`A^{-\top}` (logdet)
+     - Jacobi's formula, reuses the LU factorization
+   * - :meth:`svd() <torch_sla.SparseTensor.svd>`
+     - ✓
+     - ✓
+     - :math:`\partial L/\partial A = U\,\mathrm{diag}(\bar g_\sigma)\,V^{H}` (+ subspace term)
      - Power iteration, differentiable
-   * - ``nonlinear_solve()``
+   * - :meth:`nonlinear_solve() <torch_sla.SparseTensor.nonlinear_solve>`
      - ✓
      - ✓
-     - Adjoint, params only
-   * - ``@`` (A @ x, SpMV)
+     - :math:`J^{H}\lambda = g,\ \partial L/\partial\theta = -\lambda^{H}\,\partial r/\partial\theta`
+     - Adjoint at the fixed point, params only
+   * - :meth:`@ (A @ x, SpMV) <torch_sla.SparseTensor.__matmul__>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial x = A^{\top}g`
      - Standard autograd
-   * - ``@`` (A @ B, SpSpM)
+   * - :meth:`@ (A @ B, SpSpM) <torch_sla.SparseTensor.__matmul__>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = G\,B^{\top}` (on the sparse pattern)
      - Sparse gradients
    * - ``+``, ``-``, ``*``
      - ✓
      - ✓
+     - Element-wise; gradient passes through the pattern
      - Element-wise ops
-   * - ``T()`` (transpose)
+   * - :meth:`T() (transpose) <torch_sla.SparseTensor.T>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = G^{\top}`
      - View-like, gradients flow through
-   * - ``norm()``, ``sum()``, ``mean()``
+   * - :meth:`norm() <torch_sla.SparseTensor.norm>`, :meth:`sum() <torch_sla.SparseTensor.sum>`, :meth:`mean() <torch_sla.SparseTensor.mean>`
      - ✓
      - ✓
+     - Standard reduction gradients
      - Standard autograd
-   * - ``to_dense()``
+   * - :meth:`to_dense() <torch_sla.SparseTensor.to_dense>`
      - ✓
      - ✓
+     - Scatter dense grad back to the sparse pattern
      - Standard autograd
 
 **DSparseTensor Gradient Support**
@@ -524,19 +586,19 @@ nodes rather than one per iteration.
      - CPU
      - CUDA
      - Notes
-   * - ``D @ x``
+   * - :meth:`D @ x <torch_sla.DSparseTensor.__matmul__>`
      - ✓
      - ✓
-     - Distributed matvec (``VertexShard`` halo exchange / ``BatchShard`` zero-comm)
-   * - ``solve(D, b_dt)``
+     - Distributed matvec, adjoint :math:`A^{\top}g` (``VertexShard`` halo exchange / ``BatchShard`` zero-comm)
+   * - :meth:`D.solve(b_dt) <torch_sla.DSparseTensor.solve>`
      - ✓
      - ✓
-     - Distributed CG / BiCGStab / GMRES / FGMRES / MINRES (``VertexShard``)
-   * - ``D.eigsh(k=)`` / ``eigs()``
+     - Distributed CG / BiCGStab / GMRES / FGMRES / MINRES; adjoint :math:`A^{H}\lambda=g` (``VertexShard``)
+   * - :meth:`D.eigsh(k=) <torch_sla.DSparseTensor.eigsh>`
      - ✓
      - ✓
      - Distributed LOBPCG (``VertexShard``); per-rank batched eigsh (``BatchShard``)
-   * - ``D.solve_batch_shard(b)``
+   * - :meth:`D.solve_batch_shard(b) <torch_sla.DSparseTensor.solve_batch_shard>`
      - ✓
      - ✓
      - Per-rank batched solve (``BatchShard``, zero comm)
@@ -564,22 +626,18 @@ nodes rather than one per iteration.
      - ✓
      - ✓
      - Per-rank ``partition_<rank>.safetensors`` + ``metadata.json``
-   * - ``D.full_tensor()``
+   * - :meth:`D.full_tensor() <torch_sla.DSparseTensor.full_tensor>`
      - ✓
      - ✓
-     - Allgather to a global ``SparseTensor``
+     - Allgather to a global :class:`~torch_sla.SparseTensor`
    * - ``D.det() / .lu() / .svd() / .condition_number()``
      - ✓
      - ✓
      - Falls back to ``full_tensor()`` + single-process compute; emits ``ResourceWarning``
-   * - ``nonlinear_solve()``
+   * - :meth:`D.nonlinear_solve() <torch_sla.DSparseTensor.nonlinear_solve>`
      - ✓
      - ✓
-     - Distributed Newton-Krylov
-   * - ``to_dense()``
-     - ✓
-     - ✓
-     - Gathers data (with warning)
+     - Distributed Newton-Krylov, adjoint :math:`J^{H}\lambda=g`
 
 Notes:
 
@@ -590,21 +648,7 @@ Notes:
 - For ``nonlinear_solve()``, gradients flow to the parameters passed to
   ``residual_fn``.
 
-Performance Tips
-----------------
-
-- float64 converges more reliably with the iterative solvers.
-- For SPD matrices, ``cholesky`` is roughly twice as fast as ``lu``.
-- On CPU, ``scipy+lu`` is the default and gives machine precision.
-- On NVIDIA for problems under ~2M DOF, ``cudss+cholesky`` is the fastest
-  direct solver.
-- For larger problems, ``pytorch+cg`` is the memory-efficient choice and the
-  one that reached 169M DOF on a single GPU.
-- Beyond a single GPU, ``DSparseTensor`` partitions the matrix across devices.
-- For a portable GPU direct solve — including AMD ROCm, where cuDSS is not
-  available — use ``strumpack`` (multifrontal LU on CPU/CUDA/ROCm).
-- For repeated solves with the same matrix, factor once with ``A.lu()`` and
-  reuse it.
+For backend-selection and performance guidance, see :doc:`tips`.
 
 Citation
 --------

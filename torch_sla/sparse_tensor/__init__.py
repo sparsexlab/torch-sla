@@ -13,6 +13,13 @@ from .autograd import (
     SparseSparseMatmulFunction,
 )
 
+# Now that every submodule is imported (no circular-import risk), copy the
+# rich operation docstrings from their implementations (linalg / graph) onto
+# the thin delegating wrappers on ``SparseTensor`` so Sphinx autodoc renders
+# them. See ``core._propagate_op_docstrings``.
+from .core import _propagate_op_docstrings as _propagate_op_docstrings
+_propagate_op_docstrings()
+
 __all__ = [
     "SparseTensor",
     "SparseTensorList",

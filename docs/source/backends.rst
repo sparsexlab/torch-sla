@@ -118,8 +118,10 @@ hardware where cuDSS cannot go — most importantly AMD ROCm GPUs, where
 cuDSS is unavailable. It requires the optional ``torch-strumpack``
 package, published as **prebuilt wheels on GitHub Releases** (not PyPI;
 see :ref:`prebuilt-native-wheels`) for Linux cpu / cuda / rocm and macOS
-arm64. There is **no Windows wheel** — STRUMPACK needs a Fortran compiler
-that MSVC does not provide::
+arm64. **Windows (CPU) is supported** — STRUMPACK builds on Windows with
+``clang-cl`` (C/C++) + ``flang`` (Fortran) from conda-forge, linked against
+MSVC-built PyTorch (a clean-env solve gives relative residual ~1.7e-16); a
+prebuilt Windows wheel via CI is being added::
 
     # Grab the matching wheel from
     #   https://github.com/sparsexlab/torch-strumpack/releases
@@ -155,12 +157,13 @@ which OS each one builds on today.
        (ROCm torch builds report as ``cuda``).
    * - ``strumpack``
      - ✔
-     - --
+     - ✔ (CPU)
      - ✔ (arm64)
      - Multifrontal sparse direct solver (multifrontal LU,
        real + complex). CPU / CUDA / ROCm on Linux + macOS arm64 via
        ``torch-strumpack`` (GitHub-Release wheels,
-       :ref:`prebuilt-native-wheels`). **No Windows** — needs Fortran.
+       :ref:`prebuilt-native-wheels`). **Windows (CPU) supported** — builds
+       with ``clang-cl`` + ``flang``; prebuilt Windows wheel via CI pending.
    * - ``cudss``
      - ✔
      - ✔
@@ -195,6 +198,56 @@ Override via ``backend="..."`` whenever you need exact control (e.g.
 ``backend="cudss"`` to force a direct GPU solve on NVIDIA, or
 ``backend="strumpack"`` for a direct GPU solve on AMD ROCm where cuDSS is
 unavailable).
+
+----
+
+.. _direct-vs-iterative:
+
+Direct vs iterative: accuracy and complexity
+---------------------------------------------
+
+The accuracy tables quote ``~1e-14`` for the direct backends and ``~1e-6``
+for the iterative ones. The gap is structural, not a bug:
+
+* **Direct** solvers factor the matrix (``LU`` / ``Cholesky`` / ``LDL``) and
+  back-substitute. The result is *exact up to floating-point round-off* --
+  for a well-conditioned ``float64`` system the relative residual sits near
+  machine epsilon (``~1e-14``..``1e-16``). There is no convergence knob; you
+  pay the factorization cost once and get a fully accurate answer.
+* **Iterative** solvers (CG, BiCGStab, GMRES, ...) refine a guess until the
+  residual ``‖Ax − b‖ / ‖b‖`` drops below a *tolerance* you set (``atol`` /
+  ``rtol``, default ``~1e-6``). They stop at the tolerance, so the answer is
+  only as accurate as you ask for. Tighten ``atol`` toward ``1e-12`` and the
+  residual follows -- at the cost of more iterations. The ill-conditioning of
+  ``A`` (its condition number) sets how many iterations each digit costs.
+
+So the iterative ``~1e-6`` is a *default stopping point*, not a precision
+ceiling. The trade-off is what makes the iterative path scale: it never forms
+the dense fill-in that a factorization does.
+
+.. list-table:: Direct vs iterative cost (``n`` unknowns, ``nnz`` non-zeros, ``m`` iterations)
+   :widths: 18 27 27 28
+   :header-rows: 1
+
+   * - Solver
+     - Time
+     - Space
+     - Accuracy
+   * - Direct (LU / Cholesky)
+     - :math:`O(n^{1.5})` (2-D) to :math:`O(n^{2})` (3-D)
+     - :math:`O(n\log n)` to :math:`O(n^{4/3})` fill-in
+     - Exact to round-off (``~1e-14``)
+   * - Iterative (CG / GMRES)
+     - :math:`O(m\cdot nnz)`
+     - :math:`O(n + nnz)`
+     - Tolerance-limited (``atol``, default ``~1e-6``)
+
+For a sparse PDE matrix ``nnz = O(n)``, so an iterative sweep costs
+:math:`O(m\,n)` time in :math:`O(n)` memory, while the direct factorization's
+fill-in is what exhausts memory past a few million unknowns (see the
+:doc:`benchmarks`). Pick direct when you need the last digits or have many
+right-hand sides to reuse a factorization on; pick iterative when the matrix
+is large and ``~1e-6`` is enough.
 
 ----
 
