@@ -118,8 +118,10 @@ hardware where cuDSS cannot go — most importantly AMD ROCm GPUs, where
 cuDSS is unavailable. It requires the optional ``torch-strumpack``
 package, published as **prebuilt wheels on GitHub Releases** (not PyPI;
 see :ref:`prebuilt-native-wheels`) for Linux cpu / cuda / rocm and macOS
-arm64. There is **no Windows wheel** — STRUMPACK needs a Fortran compiler
-that MSVC does not provide::
+arm64. **Windows (CPU) is supported** — STRUMPACK builds on Windows with
+``clang-cl`` (C/C++) + ``flang`` (Fortran) from conda-forge, linked against
+MSVC-built PyTorch (a clean-env solve gives relative residual ~1.7e-16); a
+prebuilt Windows wheel via CI is being added::
 
     # Grab the matching wheel from
     #   https://github.com/sparsexlab/torch-strumpack/releases
@@ -155,12 +157,13 @@ which OS each one builds on today.
        (ROCm torch builds report as ``cuda``).
    * - ``strumpack``
      - ✔
-     - --
+     - ✔ (CPU)
      - ✔ (arm64)
      - Multifrontal sparse direct solver (multifrontal LU,
        real + complex). CPU / CUDA / ROCm on Linux + macOS arm64 via
        ``torch-strumpack`` (GitHub-Release wheels,
-       :ref:`prebuilt-native-wheels`). **No Windows** — needs Fortran.
+       :ref:`prebuilt-native-wheels`). **Windows (CPU) supported** — builds
+       with ``clang-cl`` + ``flang``; prebuilt Windows wheel via CI pending.
    * - ``cudss``
      - ✔
      - ✔

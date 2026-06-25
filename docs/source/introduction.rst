@@ -39,24 +39,23 @@ From the 2D Poisson benchmarks (measured up to 169M DOF on a single H200):
    * - Problem Size
      - CPU
      - CUDA (NVIDIA)
-     - ROCm (AMD) / Notes
+     - ROCm (AMD)
    * - Small (< 100K DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - Direct solvers, machine precision. ROCm: ``strumpack`` direct solve
-       (cuDSS is NVIDIA-only).
+     - ``strumpack``
    * - Medium (100K - 2M DOF)
      - ``scipy+lu``
      - ``cudss+cholesky``
-     - cuDSS is fastest on NVIDIA. ROCm: ``strumpack`` for a GPU direct solve.
+     - ``strumpack``
    * - Large (2M - 169M DOF)
-     - N/A
      - ``pytorch+cg``
-     - **Iterative only**, ~1e-6 precision. ``pytorch+cg`` runs on ROCm too.
+     - ``pytorch+cg``
+     - ``pytorch+cg``
    * - Very Large (> 169M DOF)
-     - N/A
+     - ``DSparseTensor`` multi-process
      - ``DSparseTensor`` multi-GPU
-     - Multi-GPU domain decomposition (CUDA / ROCm)
+     - ``DSparseTensor`` multi-GPU
 
 Key Insights
 ~~~~~~~~~~~~

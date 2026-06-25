@@ -42,7 +42,9 @@
   ``0_cu128``；cu12.8 的 wheel 含 Blackwell（``sm_100`` / ``sm_120``）。
 * **torch-strumpack** —— https://github.com/sparsexlab/torch-strumpack/releases
   —— Linux（cpu / cuda / rocm）+ macOS arm64，Python 3.10-3.13。
-  **没有 Windows 版**（STRUMPACK 需要 Fortran 编译器，MSVC 不提供）。
+  **支持 Windows（CPU）** —— STRUMPACK 可在 Windows 上用 conda-forge 的
+  ``clang-cl``（C/C++）+ ``flang``（Fortran）编译，链接 MSVC 构建的 PyTorch
+  （干净环境下求解相对残差约 1.7e-16）；CI 预编译的 Windows wheel 正在添加中。
 
 .. warning::
 

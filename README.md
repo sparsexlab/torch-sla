@@ -48,7 +48,11 @@ pip install torch-sla[cudss]   # + cuDSS (fastest direct solver on NVIDIA)
 # CPU AMG
 pip install torch-sla[pyamg]   # + PyAMG (CPU AMG setup + on-device V-cycle)
 
-# Full installation with all PyPI-installable runtime backends (no dev/docs)
+# NOTE: STRUMPACK (direct, CPU/CUDA/ROCm) and AmgX (NVIDIA GPU) are NOT pip
+# extras — they are prebuilt wheels on GitHub Releases (see next section).
+
+# Full installation with all PyPI-installable runtime backends (no dev/docs;
+# does NOT include the native torch-amgx / torch-strumpack release wheels)
 pip install torch-sla[all]
 
 # From source (for development)
@@ -69,8 +73,10 @@ from GitHub Releases:
   `sm_100`/`sm_120`). Wheel filenames carry a per-CUDA build tag
   `0_cu124` / `0_cu126` / `0_cu128`.
 - **torch-strumpack** — <https://github.com/sparsexlab/torch-strumpack/releases>
-  — Linux (cpu/cuda/rocm) + macOS arm64, py3.10–3.13. **No Windows**
-  (STRUMPACK needs a Fortran compiler that MSVC lacks).
+  — Linux (cpu/cuda/rocm) + macOS arm64, py3.10–3.13. **Windows (CPU) is
+  supported** — STRUMPACK builds with `clang-cl` (C/C++) + `flang` (Fortran)
+  from conda-forge, linked against MSVC-built torch (clean-env solve ≈ 1.7e-16
+  relative residual); a prebuilt Windows wheel via CI is being added.
 
 **ABI caveat:** each wheel is ABI-tied to **both** the CUDA version **and**
 the specific PyTorch version it was built against. You must (a) pick the wheel
@@ -138,12 +144,12 @@ x = A_cuda.solve(b_cuda, backend='pytorch', method='cg')
 
 Based on benchmarks on 2D Poisson equations (tested up to **400M DOF** multi-GPU):
 
-| Problem Size | CPU | CUDA | Notes |
-|-------------|-----|------|-------|
-| **Small (< 100K DOF)** | `scipy+lu` | `cudss+cholesky` | Direct solvers, machine precision |
-| **Medium (100K - 2M DOF)** | `scipy+lu` | `cudss+cholesky` | cuDSS is fastest on GPU |
-| **Large (2M - 169M DOF)** | N/A | `pytorch+cg` | **Iterative only**, ~1e-6 precision |
-| **Very Large (> 169M DOF)** | N/A | `DSparseTensor` multi-GPU | Multi-GPU domain decomposition |
+| Problem Size | CPU | CUDA |
+|-------------|-----|------|
+| **Small (< 100K DOF)** | `scipy+lu` | `cudss+cholesky` |
+| **Medium (100K - 2M DOF)** | `scipy+lu` | `cudss+cholesky` |
+| **Large (2M - 169M DOF)** | `pytorch+cg` | `pytorch+cg` |
+| **Very Large (> 169M DOF)** | `DSparseTensor` multi-process | `DSparseTensor` multi-GPU |
 
 ### Key Insights
 
