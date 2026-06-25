@@ -14,10 +14,10 @@ torch-sla: PyTorch Sparse Linear Algebra
 
 torch-sla solves sparse linear systems :math:`Ax = b` in PyTorch. The matrix
 ``A`` is stored in sparse form, the solve runs on CPU or GPU, and gradients
-flow back through it via ``torch.autograd``. It is meant for workloads that
-already live in PyTorch -- FEM/CFD discretizations, physics-informed networks,
-graph operators -- where you would otherwise copy out to SciPy or PETSc and
-lose the gradient.
+flow back through it via ``torch.autograd``. It targets workloads that already
+live in PyTorch -- FEM/CFD discretizations, physics-informed networks, graph
+operators -- where you would otherwise copy out to SciPy or PETSc and lose the
+gradient.
 
 .. raw:: html
 
@@ -28,25 +28,27 @@ lose the gradient.
      <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
    </p>
 
-What it does
-------------
+The two core classes
+--------------------
 
-- Stores only the non-zeros. A 1M×1M matrix at 1% density holds ~10 billion
-  entries densely; in sparse form it is ~80 MB.
-- Differentiates through the solve. ``solve()``, ``eigsh()``, ``svd()`` and
-  ``det()`` use the adjoint method, so the backward pass adds O(1) nodes to the
-  autograd graph regardless of solver iteration count.
-- Runs on several backends: SciPy and PyTorch-native on CPU, cuDSS on NVIDIA
-  GPUs, and STRUMPACK as a portable direct solver across CPU/CUDA/ROCm. The
-  PyTorch-native iterative solvers and STRUMPACK also run on AMD ROCm.
-- Solves batches: same-pattern matrices in one call (``SparseTensor`` with a
-  batch dimension), or different patterns via ``SparseTensorList``.
-- Shards across GPUs: ``DSparseTensor`` partitions a matrix with domain
-  decomposition and halo exchange, mirroring ``torch.distributed.tensor.DTensor``.
+Everything in torch-sla hangs off two tensor types. Both expose the same
+operation vocabulary (solve, eigsh, matvec, det, ...); they differ only in
+where the matrix lives.
 
-On a 2D Poisson benchmark the PyTorch CG solver scales to 169M unknowns on a
-single H200, and the distributed solver to 400M across three. See
-:doc:`benchmarks` for the full numbers and the hardware they were measured on.
+:class:`~torch_sla.SparseTensor`
+   A single-process sparse matrix in COO form, with an optional batch
+   dimension. Runs on CPU or one GPU, dispatches to SciPy / PyTorch-native /
+   cuDSS / STRUMPACK backends, and is differentiable through every solve.
+   See :doc:`sparse_tensor`.
+
+:class:`~torch_sla.DSparseTensor`
+   A row-partitioned sparse matrix sharded across processes/GPUs with domain
+   decomposition and halo exchange. Mirrors ``torch.distributed.tensor.DTensor``
+   and reuses the single-process operations rank-locally. See
+   :doc:`dsparse_tensor`.
+
+For the per-operation reference -- signatures, examples, sparsity figures,
+scaling plots -- see :doc:`operations`.
 
 Quick start
 -----------
@@ -74,8 +76,8 @@ Move the tensors to the GPU and the solve follows, picking cuDSS on NVIDIA:
 
    x = A.cuda().solve(b.cuda())
 
-To take gradients, use the functional ``spsolve`` (or set ``requires_grad`` on
-the values) and call ``backward()``:
+To take gradients, set ``requires_grad`` on the values (or use the functional
+:func:`~torch_sla.spsolve`) and call ``backward()``:
 
 .. code-block:: python
 
@@ -91,11 +93,14 @@ the values) and call ``backward()``:
 
    introduction
    installation
+   sparse_tensor
+   dsparse_tensor
+   operations
    architecture
-   torch_sla
    backends
    examples
    benchmarks
+   torch_sla
 
 ----
 

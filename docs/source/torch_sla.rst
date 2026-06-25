@@ -17,6 +17,7 @@ The main class for working with sparse matrices. Supports batched operations, au
    :members:
    :undoc-members:
    :show-inheritance:
+   :special-members: __matmul__
 
 SparseTensorList
 ~~~~~~~~~~~~~~~~
@@ -52,6 +53,7 @@ Distributed sparse tensor with domain decomposition support. Uses halo exchange 
    :members:
    :undoc-members:
    :show-inheritance:
+   :special-members: __matmul__
 
 Partition
 ~~~~~~~~~
