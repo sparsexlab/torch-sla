@@ -11,14 +11,27 @@ from .core import SparseTensor
 class SparseTensorList:
     """
     A list of SparseTensors with different structures.
-    
+
     Provides a unified interface for batch operations on matrices
-    with different sparsity patterns. Unlike batched SparseTensor
-    (which requires same structure), SparseTensorList allows
-    each matrix to have different shape and sparsity pattern.
-        
-        Parameters
-        ----------
+    with different sparsity patterns. Unlike a batched
+    :class:`SparseTensor` (which requires every matrix to share one
+    structure), ``SparseTensorList`` lets each matrix have its own
+    shape and sparsity pattern, then dispatches ``solve`` / property
+    checks / elementwise ops over the whole collection.
+
+    You typically get one of these in two ways:
+
+    - Construct it directly from a Python list of
+      :class:`SparseTensor` (or via :meth:`from_coo_list` /
+      :meth:`from_torch_sparse_list`) when you have several
+      independently-patterned matrices to solve together.
+    - As the return value of
+      :meth:`SparseTensor.to_connected_components`, which splits a
+      block-diagonal matrix into one :class:`SparseTensor` per
+      connected component.
+
+    Parameters
+    ----------
     tensors : List[SparseTensor]
         List of SparseTensor objects.
     

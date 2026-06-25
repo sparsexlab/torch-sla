@@ -241,6 +241,33 @@ CUDA 用法
     # 对于超大问题 (DOF > 200万)，使用迭代法
     x = A_cuda.solve(b_cuda, backend='pytorch', method='cg')
 
+.. _zh-configuring-solves:
+
+配置求解
+~~~~~~~~
+
+:class:`~torch_sla.SolverConfig` 把一组 :func:`~torch_sla.solve` 的默认参数
+（后端、方法、预条件子、容差）打包，作为上下文管理器或装饰器应用到作用域内的
+每一次 ``solve``。调用时显式传入的关键字参数始终优先于作用域:
+
+.. code-block:: python
+
+    from torch_sla import solve, SolverConfig
+
+    # 上下文管理器：块内每次 solve 都用这些默认值
+    with SolverConfig(backend="pytorch", method="cg",
+                      preconditioner="amg", atol=1e-8, maxiter=200):
+        for theta in parameters:
+            x = solve(A(theta), b)          # 采用 cg + amg + atol
+            x_fast = solve(A(theta), b, atol=1e-4)   # 关键字覆盖 atol
+
+    # 装饰器形式：把默认值附加到函数
+    @SolverConfig(backend="cudss", matrix_type="auto")
+    def gpu_step(A, b):
+        return solve(A, b)                  # 默认走 GPU 直接求解
+
+行列式的作用域默认值见 :class:`~torch_sla.DetConfig`。
+
 非线性求解
 ~~~~~~~~~~
 
@@ -458,53 +485,72 @@ CUDA 用法
 
 **SparseTensor 梯度支持**
 
+伴随列给出反向传播规则。对标量损失 :math:`L`，记
+:math:`g = \partial L/\partial x` 为传入梯度；:math:`A^{H}` 为共轭转置。
+
 .. list-table::
-   :widths: 30 10 10 50
+   :widths: 26 8 8 28 30
    :header-rows: 1
 
    * - 操作
      - CPU
      - CUDA
+     - 伴随 / 梯度
      - 备注
-   * - ``solve()``
+   * - :meth:`solve() <torch_sla.SparseTensor.solve>`
      - ✓
      - ✓
+     - :math:`A^{H}\lambda = g,\ \partial L/\partial A = -\lambda x^{H}`
      - 伴随法，O(1) 图节点
-   * - ``eigsh()`` / ``eigs()``
+   * - :meth:`eigsh() <torch_sla.SparseTensor.eigsh>` / :meth:`eigs() <torch_sla.SparseTensor.eigs>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = \sum_i \bar g_{\lambda_i}\, v_i v_i^{H}`\ （含特征向量项）
      - 伴随法，O(1) 图节点
-   * - ``svd()``
+   * - :meth:`det() <torch_sla.SparseTensor.det>` / :meth:`logdet() <torch_sla.SparseTensor.logdet>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = \bar g\,\det(A)\,A^{-\top}`\ （det）；:math:`A^{-\top}`\ （logdet）
+     - Jacobi 公式，复用 LU 分解
+   * - :meth:`svd() <torch_sla.SparseTensor.svd>`
+     - ✓
+     - ✓
+     - :math:`\partial L/\partial A = U\,\mathrm{diag}(\bar g_\sigma)\,V^{H}`\ （含子空间项）
      - 幂迭代，可微分
-   * - ``nonlinear_solve()``
+   * - :meth:`nonlinear_solve() <torch_sla.SparseTensor.nonlinear_solve>`
      - ✓
      - ✓
-     - 伴随法，仅参数
-   * - ``@`` (A @ x, SpMV)
+     - :math:`J^{H}\lambda = g,\ \partial L/\partial\theta = -\lambda^{H}\,\partial r/\partial\theta`
+     - 不动点处伴随，仅参数
+   * - :meth:`@ (A @ x, SpMV) <torch_sla.SparseTensor.__matmul__>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial x = A^{\top}g`
      - 标准 autograd
-   * - ``@`` (A @ B, SpSpM)
+   * - :meth:`@ (A @ B, SpSpM) <torch_sla.SparseTensor.__matmul__>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = G\,B^{\top}`\ （在稀疏模式上）
      - 稀疏梯度
    * - ``+``, ``-``, ``*``
      - ✓
      - ✓
+     - 逐元素；梯度沿模式传递
      - 逐元素操作
-   * - ``T()`` (转置)
+   * - :meth:`T() (转置) <torch_sla.SparseTensor.T>`
      - ✓
      - ✓
+     - :math:`\partial L/\partial A = G^{\top}`
      - 类视图，梯度流过
-   * - ``norm()``, ``sum()``, ``mean()``
+   * - :meth:`norm() <torch_sla.SparseTensor.norm>`, :meth:`sum() <torch_sla.SparseTensor.sum>`, :meth:`mean() <torch_sla.SparseTensor.mean>`
      - ✓
      - ✓
+     - 标准规约梯度
      - 标准 autograd
-   * - ``to_dense()``
+   * - :meth:`to_dense() <torch_sla.SparseTensor.to_dense>`
      - ✓
      - ✓
+     - 将稠密梯度散射回稀疏模式
      - 标准 autograd
 
 **DSparseTensor 梯度支持**
@@ -517,34 +563,30 @@ CUDA 用法
      - CPU
      - CUDA
      - 备注
-   * - ``D @ x``
+   * - :meth:`D @ x <torch_sla.DSparseTensor.__matmul__>`
      - ✓
      - ✓
-     - 分布式矩阵向量乘带梯度
-   * - ``solve_distributed()``
+     - 分布式矩阵向量乘，伴随 :math:`A^{\top}g`（``VertexShard`` halo 交换）
+   * - :meth:`D.solve(b) <torch_sla.DSparseTensor.solve>`
      - ✓
      - ✓
-     - 分布式 CG 带梯度
-   * - ``eigsh()`` / ``eigs()``
+     - 分布式 CG / BiCGStab / GMRES，伴随 :math:`A^{H}\lambda=g`
+   * - :meth:`D.eigsh(k=) <torch_sla.DSparseTensor.eigsh>`
      - ✓
      - ✓
      - 分布式 LOBPCG
-   * - ``svd()``
+   * - :meth:`D.nonlinear_solve() <torch_sla.DSparseTensor.nonlinear_solve>`
      - ✓
      - ✓
-     - 分布式幂迭代
-   * - ``nonlinear_solve()``
+     - 分布式 Newton-Krylov，伴随 :math:`J^{H}\lambda=g`
+   * - ``D.norm('fro') / .sum / .mean``
      - ✓
      - ✓
-     - 分布式 Newton-Krylov
-   * - ``norm('fro')``
+     - 跨 rank ``all_reduce`` 分布式规约
+   * - :meth:`D.full_tensor() <torch_sla.DSparseTensor.full_tensor>`
      - ✓
      - ✓
-     - 分布式求和
-   * - ``to_dense()``
-     - ✓
-     - ✓
-     - 收集数据（有警告）
+     - Allgather 到全局 :class:`~torch_sla.SparseTensor`\ （有警告）
 
 **核心特性:**
 
@@ -553,17 +595,7 @@ CUDA 用法
 - DSparseTensor 核心操作无需数据收集
 - ``nonlinear_solve()`` 的梯度流向传递给 ``residual_fn`` 的 *参数*
 
-性能建议
---------
-
-1. **迭代法建议用 float64**: 收敛性更好
-2. **对称正定矩阵用 Cholesky**: 比 LU 快约 2 倍
-3. **CPU 端推荐 scipy+lu**: 速度与精度兼顾
-4. **GPU 小规模问题用 cudss+cholesky**: 200万 DOF 以下最快的直接法
-5. **GPU 大规模问题用 pytorch+cg**: 单卡可达 1.69 亿 DOF
-6. **超大规模用多卡并行**: DSparseTensor 支持域分解，3 卡可达 5 亿+ DOF
-7. **可移植 GPU 直接求解用 strumpack**: 在 CPU/CUDA/ROCm 上提供多波前 LU — 在 cuDSS 不可用的 AMD ROCm 上是首选的直接求解器
-8. **重复求解缓存 LU 分解**: 用 ``A.lu()`` 复用分解结果
+后端选择与性能建议见 :doc:`tips`。
 
 引用
 ----
