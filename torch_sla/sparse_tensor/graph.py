@@ -105,18 +105,49 @@ def _connected_components_labels(
 
 
 def connected_components(self) -> Tuple[torch.Tensor, int]:
-    """
-    Find connected components of the graph represented by this sparse matrix.
+    r"""
+    Find connected components of the graph :math:`G(A)` of this sparse matrix.
 
-    Uses a parallel, pure-torch label-propagation / pointer-jumping
-    (Shiloach-Vishkin style) algorithm: device-agnostic, GPU-ready, with no
-    Python per-edge loop and no ``.cpu()`` round-trip. Treats the matrix as
-    an undirected graph adjacency matrix.
+    .. math::
+
+        G(A) = (V, E),\quad V=\{0,\dots,N-1\},\quad
+        E = \{(i,j) : A_{ij}\neq 0\}
+
+    Partition :math:`V` into maximal subsets connected by ``E`` (treated as
+    undirected). Returns a label per node and the component count.
+
+    Algorithm
+    ---------
+    **FastSV / Shiloach-Vishkin** label propagation with pointer jumping:
+    each node starts as its own root; every round hooks each edge to the
+    minimum neighbouring label, then path-compresses all the way to the
+    root (so convergence is in graph *depth*-independent
+    :math:`O(\log N)` rounds), all vectorized on-device:
+
+    .. code-block:: text
+
+        label[i] = i for all i
+        repeat until labels stable (checksum unchanged):
+            # hooking: each edge pulls the smaller root label
+            label[dst] = min(label[dst], label[src])   # scatter_reduce amin
+            # pointer jumping: label[i] = label[label[i]] until rooted
+            compress_to_roots(label)
+        relabel to contiguous 0..num_components-1
+
+    Complexity
+    ----------
+    Time :math:`O(nnz \log N)` (``O(log N)`` rounds, each ``O(nnz)``
+    scatter); space :math:`O(N)` for the label array.
+
+    Backward
+    --------
+    **Non-differentiable**: the output is a discrete integer labelling
+    (no gradient flows through component assignment).
 
     Returns
     -------
     labels : torch.Tensor
-        Component label for each node, shape [N] (or [*batch, N] for batched
+        Component label for each node, shape [N] (or ``[*batch, N]`` for batched
         input). Labels are in range [0, num_components), long, on
         ``self.device``.
     num_components : int
@@ -130,14 +161,22 @@ def connected_components(self) -> Tuple[torch.Tensor, int]:
     - Self-loops are ignored for connectivity
     - Batched: all batch items share row/col indices (same structure), so
       the component partition is the same for every batch item. The returned
-      ``labels`` is broadcast to shape [*batch, N].
+      ``labels`` is broadcast to shape ``[*batch, N]``.
 
     Examples
     --------
-    >>> # Block diagonal matrix with 3 components
-    >>> A = SparseTensor(val, row, col, (100, 100))
+    >>> import torch
+    >>> from torch_sla import SparseTensor
+    >>> # Edge 0-1 and isolated node 2  ->  components {0,1} and {2}
+    >>> row = torch.tensor([0, 1])
+    >>> col = torch.tensor([1, 0])
+    >>> val = torch.ones(2)
+    >>> A = SparseTensor(val, row, col, (3, 3))
     >>> labels, num_comp = A.connected_components()
-    >>> print(f"Found {num_comp} components")
+    >>> num_comp
+    2
+    >>> labels.tolist()
+    [0, 0, 1]
     """
     M, N = self.sparse_shape
     if M != N:
@@ -149,7 +188,7 @@ def connected_components(self) -> Tuple[torch.Tensor, int]:
 
     if self.is_batched:
         # Same structure across the batch -> same partition. Broadcast to
-        # [*batch, N] so the output has a per-batch row.
+        # ``[*batch, N]`` so the output has a per-batch row.
         batch_shape = self.batch_shape
         labels = labels.reshape(*([1] * len(batch_shape)), N).expand(*batch_shape, N).contiguous()
 

@@ -691,6 +691,60 @@ class SparseTensor:
         return _impl(self, *args, **kwargs)
 
     def __matmul__(self, *args, **kwargs):
+        r"""Matrix product ``A @ other`` (matvec / SpMM / sparse-sparse).
+
+        .. math::
+
+            y = A x \quad(\text{vector}),\qquad
+            Y = A X \quad(\text{dense block}),\qquad
+            C = A B \quad(\text{sparse-sparse})
+
+        Algorithm
+        ---------
+        For a dense right operand, an index-scatter SpMV/SpMM accumulates
+        each stored entry's contribution; sparse-sparse routes to a
+        gather-scatter sparse-times-sparse product. Vectorized, no Python
+        per-nonzero loop:
+
+        .. code-block:: text
+
+            y = zeros(M)
+            # one fused scatter-add over all nonzeros:
+            y[row[k]] += val[k] * x[col[k]]   for k in 0..nnz-1
+
+        Complexity
+        ----------
+        Time :math:`O(nnz)` for a vector RHS (``O(nnz \cdot c)`` for a dense
+        block of ``c`` columns); space :math:`O(n)` for the output.
+
+        Backward
+        --------
+        Differentiable: :math:`\partial L/\partial x = A^{\top}(\partial L/\partial y)`
+        (another SpMV) and :math:`\partial L/\partial A_{rc} =
+        (\partial L/\partial y)_r\, x_c`; :math:`O(1)` extra graph nodes.
+
+        Parameters
+        ----------
+        other : torch.Tensor or SparseTensor
+            Right-hand operand: a dense vector ``[N]`` / matrix ``[N, c]``,
+            or another :class:`SparseTensor` for a sparse-sparse product.
+
+        Returns
+        -------
+        torch.Tensor or SparseTensor
+            ``A @ other``: dense for a dense operand, sparse for a sparse one.
+
+        Examples
+        --------
+        >>> import torch
+        >>> from torch_sla import SparseTensor
+        >>> # A = diag(2, 3, 4);  A @ [1,1,1] = [2,3,4]
+        >>> d = torch.tensor([2.0, 3.0, 4.0])
+        >>> idx = torch.arange(3)
+        >>> A = SparseTensor(d, idx, idx, (3, 3))
+        >>> A @ torch.ones(3)
+        tensor([2., 3., 4.])
+        """
         from .matmul import __matmul__ as _impl
         return _impl(self, *args, **kwargs)
 
@@ -715,11 +769,34 @@ class SparseTensor:
     # =========================================================================
     
     def norm(self, ord: Literal['fro', 1, 2] = 'fro') -> torch.Tensor:
-        """
-        Compute matrix norm.
-        
-        For batched tensors, returns norm for each batch element.
-        
+        r"""
+        Compute a matrix norm.
+
+        .. math::
+
+            \lVert A\rVert_F = \Big(\sum_{ij} |A_{ij}|^2\Big)^{1/2},\quad
+            \lVert A\rVert_1 = \max_j \sum_i |A_{ij}|,\quad
+            \lVert A\rVert_2 = \sigma_{\max}(A)
+
+        For batched tensors, returns a norm per batch element.
+
+        Algorithm
+        ---------
+        The Frobenius norm is just the 2-norm of the stored value vector
+        (zeros contribute nothing). The 1-norm reduces over column sums of
+        ``|val|``; the 2-norm is the largest singular value (Lanczos).
+
+        .. code-block:: text
+
+            'fro' -> sqrt(sum(val**2))          # over nonzeros only
+            1     -> max over columns of sum|val|
+            2     -> svd(A).singular_values.max()
+
+        Complexity
+        ----------
+        Frobenius / 1-norm: time :math:`O(nnz)`, space :math:`O(1)`.
+        The 2-norm costs one Lanczos SVD, :math:`O(m\,nnz)`.
+
         Parameters
         ----------
         ord : {'fro', 1, 2}, optional
@@ -727,19 +804,24 @@ class SparseTensor:
             - 'fro': Frobenius norm (default)
             - 1: Maximum absolute column sum
             - 2: Spectral norm (largest singular value)
-            
+
         Returns
         -------
         torch.Tensor
-            Norm value(s). Shape [] for non-batched, [*batch_shape] for batched.
-        
+            Norm value(s). Shape ``[]`` for non-batched, ``[*batch_shape]``
+            for batched.
+
         Examples
         --------
-        >>> A = SparseTensor(val, row, col, (3, 3))
-        >>> A.norm('fro')  # tensor(5.0)
-        
-        >>> A_batch = SparseTensor(val_batch, row, col, (4, 3, 3))
-        >>> A_batch.norm('fro')  # tensor([5.0, 5.0, 5.0, 5.0])
+        >>> import torch
+        >>> from torch_sla import SparseTensor
+        >>> # entries 3 and 4  ->  Frobenius norm = sqrt(9 + 16) = 5
+        >>> val = torch.tensor([3.0, 4.0])
+        >>> row = torch.tensor([0, 1])
+        >>> col = torch.tensor([0, 1])
+        >>> A = SparseTensor(val, row, col, (2, 2))
+        >>> A.norm('fro')
+        tensor(5.)
         """
         if self.is_batched:
             batch_shape = self.batch_shape
@@ -771,7 +853,45 @@ class SparseTensor:
         return tuple(reversed(idx))
     
     def spy(self, *args, **kwargs):
-        """Render the sparsity pattern. See :func:`viz.spy`."""
+        r"""Render the sparsity pattern as an image. See :func:`viz.spy`.
+
+        .. math::
+
+            \mathrm{image}[i, j] =
+            \begin{cases}
+              |A_{ij}| / \max|A| & A_{ij}\neq 0 \\
+              \text{white (NaN)} & A_{ij}=0
+            \end{cases}
+
+        Algorithm
+        ---------
+        Scatter the stored entries into an ``M x N`` raster coloured by
+        normalised magnitude, leaving structural zeros transparent, then
+        ``imshow`` it:
+
+        .. code-block:: text
+
+            image = full((M, N), NaN)
+            image[row, col] = |val| / max|val|
+            imshow(image)            # zeros render white
+
+        Complexity
+        ----------
+        Time :math:`O(nnz + MN)` (scatter + raster allocation), space
+        :math:`O(MN)` for the image. Non-differentiable (plotting only).
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes the pattern was drawn on.
+
+        Examples
+        --------
+        >>> import torch
+        >>> from torch_sla import SparseTensor
+        >>> A = SparseTensor.tridiagonal(10)
+        >>> ax = A.spy()          # doctest: +SKIP
+        """
         from .viz import spy as _spy
         return _spy(self, *args, **kwargs)
 
@@ -1002,6 +1122,36 @@ class SparseTensor:
         """
         from ..io import load_sparse
         return load_sparse(path, device)
+
+
+# ---------------------------------------------------------------------------
+# Propagate the rich docstrings from the operation implementations onto the
+# thin delegating wrappers above, so Sphinx autodoc (which documents the
+# bound methods on ``SparseTensor``) renders the formula / algorithm /
+# complexity / examples instead of an empty ``(*args, **kwargs)`` stub.
+# The implementations live in sibling modules (linalg / graph) and are the
+# single source of truth for the docs.
+# ---------------------------------------------------------------------------
+def _propagate_op_docstrings() -> None:
+    from . import linalg as _linalg
+    from . import graph as _graph
+    _doc_sources = {
+        "solve": _linalg.solve,
+        "solve_batch": _linalg.solve_batch,
+        "nonlinear_solve": _linalg.nonlinear_solve,
+        "eigs": _linalg.eigs,
+        "eigsh": _linalg.eigsh,
+        "svd": _linalg.svd,
+        "condition_number": _linalg.condition_number,
+        "det": _linalg.det,
+        "logdet": _linalg.logdet,
+        "lu": _linalg.lu,
+        "connected_components": _graph.connected_components,
+    }
+    for name, impl in _doc_sources.items():
+        wrapper = SparseTensor.__dict__.get(name)
+        if wrapper is not None and impl.__doc__ and not wrapper.__doc__:
+            wrapper.__doc__ = impl.__doc__
 
 
 # =============================================================================
