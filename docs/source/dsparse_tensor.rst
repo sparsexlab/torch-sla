@@ -88,6 +88,13 @@ eigenvalue or component labelling regardless of world size or partition method.
    x = D.solve(b)                       # distributed CG, DTensor in / DTensor out
    x_global = x.full_tensor()           # gather to a single rank
 
+.. seealso::
+
+   :doc:`distributed_scaling` -- how to benchmark weak / strong /
+   throughput scaling of the distributed solve with ``torchrun``, what
+   the metrics mean, and how to extend it. Script:
+   ``benchmarks/distributed/scaling/distributed_solve_scaling.py``.
+
 Halo-exchange SpMV
 ------------------
 

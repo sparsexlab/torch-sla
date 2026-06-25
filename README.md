@@ -248,6 +248,28 @@ x_full  = x_dt.full_tensor()
 torchrun --standalone --nproc_per_node=4 your_script.py
 ```
 
+### Distributed scaling
+
+The canonical distributed linear-solve scaling benchmark measures **weak**
+(fixed DOF/rank), **strong** (fixed total DOF), and **throughput** (DOF/s
+vs ranks) scaling, reporting wall-clock solve time, the relative residual
+`||Ax-b||/||b||` (correctness gate), and parallel efficiency:
+
+```bash
+# run the p=1 baseline first, then larger world sizes (results accumulate)
+for P in 1 2 4 8; do
+  torchrun --standalone --nproc_per_node=$P \
+    benchmarks/distributed/scaling/distributed_solve_scaling.py \
+    --mode weak --dof-per-rank 100000
+done
+# render the accumulated weak/strong/throughput plot
+python benchmarks/distributed/scaling/distributed_solve_scaling.py --plot-only
+```
+
+Script: `benchmarks/distributed/scaling/distributed_solve_scaling.py`.
+Full hand-off guide (launch commands, NCCL env vars, metric meanings, how
+to extend): [`docs/source/distributed_scaling.rst`](docs/source/distributed_scaling.rst).
+
 ## Gradient Support
 
 All operations support automatic differentiation:

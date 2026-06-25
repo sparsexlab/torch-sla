@@ -95,6 +95,7 @@ To take gradients, set ``requires_grad`` on the values (or use the functional
    installation
    sparse_tensor
    dsparse_tensor
+   distributed_scaling
    operations
    architecture
    backends
