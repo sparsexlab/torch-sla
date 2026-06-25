@@ -31,7 +31,7 @@ import torch
 import numpy as np
 
 # Add parent directory to path for local torch_sla import
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from torch_sla import SparseTensor
 from torch_sla.io import load_mtx, load_mtx_info

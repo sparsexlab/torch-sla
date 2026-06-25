@@ -1,31 +1,36 @@
 Introduction
 ============
 
-.. raw:: html
+torch-sla provides sparse linear algebra for PyTorch: it solves :math:`Ax = b`
+for sparse ``A``, computes eigenvalues, SVDs and determinants, and lets
+gradients flow through all of these via ``torch.autograd``. It runs on CPU and
+GPU and dispatches to several solver backends.
 
-   <p><strong>torch-sla</strong> (<span class="gradient-text">Torch Sparse Linear Algebra</span>) is a memory-efficient library for sparse linear algebra in PyTorch. It provides differentiable sparse linear equation solvers with multiple backends, supporting both CPU and CUDA.</p>
+What it covers
+--------------
 
-Key Features
-------------
+- Sparse storage — only the non-zeros are kept, so problems with millions of
+  unknowns stay in memory.
+- Backends — `SciPy <https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html>`_
+  and `PyTorch-native <https://pytorch.org/>`_ on CPU, `cuDSS
+  <https://docs.nvidia.com/cuda/cudss/>`_ on NVIDIA, and STRUMPACK as a portable
+  direct solver on CPU/CUDA/ROCm. Backend and method are chosen independently,
+  and ``solve()`` auto-selects a sensible pair from the device, dtype, and size.
+- Gradients — the backward pass for ``solve``, ``eigsh`` and ``svd`` uses the
+  adjoint method, adding O(1) nodes to the autograd graph rather than one per
+  iteration.
+- Batching — batched sparse tensors with shape ``[..., M, N, ...]``.
+- Property detection — symmetry and positive-definiteness checks feed the
+  automatic solver choice.
+- Distribution — sharded matrices with halo exchange for multi-GPU solves.
 
-.. raw:: html
-
-   <ul class="feature-list">
-     <li><span class="gradient-text">Memory Efficient</span>: Only stores non-zero elements — solve systems with millions of unknowns using minimal memory</li>
-     <li><span class="gradient-text">Multiple Backends</span>: Choose from <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>, <a href="https://pytorch.org/">PyTorch-native</a>, <a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a> (NVIDIA), or STRUMPACK (portable direct solver on CPU/CUDA/ROCm)</li>
-     <li><span class="gradient-text">Backend/Method Separation</span>: Independently specify the backend and solver method</li>
-     <li><span class="gradient-text">Auto-selection</span>: Automatically choose the best backend and method based on device, dtype, and problem size</li>
-     <li><span class="gradient-text">Gradient Support</span>: Full gradient computation via PyTorch autograd with <span class="badge-gradient">O(1) graph nodes</span></li>
-     <li><span class="gradient-text">Batched Operations</span>: Support for batched sparse tensors with shape <code>[..., M, N, ...]</code></li>
-     <li><span class="gradient-text">Property Detection</span>: Automatic detection of symmetry and positive definiteness</li>
-     <li><span class="gradient-text">Distributed Support</span>: Distributed sparse matrices with halo exchange for parallel computing</li>
-     <li><span class="gradient-text">Large Scale</span>: Tested up to <span class="badge-gradient">169 million DOF</span> with near-linear scaling</li>
-   </ul>
+In the 2D Poisson benchmarks below, the PyTorch CG path reaches 169M DOF on one
+GPU; numbers and hardware are in :doc:`benchmarks`.
 
 Recommended Backends
 --------------------
 
-Based on extensive benchmarks on 2D Poisson equations (tested up to **169M DOF**):
+From the 2D Poisson benchmarks (measured up to 169M DOF on a single H200):
 
 .. list-table:: Recommended Backends
    :widths: 25 25 25 25
@@ -56,10 +61,12 @@ Based on extensive benchmarks on 2D Poisson equations (tested up to **169M DOF**
 Key Insights
 ~~~~~~~~~~~~
 
-1. **PyTorch CG+Jacobi scales to 169M+ DOF** with near-linear O(n^1.1) complexity
-2. **Direct solvers limited to ~2M DOF** due to memory (O(n^1.5) fill-in)
-3. **Use float64** for best convergence with iterative solvers
-4. **Trade-off**: Direct = machine precision (~1e-14), Iterative = ~1e-6 but 100x faster
+1. PyTorch CG with Jacobi preconditioning reached 169M DOF in these runs, with
+   time scaling close to O(n^1.1).
+2. Direct solvers cap out near 2M DOF: their O(n^1.5) fill-in exhausts memory.
+3. float64 converges more reliably with the iterative solvers.
+4. Direct solvers hit machine precision (~1e-14); the iterative path reaches
+   ~1e-6 but, at 2M DOF, did so about 100x faster here.
 
 Core Classes
 ------------
@@ -139,7 +146,7 @@ Backends
      - **CUDA direct**
    * - ``strumpack``
      - CPU/CUDA/ROCm
-     - STRUMPACK multifrontal sparse direct solver (LU, Cholesky, LDLt; real + complex; full autograd). Portable across CPU/CUDA/ROCm via ``torch-strumpack``.
+     - STRUMPACK multifrontal sparse direct solver (multifrontal LU; real + complex; full autograd). Portable across CPU/CUDA/ROCm via ``torch-strumpack``.
      - **Direct on AMD ROCm / portable direct**
    * - ``pytorch``
      - CPU/CUDA/ROCm
@@ -382,18 +389,18 @@ Accuracy
 Key Findings
 ~~~~~~~~~~~~
 
-1. **Iterative solver scales to 169M DOF** with O(n^1.1) time complexity
-2. **Direct solvers limited to ~2M DOF** due to O(n^1.5) memory fill-in
-3. **PyTorch CG+Jacobi is 100x faster** than direct solvers at 2M DOF
-4. **Memory efficient**: 443 bytes/DOF (vs theoretical minimum 144 bytes/DOF)
-5. **Trade-off**: Direct solvers achieve machine precision, iterative achieves ~1e-6
+1. The iterative solver reached 169M DOF with time scaling near O(n^1.1).
+2. Direct solvers stopped near 2M DOF, bound by O(n^1.5) fill-in.
+3. At 2M DOF, PyTorch CG with Jacobi was about 100x faster than the direct
+   solvers.
+4. PyTorch CG used ~443 bytes/DOF (the matrix and Krylov vectors; the bare CSR
+   matrix is ~144 bytes/DOF).
+5. Direct solvers reach machine precision; the iterative path reaches ~1e-6.
 
 Distributed Solve (Multi-GPU)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-3-4x NVIDIA H200 GPUs with NCCL backend, scales to **400M+ DOF**:
-
-**CUDA (3-4 GPU, NCCL)**:
+On 3-4 NVIDIA H200 GPUs over NCCL, the distributed CG solve reached 400M DOF:
 
 .. list-table::
    :widths: 15 15 20 15
@@ -440,12 +447,9 @@ Distributed Solve (Multi-GPU)
      - **110.3 GB**
      - 3
 
-**Key Findings**:
-
-- **Scales to 400M DOF**: Using 3x H200 GPUs (110 GB/GPU)
-- **Near-linear scaling**: 10M → 400M is 40x DOF, ~100x time
-- **Memory efficient**: ~275 bytes/DOF per GPU
-- **CUDA 12x faster than CPU**: 0.3s vs 7.4s for 100K DOF
+Reading the table: 400M DOF fit on 3 H200s at 110 GB/GPU; going from 10M to
+400M (40x the unknowns) cost ~100x the time, at ~275 bytes/DOF per GPU. At 100K
+DOF the GPU path took 0.3s against 7.4s on CPU.
 
 .. code-block:: bash
 
@@ -455,7 +459,9 @@ Distributed Solve (Multi-GPU)
 Gradient Support
 ~~~~~~~~~~~~~~~~
 
-All operations support automatic differentiation via PyTorch autograd with **O(1) graph nodes**:
+Every operation below is differentiable through PyTorch autograd. The solve and
+spectral ops use the adjoint method, so the backward pass costs O(1) autograd
+nodes rather than one per iteration.
 
 **SparseTensor Gradient Support**
 
@@ -575,24 +581,30 @@ All operations support automatic differentiation via PyTorch autograd with **O(1
      - ✓
      - Gathers data (with warning)
 
-**Key Features:**
+Notes:
 
-- SparseTensor uses **O(1) graph nodes** via adjoint method for ``solve()``, ``eigsh()``
-- DSparseTensor uses **true distributed algorithms** (LOBPCG, CG, power iteration)
-- No data gather required for DSparseTensor core operations
-- For ``nonlinear_solve()``, gradients flow to the *parameters* passed to ``residual_fn``
+- ``SparseTensor.solve()`` and ``eigsh()`` backprop via the adjoint method, so
+  graph size is independent of iteration count.
+- DSparseTensor runs its algorithms (LOBPCG, CG, power iteration) on the sharded
+  data; the core operations need no global gather.
+- For ``nonlinear_solve()``, gradients flow to the parameters passed to
+  ``residual_fn``.
 
 Performance Tips
 ----------------
 
-1. **Use float64 for iterative solvers**: Better convergence properties
-2. **Use cholesky for SPD matrices**: 2x faster than LU
-3. **Use scipy+lu for CPU**: Best balance of speed and precision
-4. **Use cudss+cholesky for small CUDA problems**: Fastest direct solver (< 2M DOF)
-5. **Use pytorch+cg for large problems**: Memory efficient, scales to 169M+ DOF on single GPU
-6. **Use multi-GPU for very large problems**: DSparseTensor supports domain decomposition, 3 GPUs can reach 500M+ DOF
-7. **Use strumpack for a portable GPU direct solve**: LU / Cholesky / LDLt on CPU/CUDA/ROCm — the direct-solver choice on AMD ROCm where cuDSS is unavailable
-8. **Use LU factorization for repeated solves**: Cache with ``A.lu()``
+- float64 converges more reliably with the iterative solvers.
+- For SPD matrices, ``cholesky`` is roughly twice as fast as ``lu``.
+- On CPU, ``scipy+lu`` is the default and gives machine precision.
+- On NVIDIA for problems under ~2M DOF, ``cudss+cholesky`` is the fastest
+  direct solver.
+- For larger problems, ``pytorch+cg`` is the memory-efficient choice and the
+  one that reached 169M DOF on a single GPU.
+- Beyond a single GPU, ``DSparseTensor`` partitions the matrix across devices.
+- For a portable GPU direct solve — including AMD ROCm, where cuDSS is not
+  available — use ``strumpack`` (multifrontal LU on CPU/CUDA/ROCm).
+- For repeated solves with the same matrix, factor once with ``A.lu()`` and
+  reuse it.
 
 Citation
 --------

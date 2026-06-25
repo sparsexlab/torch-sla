@@ -27,7 +27,7 @@ import scipy.sparse as sp
 import torch
 import torch.distributed as dist
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 try:
     from torch.distributed.device_mesh import init_device_mesh
 except ImportError:

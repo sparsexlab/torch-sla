@@ -138,7 +138,7 @@ LU 分解，用于同一矩阵的高效重复求解。
      - **CUDA 直接**
    * - ``strumpack``
      - CPU/CUDA/ROCm
-     - STRUMPACK 多波前稀疏直接求解器 (LU, Cholesky, LDLt；支持实数与复数；完整 autograd)，通过 ``torch-strumpack`` 在 CPU/CUDA/ROCm 上可移植运行
+     - STRUMPACK 多波前稀疏直接求解器 (LU；支持实数与复数；完整 autograd)，通过 ``torch-strumpack`` 在 CPU/CUDA/ROCm 上可移植运行
      - **AMD ROCm 直接求解 / 可移植直接法**
    * - ``pytorch``
      - CPU/CUDA/ROCm
@@ -562,7 +562,7 @@ CUDA 用法
 4. **GPU 小规模问题用 cudss+cholesky**: 200万 DOF 以下最快的直接法
 5. **GPU 大规模问题用 pytorch+cg**: 单卡可达 1.69 亿 DOF
 6. **超大规模用多卡并行**: DSparseTensor 支持域分解，3 卡可达 5 亿+ DOF
-7. **可移植 GPU 直接求解用 strumpack**: 在 CPU/CUDA/ROCm 上提供 LU / Cholesky / LDLt — 在 cuDSS 不可用的 AMD ROCm 上是首选的直接求解器
+7. **可移植 GPU 直接求解用 strumpack**: 在 CPU/CUDA/ROCm 上提供多波前 LU — 在 cuDSS 不可用的 AMD ROCm 上是首选的直接求解器
 8. **重复求解缓存 LU 分解**: 用 ``A.lu()`` 复用分解结果
 
 引用

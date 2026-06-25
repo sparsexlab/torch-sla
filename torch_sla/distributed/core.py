@@ -77,6 +77,61 @@ def _is_dtensor(x) -> bool:
     return isinstance(x, DTensor)
 
 
+# ---------------------------------------------------------------------- #
+# Owned-aware Shard(0) DTensor.
+#
+# A plain ``DTensor[Shard(0)]`` reconstructs the global vector in
+# ``full_tensor()`` by concatenating each rank's local slice **in rank
+# order**. That is only correct when every rank's owned global node-ids
+# form a contiguous, rank-monotone block (``simple`` partitions). For
+# geometric / graph partitions (``rcb`` / ``hilbert`` / real ``metis``)
+# ownership is NOT globally sorted, so rank-order concatenation returns
+# a *permuted* -- silently wrong -- vector.
+#
+# ``_OwnedShardDTensor`` carries the partition's global ``owned_nodes``
+# indices and overrides ``full_tensor()`` to scatter each rank's slice
+# into its true global positions via ``gather_owned_to_global`` (the
+# same ``index_put_`` reconstruction used elsewhere in the codebase).
+# It is a thin subclass produced by re-tagging a real ``DTensor`` so
+# ``to_local`` / matmul / the Krylov solvers keep working unchanged.
+# ---------------------------------------------------------------------- #
+if DTENSOR_AVAILABLE and DTensor is not None:
+
+    class _OwnedShardDTensor(DTensor):
+        """``DTensor[Shard(0)]`` that reconstructs the global vector
+        through its partition's ``owned_nodes`` instead of relying on
+        rank-order concatenation."""
+
+        @staticmethod
+        def _wrap(local_slice, mesh, owned_nodes, n_global):
+            obj = DTensor.from_local(local_slice, mesh, [Shard(0)])
+            obj.__class__ = _OwnedShardDTensor
+            obj._owned_nodes = owned_nodes
+            obj._n_global = int(n_global)
+            return obj
+
+        def full_tensor(self):  # type: ignore[override]
+            from .collectives import gather_owned_to_global
+            local = self.to_local().contiguous()
+            owned = self._owned_nodes.to(device=local.device,
+                                         dtype=torch.int64)
+            return gather_owned_to_global(owned, local, self._n_global)
+
+else:
+    _OwnedShardDTensor = None
+
+
+def _wrap_owned_shard(local_slice, mesh, partition, n_global):
+    """Build an owned-aware ``DTensor[Shard(0)]`` if the subclass is
+    available, else fall back to a plain ``DTensor`` (single-process /
+    no-DTensor builds where rank-order == global order)."""
+    if _OwnedShardDTensor is not None:
+        return _OwnedShardDTensor._wrap(
+            local_slice, mesh,
+            partition.owned_nodes, n_global)
+    return DTensor.from_local(local_slice, mesh, [Shard(0)])
+
+
 # Partition struct + partitioning algorithms (METIS / simple / RCB /
 # slicing / Hilbert) + halo discovery live in :mod:`torch_sla.partition`
 # now. Re-exported here so existing ``from torch_sla.distributed import
@@ -615,9 +670,8 @@ class DSparseTensor:
         owned = partition.owned_nodes.to(device=global_vec.device,
                                           dtype=torch.int64)
         local_slice = global_vec[owned].contiguous()
-        _DTensor = DTensor  # use module-level import with fallback
-        return _DTensor.from_local(local_slice, self._spec.mesh,
-                                    [Shard(0)])
+        return _wrap_owned_shard(local_slice, self._spec.mesh,
+                                 partition, int(self._shape[0]))
 
     def _partition_for_dispatch(self) -> Optional["Partition"]:
         """Return the active :class:`Partition` from the spec, or
@@ -1600,17 +1654,202 @@ class DSparseTensor:
                 flexible=(method_l == "fgmres"), **common)
         elif method_l == "minres":
             x_owned = _ds.minres_shard(self, b_owned, **common)
+        elif method_l in ("lsqr", "lsmr"):
+            # Least-squares Krylov: btol plays rtol's role; preconditioner
+            # is not applied (normal-equations Krylov). atol defaults
+            # rather small so the LS stopping tests engage.
+            ls_atol = atol if atol is not None else 1e-8
+            ls_btol = rtol if (rtol is not None and rtol > 0) else 1e-8
+            ls_fn = _ds.lsqr_shard if method_l == "lsqr" else _ds.lsmr_shard
+            x_owned = ls_fn(self, b_owned, atol=ls_atol, btol=ls_btol,
+                            maxiter=maxiter, verbose=verbose)
         else:
             raise ValueError(
                 f"Unknown distributed solve method {method!r}; expected "
-                "one of cg, bicgstab, gmres, fgmres, minres."
+                "one of cg, bicgstab, gmres, fgmres, minres, lsqr, lsmr."
             )
 
         if wrap_output:
-            _DTensor = DTensor  # use module-level import with fallback
-            return _DTensor.from_local(
-                x_owned, self._spec.mesh, [Shard(0)])
+            return _wrap_owned_shard(
+                x_owned, self._spec.mesh,
+                self._spec.placement.partition, int(self._shape[0]))
         return x_owned
+
+    def nonlinear_solve_distributed_shard(
+        self,
+        residual_fn: Any,
+        u0: Any,
+        *,
+        jac_diag_fn: Any,
+        tol: Any = 1e-10,
+        atol: Any = 1e-12,
+        max_iter: Any = 50,
+        line_search: bool = True,
+        lin_maxiter: int = 1000,
+        verbose: bool = False,
+        adjoint_dLdu: Any = None,
+    ) -> Any:
+        """Distributed Newton solve for ``F(u) = 0`` in Shard(0) space.
+
+        ``F`` must have the structure ``F(u) = A u + g(u)`` with ``A`` the
+        distributed operator (this :class:`DSparseTensor`) and ``g`` a
+        pointwise (diagonal) nonlinearity. The Newton step solves the
+        Jacobian system ``J du = -F``, ``J v = A v + d * v``, via
+        distributed GMRES; the diagonal shift ``d = g'(u)`` is supplied by
+        ``jac_diag_fn``.
+
+        Parameters
+        ----------
+        residual_fn : Callable
+            ``residual_fn(u_owned, D) -> F_owned`` using distributed ops.
+        u0 : DTensor[Shard(0)] | torch.Tensor
+            Initial guess (owned slice or wrapped).
+        jac_diag_fn : Callable
+            ``jac_diag_fn(u_owned, D) -> d_owned``; Jacobian diagonal shift.
+        adjoint_dLdu : DTensor | torch.Tensor, optional
+            If given, also solve the IFT adjoint ``Jᵀ λ = dL/du`` at the
+            converged ``u`` and return ``(u, λ)`` instead of just ``u``.
+
+        Returns the solution mirroring the input wrapper (DTensor in ->
+        DTensor out). With ``adjoint_dLdu`` set returns ``(u, λ)``.
+        """
+        if self._spec is None or not isinstance(
+                self._spec.placement, _VERTEX_SHARDS):
+            raise RuntimeError(
+                "nonlinear_solve_distributed_shard() requires a VertexShard "
+                "DSparseTensor.")
+        from . import solve as _ds
+
+        if _is_dtensor(u0):
+            u0_owned = u0.to_local()
+            wrap = True
+        else:
+            u0_owned = u0
+            wrap = False
+
+        u_owned = _ds.newton_shard(
+            self, residual_fn, u0_owned,
+            jac_diag_fn=jac_diag_fn, tol=tol, atol=atol,
+            max_iter=max_iter, line_search=line_search,
+            lin_maxiter=lin_maxiter, verbose=verbose)
+
+        def _wrap(v):
+            if wrap:
+                return _wrap_owned_shard(
+                    v, self._spec.mesh,
+                    self._spec.placement.partition, int(self._shape[0]))
+            return v
+
+        if adjoint_dLdu is not None:
+            dLdu_owned = (adjoint_dLdu.to_local()
+                          if _is_dtensor(adjoint_dLdu) else adjoint_dLdu)
+            lam = _ds.newton_adjoint_shard(
+                self, u_owned, dLdu_owned, jac_diag_fn,
+                lin_maxiter=lin_maxiter)
+            return _wrap(u_owned), _wrap(lam)
+        return _wrap(u_owned)
+
+    def connected_components_distributed_shard(self):
+        """Distributed connected components on the VertexShard graph.
+
+        Treats the matrix as an undirected adjacency and returns
+        ``(labels_owned, num_components)`` for this rank's owned slice;
+        ``num_components`` and the labelling agree with the
+        single-process / scipy result. See
+        :func:`torch_sla.distributed.graph.connected_components_shard`.
+        """
+        if self._spec is None or not isinstance(
+                self._spec.placement, _VERTEX_SHARDS):
+            raise RuntimeError(
+                "connected_components_distributed_shard() requires a "
+                "VertexShard DSparseTensor.")
+        from .graph import connected_components_shard
+        return connected_components_shard(self)
+
+    # ====================================================================== #
+    # Clean "syntactic sugar" layer.
+    #
+    # These thin wrappers mirror the single-process :class:`SparseTensor`
+    # API (``solve`` / ``nonlinear_solve`` / ``connected_components`` /
+    # ``lsqr`` / ``lsmr``) so callers never reach for the ``*_shard``
+    # implementation names. Each forwards verbatim to the matching
+    # distributed routine -- no shape recompute, repartition, or gather --
+    # so they add zero per-call overhead over calling the delegate directly.
+    # ====================================================================== #
+    def solve(self, b: Any, **kwargs) -> Any:
+        """``D.solve(b)`` -- distributed Krylov solve in Shard(0) space.
+
+        Sugar for :meth:`solve_distributed_shard`; mirrors the top-level
+        :func:`torch_sla.solve`. ``b`` is a ``DTensor[Shard(0)]`` (most
+        common) or a raw owned-slice ``torch.Tensor``; the return value
+        matches the input's wrapper. Method / preconditioner / tolerances
+        resolve through the active :class:`SolverConfig` scope unless
+        passed explicitly (see :meth:`solve_distributed_shard`)."""
+        return self.solve_distributed_shard(b, **kwargs)
+
+    def solve_batch(self, b: torch.Tensor, **kwargs) -> torch.Tensor:
+        """``D.solve_batch(b)`` -- per-batch solve under :class:`BatchShard`.
+
+        Sugar for :meth:`solve_batch_shard`. Returns this rank's batch
+        slice of the solution; zero inter-rank communication."""
+        return self.solve_batch_shard(b, **kwargs)
+
+    def nonlinear_solve(self, residual_fn: Any, u0: Any, *,
+                        jac_diag_fn: Any, **kwargs) -> Any:
+        """``D.nonlinear_solve(residual, u0, jac_diag_fn=...)`` --
+        distributed Newton solve for ``F(u) = 0`` in Shard(0) space.
+
+        Sugar for :meth:`nonlinear_solve_distributed_shard`; mirrors the
+        single-process :meth:`SparseTensor.nonlinear_solve`. Returns the
+        solution mirroring the input wrapper, or ``(u, λ)`` when an
+        ``adjoint_dLdu`` kwarg requests the IFT adjoint."""
+        return self.nonlinear_solve_distributed_shard(
+            residual_fn, u0, jac_diag_fn=jac_diag_fn, **kwargs)
+
+    def connected_components(self) -> Tuple[torch.Tensor, int]:
+        """``D.connected_components()`` -- distributed connected components.
+
+        Sugar for :func:`torch_sla.distributed.graph.connected_components_shard`;
+        mirrors the single-process :meth:`SparseTensor.connected_components`.
+
+        Returns
+        -------
+        labels : torch.Tensor
+            This rank's owned-slice of the contiguous component labelling
+            (``0..n_components-1``, identical to the scipy labelling).
+        n_components : int
+            Global component count (identical on every rank).
+        """
+        from .graph import connected_components_shard
+        return connected_components_shard(self)
+
+    def lsqr(self, b: torch.Tensor, *, atol: float = 1e-8, btol: float = 1e-8,
+             maxiter: int = 10000, damp: float = 0.0, conlim: float = 1e8,
+             verbose: bool = False) -> torch.Tensor:
+        """``D.lsqr(b)`` -- distributed LSQR least-squares solve.
+
+        Sugar for :func:`torch_sla.distributed.solve.lsqr_shard`; the
+        distributed counterpart of single-process ``spsolve(method='lsqr')``
+        (defaults match its ``lsqr_solve``). ``b`` is this rank's
+        owned-slice ``torch.Tensor``; returns the owned slice of
+        ``argmin ||Ax - b||`` (damped variant when ``damp > 0``)."""
+        from .solve import lsqr_shard
+        return lsqr_shard(self, b, atol=atol, btol=btol, maxiter=maxiter,
+                          damp=damp, conlim=conlim, verbose=verbose)
+
+    def lsmr(self, b: torch.Tensor, *, atol: float = 1e-8, btol: float = 1e-8,
+             maxiter: int = 10000, damp: float = 0.0, conlim: float = 1e8,
+             verbose: bool = False) -> torch.Tensor:
+        """``D.lsmr(b)`` -- distributed LSMR least-squares solve.
+
+        Sugar for :func:`torch_sla.distributed.solve.lsmr_shard`; the
+        distributed counterpart of single-process ``spsolve(method='lsmr')``
+        (defaults match its ``lsmr_solve``). ``b`` is this rank's
+        owned-slice ``torch.Tensor``; returns the owned slice of the
+        least-squares solution (more robust than LSQR when ill-conditioned)."""
+        from .solve import lsmr_shard
+        return lsmr_shard(self, b, atol=atol, btol=btol, maxiter=maxiter,
+                          damp=damp, conlim=conlim, verbose=verbose)
 
     # ------------------------------------------------------------------ #
     # Shard(0)-space primitives reused by every Krylov method.
@@ -1634,6 +1873,14 @@ class DSparseTensor:
         :func:`distributed_matvec.shard_matvec`."""
         from .matvec import shard_matvec
         return shard_matvec(self, x_owned)
+
+    def _shard_rmatvec(self, y_owned: torch.Tensor) -> torch.Tensor:
+        """Hot-path transpose matvec ``Aᵀ @ y`` in Shard(0) space.
+        See :func:`distributed_matvec.shard_rmatvec`. Requires a
+        structurally symmetric sparsity pattern (all PDE stencils
+        here qualify)."""
+        from .matvec import shard_rmatvec
+        return shard_rmatvec(self, y_owned)
 
     # ------------------------------------------------------------------ #
     # The preconditioner factory + four Krylov methods (CG / BiCGStab /

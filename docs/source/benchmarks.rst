@@ -778,3 +778,136 @@ To reproduce these benchmarks:
 
 Results are saved to ``benchmarks/results/``.
 
+Scaling & capacity (per-op)
+---------------------------
+
+``benchmarks/benchmark_all_ops_scaling.py`` sweeps DOF for **every** public op and
+records latency, throughput, peak memory and CPU utilisation; ``--max-probe`` grows
+each op until it OOMs or exceeds a time cap to report the largest problem it sustains.
+Problems come from :mod:`torch_sla.datasets` (no hand-built matrices). The backend
+each op exercises is shown in every plot legend.
+
+.. code-block:: bash
+
+   python benchmarks/benchmark_all_ops_scaling.py                 # full sweep
+   python benchmarks/benchmark_all_ops_scaling.py --quick --max-probe
+   python benchmarks/benchmark_all_ops_scaling.py --device cuda   # GPU (run on a CUDA box)
+
+**Latency** (wall time) is the primary y-axis — throughput in ``DOF/s`` mixes
+work-units across ops (matvec ~ ``nnz``, solve ~ ``iter·nnz``) and reads ambiguously.
+
+**Test environment** (recorded in each run's JSON ``env`` block): CPU =
+**AMD Ryzen 7 255** (16 cores / 44 GB); CUDA = **NVIDIA RTX 4070 Ti SUPER**
+(torch 2.6 + cu124); ROCm = **AMD Radeon 780M** iGPU (torch 2.10 + rocm7.2,
+``HSA_OVERRIDE_GFX_VERSION=11.0.0``). All timings are **eager** — no
+``torch.compile``.
+
+Measured on the Ryzen 7 255 CPU, 2-D Poisson sweep to ~10\ :sup:`6` DOF:
+
+.. list-table::
+   :widths: 24 16 18 42
+   :header-rows: 1
+
+   * - op
+     - backend
+     - time slope
+     - notes
+   * - ``transpose``
+     - torch
+     - ~0 (O(1))
+     - index/axis swap; flat ~0.02 ms
+   * - ``norm`` / ``spmv``
+     - torch
+     - ~1 (linear)
+     - healthy; throughput rises then plateaus
+   * - ``connected_components``
+     - torch (pure)
+     - 0.76
+     - FastSV: O(log N) rounds, no diameter upturn; ~4–5× scipy.csgraph
+   * - ``solve_cg``
+     - pytorch / cg
+     - ~1.1
+     - iterative; grows with conditioning
+   * - ``solve_lu``
+     - scipy / lu
+     - ~1.2–1.5
+     - direct; 2-D fill-in is super-linear (caps capacity earliest)
+
+**GPU (CUDA, RTX 4070 Ti SUPER):** the pytorch-native and graph ops are
+device-agnostic and run unchanged with ``--device cuda``. Highlights vs CPU at
+~10\ :sup:`6` DOF:
+
+.. list-table::
+   :widths: 24 26 26 24
+   :header-rows: 1
+
+   * - op
+     - CPU throughput
+     - GPU throughput
+     - note
+   * - ``transpose``
+     - 4.4×10¹⁰ DOF/s
+     - 4.1×10¹⁰ DOF/s
+     - view op; device-independent
+   * - ``connected_components``
+     - ~1×10⁷ DOF/s (slope 0.76)
+     - 2.3×10⁸ DOF/s (slope 0.16)
+     - **~20× faster** on GPU; FastSV rounds parallelise well
+   * - ``solve_cg``
+     - 1.2×10⁵ DOF/s
+     - 1.4×10⁶ DOF/s
+     - ~10× on GPU (SpMV-bound)
+   * - ``eigsh``
+     - —
+     - slow (LOBPCG comm/launch overhead)
+     - GPU win needs larger blocks / shift-invert
+
+On GPU, ``peak_MB`` is real device memory (``torch.cuda.max_memory_allocated``,
+e.g. ``connected_components`` ~333 MB at 10⁶ DOF) — unlike the CPU path where
+``tracemalloc`` under-captures the torch allocator.
+
+The primary plots are **per-op** — ``benchmarks/results/allops_time_<op>.png``, one
+per op, each with O(N)/O(N²) reference lines, the fitted slope, and the backend label.
+Ops are *not* overlaid on a shared latency/throughput axes because their work units
+differ (matvec ~ ``nnz``, solve ~ ``iter·nnz``, eigsh ~ iterations), which makes a
+cross-op comparison meaningless. A combined ``allops_memory.png`` is kept (MB is a
+comparable unit). GPU runs are prefixed ``cuda_``.
+
+``benchmarks/plot_device_compare.py`` overlays the **same op across devices**
+(CPU / CUDA / ROCm) on one axes per op (``cmp_<op>.png``) — this comparison *is*
+meaningful (same work, different hardware). Measured: ``connected_components`` slope
+0.76 (CPU) → 0.16 (CUDA, RTX 4070 Ti SUPER) → 0.10 (ROCm, Radeon 780M); the FastSV
+parallel rounds flatten on both GPUs. ROCm runs in the ``rocm/pytorch`` /
+``torch-strumpack:rocm-gfx1100`` container (``HSA_OVERRIDE_GFX_VERSION=11.0.0``),
+small DOF only (the 780M iGPU OOMs ``hipsparse`` at scale).
+
+**Backend comparison (linear solve):** ``solve_cg`` (pytorch, iterative),
+``solve_lu`` (scipy, CPU direct), ``solve_pyamg`` (PyAMG, classical AMG),
+``solve_strumpack`` (portable direct), and ``solve_cudss`` (NVIDIA direct,
+``--device cuda``) are separate ops, so a single
+``linear solve`` figure can overlay backends on the same SPD problem. On a 4070 Ti
+SUPER over a well-conditioned Poisson, CG beats cuDSS (few iterations vs a full
+factorization); cuDSS's edge is robustness on ill-conditioned / non-symmetric systems.
+
+Distributed scaling (DSparseTensor)
+-----------------------------------
+
+``benchmarks/benchmark_distributed_scaling.py`` measures **strong** and **weak**
+scaling of the distributed ops (matvec, ``cg`` solve, ``eigsh``) across ranks via
+multiprocess ``gloo``:
+
+.. code-block:: bash
+
+   python benchmarks/benchmark_distributed_scaling.py --ranks 1,2,4
+
+It emits ``dist_strong_scaling.png`` (speedup vs ranks), ``dist_weak_scaling.png``
+(time vs ranks, ideal flat) and ``dist_throughput.png``.
+
+On a single multi-core CPU box over ``gloo``, adding ranks does **not** speed things
+up — there is no real interconnect or GPU, so halo-exchange / all-reduce communication
+dominates and strong scaling is negative (e.g. 65 K-DOF Poisson: ``cg`` 0.54 s → 4.06 s
+from 2 → 4 ranks). What the benchmark verifies is that the result is **rank-invariant**
+(the same smallest eigenvalue and ``cg`` residual ~2e-9 at every world size, including
+non-monotone partitions). Real speedup needs multiple GPUs with NCCL and a
+communication-hiding problem size; see the multi-GPU benchmarks for that regime.
+

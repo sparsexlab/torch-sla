@@ -31,12 +31,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 # Add parent to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch_sla as sla
 
 # Output directories
-OUTPUT_DIR = Path(__file__).parent / "results" / "benchmark_solvers"
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "results" / "benchmark_solvers"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Timeout for each solve

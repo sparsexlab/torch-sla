@@ -18,35 +18,37 @@
 </p>
 
 <p align="center">
-  <a href="https://www.torchsla.com/introduction.html">📖 Introduction</a> •
-  <a href="https://www.torchsla.com/installation.html">🔧 Installation</a> •
-  <a href="https://www.torchsla.com/torch_sla.html">📚 API Reference</a> •
-  <a href="https://www.torchsla.com/examples.html">💡 Examples</a> •
-  <a href="https://www.torchsla.com/benchmarks.html">📊 Benchmarks</a>
+  <a href="https://www.torchsla.com/introduction.html">Introduction</a> •
+  <a href="https://www.torchsla.com/installation.html">Installation</a> •
+  <a href="https://www.torchsla.com/torch_sla.html">API Reference</a> •
+  <a href="https://www.torchsla.com/examples.html">Examples</a> •
+  <a href="https://www.torchsla.com/benchmarks.html">Benchmarks</a>
 </p>
 
 ## Features
 
-- 🔥 **Differentiable**: Full gradient support through `torch.autograd`
-- 🚀 **Multiple Backends**: SciPy (CPU), PyTorch-native (CPU/CUDA), CuPy, cuDSS (CUDA)
-- 📦 **Batched Operations**: Support for batched sparse tensors `[..., M, N, ...]`
-- 🎯 **Property Detection**: Auto-detect symmetry and positive definiteness
-- ⚡ **High Performance**: Auto-selects best solver based on device, dtype, and problem size
-- 🌐 **Distributed**: Domain decomposition with halo exchange (CFD/FEM style)
-- 🔧 **Easy to Use**: `SparseTensor` class with solve, norm, eigs methods
-- 🧮 **Nonlinear Solve**: Adjoint-based Newton/Anderson solvers with implicit differentiation
+- **Differentiable**: gradients flow through solves, factorizations, and eigensolves via `torch.autograd`
+- **Six verified backends**: `pytorch` native Krylov (CPU/CUDA/ROCm), `scipy` (CPU), `cudss` (NVIDIA CUDA), `strumpack` direct (CPU/CUDA/ROCm), `pyamg` (CPU), `amgx` (NVIDIA CUDA) — each checked to ‖Ax−b‖/‖b‖ at or near machine precision
+- **Batched operations**: batched sparse tensors `[..., M, N, ...]`
+- **Property detection**: auto-detect symmetry and positive definiteness
+- **Solver auto-selection**: picks a backend and method from the device, dtype, and problem size
+- **Distributed**: domain decomposition with halo exchange (CFD/FEM style)
+- **Two classes**: `SparseTensor` (single process) and `DSparseTensor` (distributed), exposing solve, norm, eigs, and more
+- **Nonlinear solve**: adjoint-based Newton/Anderson with implicit differentiation
 
 ## Installation
 
 ```bash
-# Basic installation
+# Basic installation (CPU solvers: scipy + pytorch-native)
 pip install torch-sla
 
-# GPU users: choose one or both CUDA 12+ backends
-pip install torch-sla[cupy]    # + CuPy backend
-pip install torch-sla[cudss]   # + cuDSS backend (fastest direct solver on GPU)
+# NVIDIA GPU direct solver (CUDA 12+, Linux/Windows)
+pip install torch-sla[cudss]   # + cuDSS (fastest direct solver on NVIDIA)
 
-# Full installation with all runtime backends (does not include dev/docs)
+# CPU AMG
+pip install torch-sla[pyamg]   # + PyAMG (CPU AMG setup + on-device V-cycle)
+
+# Full installation with all PyPI-installable runtime backends (no dev/docs)
 pip install torch-sla[all]
 
 # From source (for development)
@@ -56,7 +58,35 @@ pip install -e ".[dev]"     # development tools (pytest, black, isort, mypy)
 pip install -e ".[docs]"    # documentation tools (sphinx, furo)
 ```
 
-> **Note**: The core install (`pip install torch-sla`) pulls in `torch`, `numpy`, `scipy`, and `ninja` — enough to run CPU solvers out of the box. `torch-sla[all]` additionally bundles `pytest`, `nvmath-python`, and `cupy-cuda12x`, but **does not** include `[dev]` or `[docs]` — install those separately if needed.
+### Native backends (torch-amgx / torch-strumpack): GitHub Releases, not PyPI
+
+The two compiled backends are PyTorch C++/CUDA extensions and are **not
+published on PyPI** (PyPI upload is unavailable). Download a prebuilt wheel
+from GitHub Releases:
+
+- **torch-amgx** — <https://github.com/sparsexlab/torch-amgx/releases> — Linux
+  + Windows, py3.10–3.13, CUDA 12.4 / 12.6 / 12.8 (cu12.8 includes Blackwell
+  `sm_100`/`sm_120`). Wheel filenames carry a per-CUDA build tag
+  `0_cu124` / `0_cu126` / `0_cu128`.
+- **torch-strumpack** — <https://github.com/sparsexlab/torch-strumpack/releases>
+  — Linux (cpu/cuda/rocm) + macOS arm64, py3.10–3.13. **No Windows**
+  (STRUMPACK needs a Fortran compiler that MSVC lacks).
+
+**ABI caveat:** each wheel is ABI-tied to **both** the CUDA version **and**
+the specific PyTorch version it was built against. You must (a) pick the wheel
+whose `0_cuXXX` tag matches `torch.version.cuda`, and (b) have a matching
+torch version. A mismatch fails **at import** with `DLL load failed ...
+procedure not found` (Windows) or an undefined-symbol error (Linux). Install
+the exact asset URL with `--no-deps`:
+
+```bash
+# Example: torch-amgx for CUDA 12.6 + CPython 3.13 (use the real URL from the
+# Releases page matching your torch / CUDA / Python)
+pip install --no-deps \
+  https://github.com/sparsexlab/torch-amgx/releases/download/<tag>/torch_amgx-<ver>-0_cu126-cp313-cp313-linux_x86_64.whl
+```
+
+> **Note**: The core install (`pip install torch-sla`) pulls in `torch`, `numpy`, `scipy`, and `ninja` — enough to run CPU solvers out of the box. `torch-sla[all]` additionally bundles `pytest` and `nvmath-python`, but **does not** include `[dev]`, `[docs]`, or the native `torch-amgx` / `torch-strumpack` release wheels — install those separately if needed.
 
 After installation, you can inspect which backends are available on your machine:
 
@@ -127,26 +157,37 @@ Based on benchmarks on 2D Poisson equations (tested up to **400M DOF** multi-GPU
 
 ### Available Backends
 
+All 6 backends are verified correct — each is checked against a reference
+solution with relative residual ‖Ax−b‖/‖b‖ at/near machine precision
+(measured `strumpack` ≈ 3e-13, `amgx` ≈ 5.6e-13).
+
 | Backend | Device | Description | Recommended For |
 |---------|--------|-------------|-----------------|
 | `scipy` | CPU | SciPy (LU/UMFPACK) | **CPU default** - fast + machine precision |
-| `cupy` | CUDA | CuPy (LU, CG, GMRES) | GPU direct + iterative via cupyx.scipy |
-| `cudss` | CUDA | NVIDIA cuDSS (LU, Cholesky, LDLT) | **CUDA default** - fastest direct (NVIDIA) |
+| `pytorch` | CPU/CUDA/ROCm | PyTorch-native Krylov (CG, BiCGStab, GMRES, MINRES, LSQR, LSMR) | Very large problems (> 2M DOF); device-agnostic incl. AMD ROCm |
+| `cudss` | CUDA | NVIDIA cuDSS (LU, Cholesky, LDLT) | **CUDA default** - fastest direct (NVIDIA only) |
 | `strumpack` | CPU/CUDA/ROCm | STRUMPACK multifrontal direct (LU) via torch-strumpack | **Portable direct solver, incl. AMD ROCm** |
-| `pytorch` | CPU/CUDA | PyTorch-native (CG, BiCGStab, GMRES, MINRES) | Very large problems (> 2M DOF) |
+| `pyamg` | CPU/CUDA/ROCm | PyAMG (Ruge-Stuben / smoothed-aggregation AMG) | CPU AMG setup + on-device V-cycle |
+| `amgx` | CUDA | NVIDIA AmgX (AMG, PCG, PBiCGStab, FGMRES) via torch-amgx | NVIDIA GPU AMG/Krylov (incl. Blackwell sm_120) |
+
+> The two native compiled backends — `strumpack` (torch-strumpack) and
+> `amgx` (torch-amgx) — ship as **prebuilt wheels on GitHub Releases**, not
+> PyPI. See [Installation](#installation) for the wheel-selection / ABI rules.
 
 ### Solver Methods
 
 | Method | Backends | Best For | Precision |
 |--------|----------|----------|-----------|
-| `lu` | scipy, cupy, cudss | General matrices (direct) | Machine precision |
+| `lu` | scipy, strumpack, cudss | General matrices (direct) | Machine precision |
 | `cholesky` | cudss | **SPD matrices (fastest)** | Machine precision |
 | `ldlt` | cudss | Symmetric matrices | Machine precision |
 | `umfpack` | scipy | General matrices (requires scikit-umfpack) | Machine precision |
-| `cg` | scipy, cupy, pytorch | SPD matrices (iterative) | ~1e-6 to 1e-7 |
-| `bicgstab` | scipy, pytorch | General (iterative) | ~1e-6 to 1e-7 |
-| `gmres` | scipy, cupy, pytorch | General (iterative) | ~1e-6 to 1e-7 |
+| `cg` | scipy, pytorch, amgx (PCG) | SPD matrices (iterative) | ~1e-6 to 1e-7 |
+| `bicgstab` | scipy, pytorch, amgx (PBiCGStab) | General (iterative) | ~1e-6 to 1e-7 |
+| `gmres` | scipy, pytorch, amgx (FGMRES) | General (iterative) | ~1e-6 to 1e-7 |
 | `minres` | scipy, pytorch | Symmetric indefinite (iterative) | ~1e-6 to 1e-7 |
+| `lsqr` / `lsmr` | pytorch | Least-squares / rectangular (iterative) | ~1e-6 to 1e-7 |
+| `amg` (V-cycle) | pyamg, amgx | AMG solve/precond on PDE systems | configurable |
 
 ## Batched Solve
 
@@ -206,6 +247,28 @@ x_full  = x_dt.full_tensor()
 # Run with 4 GPUs
 torchrun --standalone --nproc_per_node=4 your_script.py
 ```
+
+### Distributed scaling
+
+The canonical distributed linear-solve scaling benchmark measures **weak**
+(fixed DOF/rank), **strong** (fixed total DOF), and **throughput** (DOF/s
+vs ranks) scaling, reporting wall-clock solve time, the relative residual
+`||Ax-b||/||b||` (correctness gate), and parallel efficiency:
+
+```bash
+# run the p=1 baseline first, then larger world sizes (results accumulate)
+for P in 1 2 4 8; do
+  torchrun --standalone --nproc_per_node=$P \
+    benchmarks/distributed/scaling/distributed_solve_scaling.py \
+    --mode weak --dof-per-rank 100000
+done
+# render the accumulated weak/strong/throughput plot
+python benchmarks/distributed/scaling/distributed_solve_scaling.py --plot-only
+```
+
+Script: `benchmarks/distributed/scaling/distributed_solve_scaling.py`.
+Full hand-off guide (launch commands, NCCL env vars, metric meanings, how
+to extend): [`docs/source/distributed_scaling.rst`](docs/source/distributed_scaling.rst).
 
 ## Gradient Support
 
@@ -328,7 +391,7 @@ print(f.grad)  # ∂L/∂f via implicit differentiation
 - Memory-efficient adjoint method (no Jacobian storage)
 - Jacobian-free Newton-Krylov via autograd
 - Multiple parameters with mixed requires_grad
-- Seamless integration with `SparseTensor` class
+- Integrates with the `SparseTensor` class
 
 ## Matrix Operations
 
@@ -486,7 +549,7 @@ torchrun --standalone --nproc_per_node=4 examples/distributed/distributed_solve.
 3. **Use scipy+lu** for CPU (all sizes)
 4. **Use cudss+cholesky** for CUDA (up to ~2M DOF)
 5. **Use pytorch+cg** for very large problems (> 2M DOF)
-6. **Use cupy** for GPU iterative solvers (CG, GMRES) or as a direct solver fallback
+6. **Use strumpack** for a portable GPU *direct* solve where cuDSS can't go (AMD ROCm), or `amgx` for NVIDIA GPU AMG/Krylov on very large systems
 7. **Use LU factorization** for repeated solves with same matrix
 8. **Determinant computation**:
    - **Use CPU for sparse matrices** - CUDA requires dense conversion (much slower)
@@ -503,7 +566,9 @@ torchrun --standalone --nproc_per_node=4 examples/distributed/distributed_solve.
 - SciPy (recommended for CPU)
 - CUDA Toolkit (for GPU backends)
 - nvmath-python (optional, for cuDSS backend)
-- cupy-cuda12x (optional, for CuPy backend)
+- torch-amgx (optional, NVIDIA AmgX backend — GitHub Releases wheel)
+- torch-strumpack (optional, STRUMPACK direct backend — GitHub Releases wheel)
+- pyamg (optional, for PyAMG backend)
 
 ## Performance Tips
 
@@ -526,6 +591,37 @@ det = A_cuda.cpu().det()  # 1.3 ms (1.9x faster!)
 - **Iterative methods**: Use `method='cg'` or `method='bicgstab'` for large systems
 
 See `benchmarks/README.md` for detailed performance analysis.
+
+### Per-op scaling & capacity
+
+`benchmarks/benchmark_all_ops_scaling.py` sweeps DOF for **every** op (spmv, matmat,
+solve cg/lu/strumpack, det, logdet, eigsh, norm, transpose, `connected_components`)
+and records **latency / throughput / peak memory / CPU util**, plus `--max-probe` for
+the largest problem each op sustains. Problems come from `torch_sla.datasets`; the
+backend each op uses is shown in every plot legend (`solve_cg → pytorch/cg`,
+`solve_lu → scipy/lu`, graph/spmv/norm/transpose → torch-native).
+
+```bash
+python benchmarks/benchmark_all_ops_scaling.py --quick --max-probe   # CPU
+python benchmarks/benchmark_all_ops_scaling.py --device cuda         # GPU box
+```
+
+On CPU (16-core / 44 GB) to ~10⁶ DOF: `transpose` is O(1), `norm`/`spmv` linear,
+`connected_components` runs in O(log N) FastSV rounds (~4–5× scipy.csgraph),
+`solve_lu` is direct/super-linear (caps capacity first). Latency (ms) is the primary
+metric. Plots in `benchmarks/results/`.
+
+On **GPU** (`--device cuda`, RTX 4070 Ti SUPER) the device-agnostic ops run unchanged:
+`connected_components` is **~20× faster** than CPU at 10⁶ DOF (FastSV rounds
+parallelise; slope 0.16 vs 0.76), `solve_cg` ~10×, `transpose` unchanged (view op);
+and `peak_MB` becomes real device memory (`cuda.max_memory_allocated`). GPU plots are
+prefixed `cuda_`.
+
+`benchmarks/benchmark_distributed_scaling.py` adds strong/weak scaling for the
+distributed ops (matvec, cg, eigsh) across ranks. On a single CPU box over `gloo`
+scaling is communication-bound (no real interconnect), but results are rank-invariant
+(same eigenvalue / residual at every world size, incl. non-monotone partitions) —
+real speedup needs multi-GPU + NCCL.
 
 ## Contributing
 

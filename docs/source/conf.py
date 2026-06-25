@@ -59,7 +59,11 @@ intersphinx_mapping = {
 }
 
 templates_path = ['_templates']
-exclude_patterns = ['setup.py', '__init__.py']
+# 'zh' holds the Chinese docs, which are built as a separate Sphinx project
+# (see source/zh/conf.py, built via `sphinx-build -b html source/zh ...`).
+# Exclude it from the English build so its pages are not processed twice
+# (which otherwise produces duplicate-label / orphan-toctree warnings).
+exclude_patterns = ['setup.py', '__init__.py', 'zh']
 
 # -- Language settings -------------------------------------------------------
 language = 'en'

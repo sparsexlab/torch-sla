@@ -6,7 +6,7 @@ A differentiable sparse linear equation solver library for PyTorch with multiple
 Backends
 --------
 - CPU: SciPy (LU, UMFPACK), PyTorch-native (CG, BiCGStab, GMRES, MINRES, LSQR,
-  LSMR), STRUMPACK (multifrontal LU / Cholesky / LDLt, real + complex)
+  LSMR), STRUMPACK (multifrontal LU, real + complex)
 - CUDA (NVIDIA): PyTorch-native (CG, BiCGStab, GMRES, MINRES, LSQR, LSMR),
   cuDSS (LU, Cholesky, LDLT), STRUMPACK
 - ROCm/HIP (AMD): PyTorch-native (CG, BiCGStab, GMRES, MINRES, LSQR, LSMR) and

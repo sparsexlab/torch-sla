@@ -25,34 +25,19 @@ import pytest
 import torch
 
 from torch_sla.sparse_tensor import SparseTensor
+from torch_sla.datasets import bratu_1d
+
 
 torch.set_default_dtype(torch.float64)
 
 
-def _bratu_c(lmbda):
-    """Lower-branch root of c = sqrt(2 lambda) cosh(c/4) by fixed-point."""
-    k = math.sqrt(2.0 * lmbda)
-    c = 0.1
-    for _ in range(200):
-        c = k * math.cosh(c / 4.0)
-    return c
-
-
-def _bratu_exact(x, lmbda):
-    c = _bratu_c(lmbda)
-    return -2.0 * np.log(np.cosh((c / 2.0) * (x - 0.5)) / math.cosh(c / 4.0))
-
-
-def _laplacian_1d(n, h):
-    """(1/h^2) tridiag(-1, 2, -1) as a torch-sla SparseTensor, interior nodes."""
-    rows, cols, vals = [], [], []
-    inv = 1.0 / (h * h)
-    for i in range(n):
-        rows.append(i); cols.append(i); vals.append(2.0 * inv)
-        if i + 1 < n:
-            rows.append(i); cols.append(i + 1); vals.append(-inv)
-            rows.append(i + 1); cols.append(i); vals.append(-inv)
-    return SparseTensor(torch.tensor(vals), torch.tensor(rows), torch.tensor(cols), (n, n))
+def _bratu_problem(n, lmbda):
+    """1D Bratu problem (operator + analytical solution) from torch_sla.datasets.
+    Returns (SparseTensor A, exact solution tensor)."""
+    prob = bratu_1d(n, lam=lmbda)
+    val, row, col, shape = prob.coo()
+    A = SparseTensor(val, row, col, shape)
+    return A, prob.exact
 
 
 def _resid(u, A, lmbda):
@@ -65,12 +50,9 @@ def test_bratu_1d_matches_analytical():
     lmbda = 1.0
     errs = {}
     for n in (50, 200):
-        h = 1.0 / (n + 1)
-        x = torch.linspace(h, 1 - h, n, dtype=torch.float64)
-        A = _laplacian_1d(n, h)
+        A, u_exact = _bratu_problem(n, lmbda)
         u = A.nonlinear_solve(_resid, torch.zeros(n), torch.tensor(lmbda),
                               linear_method="lu")
-        u_exact = torch.from_numpy(_bratu_exact(x.numpy(), lmbda))
         errs[n] = (u - u_exact).abs().max().item()
     # absolute accuracy at the fine grid, and O(h^2) convergence (4x n -> ~16x smaller)
     assert errs[200] < 1e-3, f"max error at n=200 too large: {errs[200]:.2e}"
@@ -85,7 +67,7 @@ def test_bratu_1d_matches_scipy_root():
     lmbda = 1.5
     n = 100
     h = 1.0 / (n + 1)
-    A = _laplacian_1d(n, h)
+    A, _ = _bratu_problem(n, lmbda)
     u = A.nonlinear_solve(_resid, torch.zeros(n), torch.tensor(lmbda),
                           linear_method="lu")
 

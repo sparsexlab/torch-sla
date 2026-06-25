@@ -19,7 +19,7 @@ import numpy as np
 import scipy.sparse as sp
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from torch_sla import SparseTensor, DetConfig  # noqa: E402
 

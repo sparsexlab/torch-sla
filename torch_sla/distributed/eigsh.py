@@ -21,7 +21,22 @@ from ..sparse_tensor.linalg import _lobpcg_core
 
 
 def _column_matvec_global(D, x_col: torch.Tensor) -> torch.Tensor:
-    return (D @ D.scatter(x_col)).full_tensor()
+    """Distributed matvec returning the FULL global vector replicated on
+    every rank.
+
+    The owned-row result of ``D @ D.scatter(x_col)`` lives in each rank's
+    arbitrary ``owned_nodes`` order; it must be scattered back into global
+    positions via the partition's ``owned_nodes`` (NOT rank-order
+    concatenation, which permutes -- silently wrong -- under non-monotone
+    partitions such as ``rcb`` / ``hilbert`` / real ``metis``).
+    """
+    from .collectives import gather_owned_to_global
+
+    y_dt = D @ D.scatter(x_col)
+    partition = D._spec.placement.partition
+    owned = partition.owned_nodes.to(device=x_col.device, dtype=torch.int64)
+    y_owned = y_dt.to_local().contiguous()
+    return gather_owned_to_global(owned, y_owned, int(D.shape[0]))
 
 
 def eigsh_shard(
