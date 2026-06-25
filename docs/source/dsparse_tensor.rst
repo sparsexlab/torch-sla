@@ -105,6 +105,54 @@ point-to-point halo exchange, then runs a purely local SpMV over its owned
 rows. This keeps memory and compute per rank proportional to its share of the
 matrix; see :ref:`op-distributed-matvec`.
 
+The diagram below shows two ranks. Each owns a contiguous block of rows
+(solid nodes). A row owned by rank 0 may reference a column owned by rank 1
+(and vice versa); those off-rank entries are the *halo* / *ghost* slots
+(dashed). The dashed cross-rank arrows are the halo exchange: each rank sends
+its owned boundary values to fill the neighbor's ghost slots, after which both
+ranks run a fully local SpMV.
+
+.. graphviz::
+   :alt: Halo exchange between two ranks before a distributed SpMV
+   :caption: Halo exchange: boundary values are sent to fill the neighbor's
+             ghost slots, then each rank runs a local SpMV.
+
+   digraph halo {
+       rankdir=LR;
+       node [shape=circle, fontsize=10, fixedsize=true, width=0.45];
+       edge [fontsize=9];
+
+       subgraph cluster_r0 {
+           label="rank 0  (owns rows 0..k)";
+           style=rounded; color="#3b6ea5"; fontcolor="#3b6ea5";
+           o0a [label="0", style=filled, fillcolor="#cfe2f3"];
+           o0b [label="1", style=filled, fillcolor="#cfe2f3"];
+           o0bnd [label="k", style=filled, fillcolor="#9fc5e8"];
+           g0 [label="ghost", style="dashed,filled", fillcolor="#f4f4f4"];
+           o0a -> o0b -> o0bnd [style=invis];
+       }
+
+       subgraph cluster_r1 {
+           label="rank 1  (owns rows k+1..n)";
+           style=rounded; color="#a55b3b"; fontcolor="#a55b3b";
+           o1bnd [label="k+1", style=filled, fillcolor="#f9cb9c"];
+           o1a [label="...", style=filled, fillcolor="#fce5cd"];
+           o1b [label="n", style=filled, fillcolor="#fce5cd"];
+           g1 [label="ghost", style="dashed,filled", fillcolor="#f4f4f4"];
+           o1bnd -> o1a -> o1b [style=invis];
+       }
+
+       // halo exchange: boundary owned value -> neighbor's ghost slot
+       o0bnd -> g1 [label="send boundary", color="#3b6ea5",
+                    style=dashed, constraint=false];
+       o1bnd -> g0 [label="send boundary", color="#a55b3b",
+                    style=dashed, constraint=false];
+
+       // local SpMV consumes the now-filled ghost
+       g0 -> o0bnd [label="local SpMV", color="#888888", style=dotted];
+       g1 -> o1bnd [label="local SpMV", color="#888888", style=dotted];
+   }
+
 Operation catalog
 -----------------
 
