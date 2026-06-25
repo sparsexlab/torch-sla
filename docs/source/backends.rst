@@ -38,7 +38,7 @@ The current backend lineup and what each supports:
      - ✔
      - ✔
      - --
-     - CG, BiCGStab, GMRES, MINRES, PCG, PBiCGStab
+     - CG, BiCGStab, GMRES, MINRES, LSQR, LSMR (+ PCG / PBiCGStab)
      - ✔
      - ✔
      - via ``DSparseTensor``
@@ -84,6 +84,23 @@ The current backend lineup and what each supports:
      - --
      - ✔
 
+.. note::
+
+   **All six backends are verified correct.** Each is checked against a
+   reference solution with the relative residual ‖Ax − b‖ / ‖b‖ at or near
+   machine precision. The two direct GPU paths land well inside that
+   envelope — measured ``strumpack`` ≈ ``3e-13`` and ``amgx`` ≈ ``5.6e-13``
+   on the verification matrices.
+
+.. note::
+
+   ``cudss`` and ``pyamg`` are PyPI-installable, but the two **native
+   compiled** backends — ``strumpack`` (``torch-strumpack``) and ``amgx``
+   (``torch-amgx``) — ship as **prebuilt wheels on GitHub Releases** (not
+   PyPI), and each wheel is ABI-tied to a specific CUDA *and* PyTorch
+   version. See :ref:`prebuilt-native-wheels` in the installation guide for
+   the wheel-selection rules and a concrete ``pip install --no-deps`` example.
+
 ----
 
 The STRUMPACK backend
@@ -99,9 +116,14 @@ other backends.
 In practice STRUMPACK is the answer for a GPU **direct** solve on
 hardware where cuDSS cannot go — most importantly AMD ROCm GPUs, where
 cuDSS is unavailable. It requires the optional ``torch-strumpack``
-package::
+package, published as **prebuilt wheels on GitHub Releases** (not PyPI;
+see :ref:`prebuilt-native-wheels`) for Linux cpu / cuda / rocm and macOS
+arm64. There is **no Windows wheel** — STRUMPACK needs a Fortran compiler
+that MSVC does not provide::
 
-    pip install torch-strumpack   # cpu / cuda / rocm wheels
+    # Grab the matching wheel from
+    #   https://github.com/sparsexlab/torch-strumpack/releases
+    pip install --no-deps <release-url>/torch_strumpack-...-linux_x86_64.whl
 
 ----
 
@@ -133,11 +155,12 @@ which OS each one builds on today.
        (ROCm torch builds report as ``cuda``).
    * - ``strumpack``
      - ✔
-     - ✔
-     - ✔
+     - --
+     - ✔ (arm64)
      - Multifrontal sparse direct solver (multifrontal LU,
-       real + complex). CPU/CUDA/ROCm via ``torch-strumpack``
-       (``pip install torch-strumpack``).
+       real + complex). CPU / CUDA / ROCm on Linux + macOS arm64 via
+       ``torch-strumpack`` (GitHub-Release wheels,
+       :ref:`prebuilt-native-wheels`). **No Windows** — needs Fortran.
    * - ``cudss``
      - ✔
      - ✔
@@ -234,8 +257,10 @@ preconditioning and high-end GPU AMG:
    * - ``amgx``
      - **available** (this release)
      - CUDA AMG + Krylov (Nvidia AmgX)
-     - Linux + Windows only. NVIDIA GPU required.
-       Install via ``pip install torch-sla[amgx]`` (pulls torch-amgx wheels).
+     - Linux + Windows only. NVIDIA GPU required (incl. Blackwell
+       ``sm_120`` on cu12.8). Install the prebuilt wheel from
+       `torch-amgx Releases <https://github.com/sparsexlab/torch-amgx/releases>`_
+       (not PyPI; see :ref:`prebuilt-native-wheels`).
    * - ``petsc``
      - investigating
      - CPU/GPU direct + iterative, distributed (PETSc/hypre BoomerAMG)
