@@ -539,10 +539,41 @@ class DSparseTensor:
         coords: Optional[torch.Tensor] = None,
         verbose: bool = False,
     ) -> "DSparseTensor":
-        """One-shot constructor: take a global :class:`SparseTensor` +
+        r"""One-shot constructor: take a global :class:`SparseTensor` +
         :class:`DeviceMesh`, partition rows across the mesh, return a
         ready-to-use distributed tensor with :class:`RowPartitioned`
         placement.
+
+        .. math::
+
+            \{0,\dots,N-1\} = \bigsqcup_{r=0}^{P-1} V_r,\qquad
+            \text{halo}(r) = \{ j \notin V_r : \exists\, i\in V_r,\,
+            A_{ij}\neq 0 \}
+
+        i.e. rows are split into ``P`` disjoint owned sets ``V_r`` (one per
+        rank), and each rank additionally tracks the off-rank columns its
+        rows touch (the *halo*) for matvec communication.
+
+        Algorithm
+        ---------
+        Compute a balanced row partition, then build each rank's local
+        sub-matrix + halo / send-recv index plan. ``"metis"`` / ``"rcb"``
+        minimize edge cut (halo volume); ``"simple"`` / ``"slicing"`` are
+        contiguous splits. Determinism is enforced by computing labels on
+        rank 0 and broadcasting:
+
+        .. code-block:: text
+
+            ids   = resolve_partition_ids(A, P, method)   # rank 0, broadcast
+            part  = build_partition(A, ids, rank)         # owned + halo + plan
+            local = A.extract_partition(part)             # this rank's block
+            return DSparseTensor(local, mesh, RowPartitioned)
+
+        Complexity
+        ----------
+        Time :math:`O(nnz)` for ``"simple"``/``"slicing"``; graph
+        partitioners (METIS) are :math:`O(nnz)`-ish near-linear in practice.
+        Space :math:`O(N + nnz/P)` per rank (owned rows + halo).
 
         Equivalent to::
 
@@ -1528,8 +1559,36 @@ class DSparseTensor:
     # =========================================================================
     
     def __matmul__(self, x: Union[torch.Tensor, "DTensor"]) -> Union[torch.Tensor, "DTensor"]:
-        """``D @ x``. See :func:`distributed_matvec.matmul_spec` /
-        :func:`distributed_matvec.matmul_batch_shard`."""
+        r"""Distributed matrix--vector product ``D @ x``.
+
+        .. math::
+
+            y = A x,\qquad
+            y_r = A_{r,V_r} x_{V_r} + A_{r,\text{halo}(r)} x_{\text{halo}(r)}
+
+        Each rank computes its owned slice ``y_r`` of the global product
+        from its local rows; columns it does not own are fetched from
+        neighbours via a **halo exchange** before the local SpMV.
+
+        Algorithm
+        ---------
+        .. code-block:: text
+
+            x_halo = halo_exchange(x)        # one sparse all-to-all (neighbours)
+            x_loc  = concat(x_owned, x_halo)
+            y_r    = local_spmv(A_local, x_loc)   # O(local nnz)
+
+        Complexity
+        ----------
+        Time :math:`O(nnz / P)` compute per rank plus one halo exchange whose
+        volume is the edge cut (small for a good partition); space
+        :math:`O(N/P + |\text{halo}|)`. Differentiable: backward is a halo
+        exchange of the adjoint vector plus a transposed local SpMV
+        (:math:`O(1)` extra graph nodes).
+
+        See :func:`distributed_matvec.matmul_spec` /
+        :func:`distributed_matvec.matmul_batch_shard`.
+        """
         from .matvec import matmul_spec, matmul_batch_shard
         if self._spec is None:
             raise RuntimeError("DSparseTensor.__matmul__ requires a spec")
@@ -1777,7 +1836,35 @@ class DSparseTensor:
     # so they add zero per-call overhead over calling the delegate directly.
     # ====================================================================== #
     def solve(self, b: Any, **kwargs) -> Any:
-        """``D.solve(b)`` -- distributed Krylov solve in Shard(0) space.
+        r"""``D.solve(b)`` -- distributed Krylov solve in Shard(0) space.
+
+        .. math::
+
+            A x = b \quad\Longrightarrow\quad x = A^{-1} b
+
+        Solves the *global* system with no rank ever materialising a global
+        vector: every Krylov vector stays the owned slice (size
+        ``num_owned``).
+
+        Algorithm
+        ---------
+        Distributed CG / BiCGStab / GMRES / MINRES. Sparse matvec uses a
+        halo exchange (``D @ p``); the two scalar inner products per
+        iteration are summed across ranks with ``dist.all_reduce``:
+
+        .. code-block:: text
+
+            r = b - D @ x;  p = r
+            repeat until ||r|| <= atol:        # ||.|| via all_reduce
+                Ap    = D @ p                  # halo_exchange + local SpMV
+                alpha = all_reduce(<r,r>) / all_reduce(<p,Ap>)
+                x += alpha*p;  r -= alpha*Ap;  update p
+
+        Complexity
+        ----------
+        Time :math:`O(m \cdot nnz / P)` compute per rank over ``m``
+        iterations, plus ``m`` halo exchanges and ``O(m)`` all-reduces;
+        space :math:`O((n + nnz)/P)` per rank.
 
         Sugar for :meth:`solve_distributed_shard`; mirrors the top-level
         :func:`torch_sla.solve`. ``b`` is a ``DTensor[Shard(0)]`` (most
@@ -1796,8 +1883,35 @@ class DSparseTensor:
 
     def nonlinear_solve(self, residual_fn: Any, u0: Any, *,
                         jac_diag_fn: Any, **kwargs) -> Any:
-        """``D.nonlinear_solve(residual, u0, jac_diag_fn=...)`` --
-        distributed Newton solve for ``F(u) = 0`` in Shard(0) space.
+        r"""``D.nonlinear_solve(residual, u0, jac_diag_fn=...)`` --
+        distributed Newton solve for :math:`F(u) = 0` in Shard(0) space.
+
+        .. math::
+
+            F(u^\*) = 0,\qquad
+            u_{n+1} = u_n - J(u_n)^{-1} F(u_n),\quad J=\partial F/\partial u
+
+        Algorithm
+        ---------
+        Newton-Raphson where every step's Jacobian solve is a *distributed*
+        Krylov solve (:meth:`solve`); residual and Jacobian-diagonal are
+        evaluated rank-locally:
+
+        .. code-block:: text
+
+            u = u0
+            for it in 1..max_iter:
+                F = residual(u)              # local, halo-exchanged
+                if ||F|| <= tol: break       # ||.|| via all_reduce
+                du = D_J.solve(-F)           # distributed Krylov (inner)
+                u += du
+
+        Complexity
+        ----------
+        Time :math:`O(m \cdot \text{solve})` for ``m`` Newton steps, each
+        ``solve`` a distributed Krylov solve; space :math:`O((n+nnz)/P)` per
+        rank. Gradients (when requested) use the IFT adjoint -- one extra
+        distributed solve, :math:`O(1)` graph nodes.
 
         Sugar for :meth:`nonlinear_solve_distributed_shard`; mirrors the
         single-process :meth:`SparseTensor.nonlinear_solve`. Returns the
@@ -1807,7 +1921,33 @@ class DSparseTensor:
             residual_fn, u0, jac_diag_fn=jac_diag_fn, **kwargs)
 
     def connected_components(self) -> Tuple[torch.Tensor, int]:
-        """``D.connected_components()`` -- distributed connected components.
+        r"""``D.connected_components()`` -- distributed connected components.
+
+        .. math::
+
+            G(A)=(V,E),\quad E=\{(i,j):A_{ij}\neq 0\}
+            \;\longrightarrow\; \text{maximal connected subsets of } V
+
+        Algorithm
+        ---------
+        Distributed **FastSV / Shiloach-Vishkin** label propagation: every
+        rank hooks its owned edges to the minimum neighbour label, exchanges
+        boundary labels across ranks, and path-compresses, iterating to a
+        global fixed point in :math:`O(\log N)` rounds:
+
+        .. code-block:: text
+
+            label[i] = i  (owned)
+            repeat until global labels stable:
+                hook owned edges (scatter_reduce amin)
+                halo_exchange(boundary labels)        # cross-rank
+                compress_to_roots(label)
+
+        Complexity
+        ----------
+        Time :math:`O((nnz/P)\log N)` compute per rank plus :math:`O(\log N)`
+        halo exchanges; space :math:`O(N/P)`. **Non-differentiable**
+        (discrete labels).
 
         Sugar for :func:`torch_sla.distributed.graph.connected_components_shard`;
         mirrors the single-process :meth:`SparseTensor.connected_components`.
