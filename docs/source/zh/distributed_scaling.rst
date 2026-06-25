@@ -1,5 +1,9 @@
+分布式 Scaling 基准
+===================
+
 .. note::
 
-   **中文翻译进行中 (Translation in progress).** 以下为英文原文内容。
+   本页中文翻译尚未完成,请查看 `英文版本 <../distributed_scaling.html>`_。
 
-.. include:: ../distributed_scaling.rst
+   This page has not been translated yet — please see the
+   `English version <../distributed_scaling.html>`_.
