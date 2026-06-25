@@ -28,6 +28,7 @@
    :ref:`prebuilt-native-wheels-zh`。
 
 .. _prebuilt-native-wheels-zh:
+.. _prebuilt-native-wheels:
 
 预编译 wheel：torch-amgx 与 torch-strumpack
 -------------------------------------------

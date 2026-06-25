@@ -109,9 +109,15 @@ torch-sla 非常适合:
 
    introduction
    installation
-   torch_sla
+   sparse_tensor
+   dsparse_tensor
+   distributed_scaling
+   operations
+   architecture
+   backends
    examples
    benchmarks
+   torch_sla
 
 ----
 

@@ -1,3 +1,7 @@
+.. note::
+
+   **中文翻译进行中 (Translation in progress).** 以下为英文原文内容。
+
 Operations
 ==========
 
@@ -12,7 +16,7 @@ operations are :class:`~torch_sla.SparseTensor` (single process, see
 Throughout, ``A`` is a sparse matrix built from a 2D Poisson stencil; its
 sparsity pattern looks like:
 
-.. figure:: ../../assets/examples/spy_poisson_50x50.png
+.. figure:: ../../../assets/examples/spy_poisson_50x50.png
    :width: 50%
    :align: center
 
@@ -62,7 +66,7 @@ either by setting ``requires_grad`` on the values or via the functional
 ``A.spy()`` shows the operator; the solve maps the right-hand side ``b`` to the
 solution ``x = A⁻¹b``. For an SPD system the CG residual decays as below.
 
-.. figure:: ../../assets/examples/cg_convergence.png
+.. figure:: ../../../assets/examples/cg_convergence.png
    :width: 60%
    :align: center
 
@@ -76,7 +80,7 @@ solution ``x = A⁻¹b``. For an SPD system the CG residual decays as below.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/cg_scaling.png
+.. image:: ../../../assets/benchmarks/cg_scaling.png
    :alt: CG solve scaling
    :width: 80%
    :align: center
@@ -119,7 +123,7 @@ pattern above; only the non-zero values change between elements.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/solve_batch_scaling.png
+.. image:: ../../../assets/benchmarks/solve_batch_scaling.png
    :alt: solve_batch scaling
    :width: 80%
    :align: center
@@ -157,7 +161,7 @@ skip refactorization -- forward/back substitution only.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/lu_scaling.png
+.. image:: ../../../assets/benchmarks/lu_scaling.png
    :alt: LU solve scaling
    :width: 80%
    :align: center
@@ -207,7 +211,7 @@ pattern, which Newton reuses each iteration.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/nonlinear_solve_scaling.png
+.. image:: ../../../assets/benchmarks/nonlinear_solve_scaling.png
    :alt: nonlinear_solve scaling
    :width: 80%
    :align: center
@@ -244,7 +248,7 @@ is the general (non-symmetric) counterpart. Eigenvalues are differentiable.
 
 **Input / output visualization**
 
-.. figure:: ../../assets/examples/eigenvalue_spectrum.png
+.. figure:: ../../../assets/examples/eigenvalue_spectrum.png
    :width: 60%
    :align: center
 
@@ -259,7 +263,7 @@ is the general (non-symmetric) counterpart. Eigenvalues are differentiable.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/eigsh_scaling.png
+.. image:: ../../../assets/benchmarks/eigsh_scaling.png
    :alt: eigsh scaling
    :width: 80%
    :align: center
@@ -290,7 +294,7 @@ V_k^T` -- the best rank-k approximation in Frobenius norm. Differentiable.
 
 **Input / output visualization**
 
-.. figure:: ../../assets/examples/svd_lowrank.png
+.. figure:: ../../../assets/examples/svd_lowrank.png
    :width: 70%
    :align: center
 
@@ -303,7 +307,7 @@ V_k^T` -- the best rank-k approximation in Frobenius norm. Differentiable.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/svd_scaling.png
+.. image:: ../../../assets/benchmarks/svd_scaling.png
    :alt: svd scaling
    :width: 80%
    :align: center
@@ -348,7 +352,7 @@ non-zeros in that row.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/spmv_scaling.png
+.. image:: ../../../assets/benchmarks/spmv_scaling.png
    :alt: SpMV scaling
    :width: 80%
    :align: center
@@ -390,7 +394,7 @@ determinant is a scalar summary of it.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/det_scaling.png
+.. image:: ../../../assets/benchmarks/det_scaling.png
    :alt: det scaling
    :width: 80%
    :align: center
@@ -425,7 +429,7 @@ Differentiable.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/logdet_scaling.png
+.. image:: ../../../assets/benchmarks/logdet_scaling.png
    :alt: logdet scaling
    :width: 80%
    :align: center
@@ -461,7 +465,7 @@ norm aggregates: :math:`\|A\|_F = \sqrt{\sum_{ij} a_{ij}^2}`.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/norm_scaling.png
+.. image:: ../../../assets/benchmarks/norm_scaling.png
    :alt: norm scaling
    :width: 80%
    :align: center
@@ -497,7 +501,7 @@ stronger anisotropy generally raises :math:`\kappa`.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/condition_number_scaling.png
+.. image:: ../../../assets/benchmarks/condition_number_scaling.png
    :alt: condition_number scaling
    :width: 80%
    :align: center
@@ -572,7 +576,7 @@ one.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/connected_components_scaling.png
+.. image:: ../../../assets/benchmarks/connected_components_scaling.png
    :alt: connected_components scaling
    :width: 80%
    :align: center
@@ -607,12 +611,12 @@ throughout this page.
 .. list-table::
    :widths: 50 50
 
-   * - .. figure:: ../../assets/examples/spy_poisson_10x10.png
+   * - .. figure:: ../../../assets/examples/spy_poisson_10x10.png
           :width: 100%
 
           2D Poisson (10×10), 100 DOF.
 
-     - .. figure:: ../../assets/examples/spy_tridiag_30x30.png
+     - .. figure:: ../../../assets/examples/spy_tridiag_30x30.png
           :width: 100%
 
           Tridiagonal (30×30), 1D Poisson.
@@ -695,7 +699,7 @@ distributed solvers.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/dist_throughput.png
+.. image:: ../../../assets/benchmarks/dist_throughput.png
    :alt: distributed throughput
    :width: 80%
    :align: center
@@ -731,10 +735,10 @@ SpMV plus all-reduce dot products, every vector kept rank-local. Sugar over
 .. list-table::
    :widths: 50 50
 
-   * - .. image:: ../../assets/benchmarks/dist_strong_scaling.png
+   * - .. image:: ../../../assets/benchmarks/dist_strong_scaling.png
           :width: 100%
 
-     - .. image:: ../../assets/benchmarks/dist_weak_scaling.png
+     - .. image:: ../../../assets/benchmarks/dist_weak_scaling.png
           :width: 100%
 
 Strong scaling (speedup vs ranks) and weak scaling (time vs ranks, ideal flat).
