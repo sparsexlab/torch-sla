@@ -1,0 +1,72 @@
+{
+  "op": "sparse matmat (A @ A)",
+  "backend": "torch",
+  "differentiable": false,
+  "device_label": {
+    "device": "cuda",
+    "device_kind": "CUDA",
+    "processor": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "dtype": "float64",
+    "torch": "2.6.0+cu124",
+    "compile": "eager, no compile",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "rows": [
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.0016237000236287713,
+      "tput": 630658.3636745198
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.0018831000197678804,
+      "tput": 2175136.7197717368
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.002288500079885125,
+      "tput": 7159274.3841295475
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.006177700008265674,
+      "tput": 10608478.869532961
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.02216779999434948,
+      "tput": 9053852.888024928
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.07520419999491423,
+      "tput": 5446504.317946333
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 692224,
+      "nnz": 3457792,
+      "time_s": 0.028770600096322596,
+      "tput": 24060116.844364285
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 1048576,
+      "nnz": 5238784,
+      "time_s": 0.02019750000908971,
+      "tput": 51916128.210327886
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "op": "log-determinant (Hutchinson)",
+  "backend": "hutchinson",
+  "differentiable": true,
+  "device_label": {
+    "device": "cuda",
+    "device_kind": "CUDA",
+    "processor": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "dtype": "float64",
+    "torch": "2.6.0+cu124",
+    "compile": "eager, no compile",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "rows": [
+    {
+      "op": "log-determinant (Hutchinson)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.08545670000603423,
+      "tput": 11982.676606137305,
+      "time_bwd_s": 0.300445850007236
+    },
+    {
+      "op": "log-determinant (Hutchinson)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.09954379999544472,
+      "tput": 41147.715881726836,
+      "time_bwd_s": 0.4847443500184454
+    },
+    {
+      "op": "log-determinant (Hutchinson)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.09126575000118464,
+      "tput": 179519.69933723586,
+      "time_bwd_s": 1.2425012500607409
+    },
+    {
+      "op": "log-determinant (Hutchinson)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.13138145004631951,
+      "tput": 498822.3221535064,
+      "time_bwd_s": 4.141119899984915
+    },
+    {
+      "op": "log-determinant (Hutchinson)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.12104694999288768,
+      "tput": 1658067.386347138,
+      "time_bwd_s": 11.392795049992856
+    },
+    {
+      "op": "log-determinant (Hutchinson)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.20179890003055334,
+      "tput": 2029743.4720307423,
+      "time_bwd_s": 22.055916599929333
+    }
+  ]
+}

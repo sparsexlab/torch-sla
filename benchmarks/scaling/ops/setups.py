@@ -143,6 +143,128 @@ def setup_solve_batch(A, dof, device, batch=4):
                                  tol=1e-8, maxiter=20000)
 
 
+# ---------------------------------------------------------------------------
+# BACKWARD (gradient) setups.
+#
+# Each ``setup_<op>_backward(A, dof, device) -> callable()`` returns a zero-arg
+# closure that runs the FULL forward+backward (gradient) pass once: it sets
+# ``requires_grad`` on a fresh copy of A's values (or the RHS, for the implicit
+# solves), runs the forward op, builds a scalar loss, and calls
+# ``loss.backward()``. Timed by the harness with CUDA sync, this exposes the
+# cost of the O(1)-adjoint gradient graph relative to the forward pass.
+#
+# A fresh leaf is rebuilt each call (``v.grad`` reset) so repeated timed calls
+# are independent and gradient accumulation does not bias the measurement.
+# ---------------------------------------------------------------------------
+def _grad_tensor(A, device):
+    """Fresh leaf copy of A's values with requires_grad=True, and a SparseTensor
+    sharing A's row/col built on top of it."""
+    v = A.values.detach().clone().requires_grad_(True)
+    B = SparseTensor(v, A.row_indices, A.col_indices, A.sparse_shape)
+    return B, v
+
+
+def setup_solve_backward(A, dof, device):
+    """forward+backward of x = A.solve(b) (pytorch/cg, SPD). loss = x.sum()."""
+    b = torch.ones(dof, dtype=A.dtype, device=device)
+
+    def run():
+        B, v = _grad_tensor(A, device)
+        x = B.solve(b, backend="pytorch", method="cg", tol=1e-8, maxiter=20000)
+        x.sum().backward()
+        return v.grad
+    return run
+
+
+def setup_eigsh_backward(A, dof, device):
+    """forward+backward of eigsh smallest-k eigenvalues. loss = sum(evals)."""
+    def run():
+        B, v = _grad_tensor(A, device)
+        evals, _ = B.eigsh(k=6, which="SA")
+        evals.real.sum().backward()
+        return v.grad
+    return run
+
+
+def setup_svd_backward(A, dof, device):
+    """forward+backward of truncated SVD singular values. loss = sum(S)."""
+    def run():
+        B, v = _grad_tensor(A, device)
+        U, S, Vt = B.svd(k=6)
+        S.sum().backward()
+        return v.grad
+    return run
+
+
+def setup_det_backward_op(A, dof, device):
+    """forward+backward of det. loss = det(A)."""
+    def run():
+        B, v = _grad_tensor(A, device)
+        B.det().backward()
+        return v.grad
+    return run
+
+
+def setup_logdet_backward(A, dof, device):
+    """forward+backward of logdet (Hutchinson). loss = logdet(A)."""
+    def run():
+        B, v = _grad_tensor(A, device)
+        with _M.DetConfig(method="hutchinson", num_probes=20, lanczos_iter=30):
+            o = B.logdet()
+        o.backward()
+        return v.grad
+    return run
+
+
+def setup_norm_backward(A, dof, device):
+    """forward+backward of Frobenius norm. loss = ||A||_F."""
+    def run():
+        B, v = _grad_tensor(A, device)
+        B.norm("fro").backward()
+        return v.grad
+    return run
+
+
+def setup_condition_number_backward(A, dof, device):
+    """forward+backward of spectral condition number. loss = cond_2(A)."""
+    def run():
+        B, v = _grad_tensor(A, device)
+        B.condition_number(ord=2).backward()
+        return v.grad
+    return run
+
+
+def setup_matvec_backward(A, dof, device):
+    """forward+backward of sparse matvec. loss = (A @ x).sum()."""
+    x = torch.randn(dof, dtype=A.dtype, device=device)
+
+    def run():
+        B, v = _grad_tensor(A, device)
+        (B @ x).sum().backward()
+        return v.grad
+    return run
+
+
+def setup_nonlinear_solve_backward(A, dof, device):
+    """forward+backward of the Newton nonlinear solve, differentiating the
+    converged solution u* w.r.t. the RHS f (implicit-function adjoint).
+    loss = u*.sum()."""
+    u0 = torch.zeros(dof, dtype=A.dtype, device=device)
+
+    def residual(u, Amat, rhs):
+        return (Amat @ u) + u ** 3 - rhs
+
+    def run():
+        f = torch.ones(dof, dtype=A.dtype, device=device, requires_grad=True)
+        u = A.nonlinear_solve(
+            residual, u0, f, method="newton", tol=1e-8, max_iter=50,
+            line_search=True, linear_solver="pytorch", linear_method="cg",
+        )
+        u.sum().backward()
+        return f.grad
+    return run
+
+
 def _solve_batch_check(A, dof, device, batch=4):
     """Verify: max relative residual over the batch."""
     M, N = A.sparse_shape

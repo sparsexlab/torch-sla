@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import OpSpec, SWEEP_CHEAP, SWEEP_CHEAP_QUICK, main_for  # noqa: E402
-from setups import setup_norm  # noqa: E402
+from setups import setup_norm, setup_norm_backward  # noqa: E402
 
 SPEC = OpSpec(
     name="Frobenius norm",
@@ -20,6 +20,7 @@ SPEC = OpSpec(
     reps=5,
     sweep=SWEEP_CHEAP,
     sweep_quick=SWEEP_CHEAP_QUICK,
+    backward_setup=setup_norm_backward,
 )
 
 main = main_for(SPEC)

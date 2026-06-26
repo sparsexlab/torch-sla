@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import OpSpec, SWEEP_DIRECT, SWEEP_DIRECT_QUICK, main_for  # noqa: E402
-from setups import setup_det  # noqa: E402
+from setups import setup_det, setup_det_backward_op  # noqa: E402
 
 SPEC = OpSpec(
     name="determinant",
@@ -20,6 +20,7 @@ SPEC = OpSpec(
     reps=2,
     sweep=SWEEP_DIRECT,
     sweep_quick=SWEEP_DIRECT_QUICK,
+    backward_setup=setup_det_backward_op,
 )
 
 main = main_for(SPEC)

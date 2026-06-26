@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import OpSpec, SWEEP_MID, SWEEP_MID_QUICK, main_for  # noqa: E402
-from setups import setup_logdet  # noqa: E402
+from setups import setup_logdet, setup_logdet_backward  # noqa: E402
 
 SPEC = OpSpec(
     name="log-determinant (Hutchinson)",
@@ -20,6 +20,7 @@ SPEC = OpSpec(
     reps=2,
     sweep=SWEEP_MID,
     sweep_quick=SWEEP_MID_QUICK,
+    backward_setup=setup_logdet_backward,
 )
 
 main = main_for(SPEC)

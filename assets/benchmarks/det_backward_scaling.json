@@ -1,0 +1,58 @@
+{
+  "op": "det backward (adjoint)",
+  "backend": "adjoint",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "det backward (adjoint)",
+      "dof": 256,
+      "nnz": 1216,
+      "time_s": 0.04252620099578053,
+      "tput": 6019.818229834366
+    },
+    {
+      "op": "det backward (adjoint)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.061010046978481114,
+      "tput": 16784.120824577887
+    },
+    {
+      "op": "det backward (adjoint)",
+      "dof": 2304,
+      "nnz": 11328,
+      "time_s": 0.31446665950352326,
+      "tput": 7326.690860129756
+    },
+    {
+      "op": "det backward (adjoint)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 1.347868281940464,
+      "tput": 3038.872607123878
+    },
+    {
+      "op": "det backward (adjoint)",
+      "dof": 9216,
+      "nnz": 45696,
+      "time_s": 6.452245549007785,
+      "tput": 1428.339936848377
+    },
+    {
+      "op": "det backward (adjoint)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 22.609915247012395,
+      "tput": 724.6378334905493
+    }
+  ]
+}

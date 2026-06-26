@@ -1,0 +1,79 @@
+{
+  "op": "eigsh (smallest-k)",
+  "backend": "lobpcg",
+  "differentiable": true,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.045239683997351676,
+      "tput": 22634.99453400127,
+      "time_bwd_s": 0.04089532053330913,
+      "check": 19.724305271642788
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.06042132148286328,
+      "tput": 67790.63912333843,
+      "time_bwd_s": 0.06229390949010849,
+      "check": 19.73536653368175
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 9216,
+      "nnz": 45696,
+      "time_s": 0.2298265314893797,
+      "tput": 40099.80893100618,
+      "time_bwd_s": 0.22125478298403323,
+      "check": 19.73748340300403
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.7394109740271233,
+      "tput": 22158.178030231666,
+      "time_bwd_s": 0.6950438934727572,
+      "check": 19.73823322813579
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 36864,
+      "nnz": 183552,
+      "time_s": 4.2115018389886245,
+      "tput": 8753.172005939987,
+      "time_bwd_s": 3.9875525159877725,
+      "check": 19.738772959492106
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 12.867930779000744,
+      "tput": 5092.971133086028,
+      "time_bwd_s": 13.45314989745384,
+      "check": 19.738963003337883
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 122500,
+      "nnz": 611100,
+      "time_s": 51.48470000352245,
+      "tput": 2379.347650692708,
+      "time_bwd_s": 46.36895915301284,
+      "check": 19.739077027232398
+    }
+  ]
+}

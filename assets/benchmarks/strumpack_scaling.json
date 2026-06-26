@@ -1,0 +1,64 @@
+{
+  "op": "linear solve (STRUMPACK)",
+  "backend": "strumpack",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "linear solve (STRUMPACK)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.23347961599938571,
+      "tput": 4385.8218440906385,
+      "check": 2.5928825854108496e-14
+    },
+    {
+      "op": "linear solve (STRUMPACK)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.5503599259536713,
+      "tput": 7442.402338619394,
+      "check": 1.0538408286102327e-13
+    },
+    {
+      "op": "linear solve (STRUMPACK)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.21975152101367712,
+      "tput": 74556.93559900446,
+      "check": 3.8837826617653753e-13
+    },
+    {
+      "op": "linear solve (STRUMPACK)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.47871777100954205,
+      "tput": 136899.03314388072,
+      "check": 1.572720924483003e-12
+    },
+    {
+      "op": "linear solve (STRUMPACK)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 4.770030813000631,
+      "tput": 42076.03847190776,
+      "check": 4.699479822170133e-12
+    },
+    {
+      "op": "linear solve (STRUMPACK)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 13.249930575489998,
+      "tput": 30913.36952041747,
+      "check": 8.811183270164577e-12
+    }
+  ]
+}

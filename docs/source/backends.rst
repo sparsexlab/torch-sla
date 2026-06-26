@@ -249,6 +249,44 @@ fill-in is what exhausts memory past a few million unknowns (see the
 right-hand sides to reuse a factorization on; pick iterative when the matrix
 is large and ``~1e-6`` is enough.
 
+Backend comparison (measured)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The two figures below put every available solve backend on the **same** 2D
+Poisson sweep so they are directly comparable -- one for speed, one for
+accuracy. They are produced by ``benchmarks/scaling/ops/solve_backends.py``;
+backends absent on the measuring device are skipped (not faked). The device the
+numbers were measured on is printed in the caption strip under each figure.
+
+These were measured on the **CPU** host (AMD Ryzen 7 255), where the full
+backend lineup is available -- ``scipy/lu`` and ``strumpack`` (direct),
+``pytorch/cg`` (iterative), and ``pyamg`` (multigrid). The GPU-only direct
+backend ``cudss`` is exercised separately (see the STRUMPACK / capability
+sections above); run ``solve_backends.py --device cuda`` on an NVIDIA box to
+overlay it on the same axes.
+
+.. figure:: ../../assets/benchmarks/solve_backends_scaling.png
+   :alt: linear solve time vs DOF across backends
+   :width: 85%
+   :align: center
+
+   **Speed.** Time vs DOF for each backend on one shared sweep (CPU host). The
+   direct backends (``scipy/lu``, ``strumpack``) carry the factorization cost;
+   the iterative ``pytorch/cg`` and the ``pyamg`` multigrid scale closer to
+   linear. Slopes are fit per backend and shown in the legend. On an NVIDIA
+   device ``cudss`` overlays as a third direct backend.
+
+.. figure:: ../../assets/benchmarks/solve_precision.png
+   :alt: linear solve relative residual vs DOF across backends
+   :width: 85%
+   :align: center
+
+   **Accuracy.** The relative residual :math:`\|Ax-b\| / \|b\|` for the *same*
+   solves. This is the structural gap above made visible: the direct backends
+   sit near machine precision (``~1e-13``..``1e-14``), while the iterative ones
+   plateau at their stopping tolerance -- the speed advantage of iterative
+   solvers is bought with these digits of accuracy.
+
 ----
 
 Putting it together

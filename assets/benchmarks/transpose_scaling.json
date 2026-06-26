@@ -1,0 +1,72 @@
+{
+  "op": "transpose (A^T)",
+  "backend": "torch",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "transpose (A^T)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 2.3272004909813404e-05,
+      "tput": 44001365.75977589
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 2.2551976144313812e-05,
+      "tput": 181624881.73049763
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 2.3594009689986706e-05,
+      "tput": 694413548.8319888
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 2.2560940124094486e-05,
+      "tput": 2904843487.8832593
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 2.0988984033465385e-05,
+      "tput": 9562349453.408144
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 2.01760558411479e-05,
+      "tput": 20301291948.481052
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 692224,
+      "nnz": 3457792,
+      "time_s": 2.2160937078297138e-05,
+      "tput": 31236224242.4268
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 1048576,
+      "nnz": 5238784,
+      "time_s": 2.3402972146868706e-05,
+      "tput": 44805249240.11835
+    }
+  ]
+}

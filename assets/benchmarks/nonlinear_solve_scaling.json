@@ -1,0 +1,43 @@
+{
+  "op": "nonlinear solve (Newton)",
+  "backend": "newton + pytorch/cg",
+  "differentiable": true,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "nonlinear solve (Newton)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.10795211000367999,
+      "tput": 9485.687681001258,
+      "time_bwd_s": 0.16112005402101204,
+      "check": 1.605115543832158e-11
+    },
+    {
+      "op": "nonlinear solve (Newton)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 2.0068994719767943,
+      "tput": 2040.9592294951592,
+      "time_bwd_s": 2.967399202985689,
+      "check": 1.577031693385678e-11
+    },
+    {
+      "op": "nonlinear solve (Newton)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 18.844962694041897,
+      "tput": 869.4100522247271,
+      "time_bwd_s": 29.315032155951485,
+      "check": 1.562944305738602e-11
+    }
+  ]
+}

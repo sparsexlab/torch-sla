@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import OpSpec, SWEEP_EIG, SWEEP_EIG_QUICK, main_for  # noqa: E402
-from setups import setup_eigsh, verify_eigsh  # noqa: E402
+from setups import setup_eigsh, setup_eigsh_backward, verify_eigsh  # noqa: E402
 
 SPEC = OpSpec(
     name="eigsh (smallest-k)",
@@ -24,6 +24,7 @@ SPEC = OpSpec(
     sweep_quick=SWEEP_EIG_QUICK,
     verify=verify_eigsh,
     verify_ok=lambda v: v > 0,  # smallest eigenvalue of SPD Laplacian must be > 0
+    backward_setup=setup_eigsh_backward,
 )
 
 main = main_for(SPEC)

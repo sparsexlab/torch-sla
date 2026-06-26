@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import OpSpec, SWEEP_EIG, SWEEP_EIG_QUICK, main_for  # noqa: E402
-from setups import setup_condition_number  # noqa: E402
+from setups import setup_condition_number, setup_condition_number_backward  # noqa: E402
 
 SPEC = OpSpec(
     name="condition number (spectral)",
@@ -23,6 +23,7 @@ SPEC = OpSpec(
     avail=lambda dev: dev == "cpu",  # relies on sparse SVD (CPU only)
     sweep=SWEEP_EIG,
     sweep_quick=SWEEP_EIG_QUICK,
+    backward_setup=setup_condition_number_backward,
 )
 
 main = main_for(SPEC)

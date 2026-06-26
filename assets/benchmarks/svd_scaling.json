@@ -1,0 +1,79 @@
+{
+  "op": "truncated SVD (k=6)",
+  "backend": "scipy/svds",
+  "differentiable": true,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "truncated SVD (k=6)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.010866421042010188,
+      "tput": 94235.25888065252,
+      "time_bwd_s": 0.011523926979862154,
+      "check": 1.4825133001476767e-16
+    },
+    {
+      "op": "truncated SVD (k=6)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.05264810752123594,
+      "tput": 77799.56759790184,
+      "time_bwd_s": 0.05303811753401533,
+      "check": 1.746020547079974e-16
+    },
+    {
+      "op": "truncated SVD (k=6)",
+      "dof": 9216,
+      "nnz": 45696,
+      "time_s": 0.15144472749670967,
+      "tput": 60853.884795693724,
+      "time_bwd_s": 0.15710195945575833,
+      "check": 1.7626079286994952e-16
+    },
+    {
+      "op": "truncated SVD (k=6)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.48269691795576364,
+      "tput": 33942.624016301466,
+      "time_bwd_s": 0.5185456789913587,
+      "check": 1.3891126935853886e-16
+    },
+    {
+      "op": "truncated SVD (k=6)",
+      "dof": 36864,
+      "nnz": 183552,
+      "time_s": 2.3887532329536043,
+      "tput": 15432.318203257453,
+      "time_bwd_s": 2.6036479500471614,
+      "check": 6.64467675528236e-15
+    },
+    {
+      "op": "truncated SVD (k=6)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 5.337649508961476,
+      "tput": 12278.063572733732,
+      "time_bwd_s": 5.723578448058106,
+      "check": 1.5777005395820856e-16
+    },
+    {
+      "op": "truncated SVD (k=6)",
+      "dof": 122500,
+      "nnz": 611100,
+      "time_s": 20.752454064961057,
+      "tput": 5902.9163305959055,
+      "time_bwd_s": 20.523694801493548,
+      "check": 1.9296813049196014e-16
+    }
+  ]
+}
