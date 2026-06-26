@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import OpSpec, SWEEP_CHEAP, SWEEP_CHEAP_QUICK, main_for  # noqa: E402
-from setups import setup_spmv  # noqa: E402
+from setups import setup_spmv, setup_matvec_backward  # noqa: E402
 
 SPEC = OpSpec(
     name="sparse matvec (A @ x)",
@@ -21,6 +21,7 @@ SPEC = OpSpec(
     reps=5,
     sweep=SWEEP_CHEAP,
     sweep_quick=SWEEP_CHEAP_QUICK,
+    backward_setup=setup_matvec_backward,
 )
 
 main = main_for(SPEC)
