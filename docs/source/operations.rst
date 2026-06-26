@@ -18,9 +18,51 @@ sparsity pattern looks like:
 
    ``A.spy()`` for a 50×50 grid (2,500 DOF) -- the banded 5-point stencil.
 
-Scaling plots come from ``benchmarks/benchmark_all_ops_scaling.py`` (CPU = AMD
-Ryzen 7 255; CUDA = RTX 4070 Ti SUPER). See :doc:`benchmarks` for the full
-methodology and the large-scale single-/multi-GPU numbers.
+Scaling plots come from the per-op harness in ``benchmarks/scaling/ops/`` (run
+all of them with ``run_all.py``). Each plot is stamped with the exact device it
+was measured on -- **CPU = AMD Ryzen 7 255 w/ Radeon 780M, CUDA = NVIDIA RTX
+4070 Ti SUPER**, both ``float64``, eager (no ``torch.compile``) -- in a caption
+under the figure, so there is never any ambiguity about *where* a number came
+from. For every **differentiable** operation (solve, eigsh, svd, det, logdet,
+norm, condition_number, matvec, nonlinear_solve) the plot shows **two curves**:
+the forward pass and the backward (gradient) pass, timed separately with CUDA
+synchronization. The backward curve makes the cost of the adjoint / autograd
+graph visible relative to forward -- for the implicit solves it tracks forward
+(the O(1)-node adjoint), while ``det`` shows the expected dense-adjoint blow-up.
+The raw ``(dof, forward, backward)`` rows behind each plot are saved next to the
+PNG as ``<op>_scaling.json`` with the device label. See :doc:`benchmarks` for the
+full methodology and the large-scale single-/multi-GPU numbers, and
+:doc:`backends` for the multi-backend solve comparison and accuracy plots.
+
+The per-op figures inlined under each operation below are the **CPU** runs. The
+same harness run on the **CUDA** device (``run_all.py --device cuda``, RTX 4070
+Ti SUPER) produces the matching GPU forward+backward curves below; each carries
+its own ``CUDA: NVIDIA GeForce RTX 4070 Ti SUPER`` caption.
+
+.. list-table:: CUDA (RTX 4070 Ti SUPER, float64, eager) -- forward + backward
+   :widths: 50 50
+   :class: borderless
+
+   * - .. image:: ../../assets/benchmarks/cuda/cg_scaling.png
+          :width: 100%
+     - .. image:: ../../assets/benchmarks/cuda/logdet_scaling.png
+          :width: 100%
+   * - .. image:: ../../assets/benchmarks/cuda/spmv_scaling.png
+          :width: 100%
+     - .. image:: ../../assets/benchmarks/cuda/matmat_scaling.png
+          :width: 100%
+   * - .. image:: ../../assets/benchmarks/cuda/norm_scaling.png
+          :width: 100%
+     - .. image:: ../../assets/benchmarks/cuda/transpose_scaling.png
+          :width: 100%
+
+On this shared Windows GPU box the direct/eigen ops (``cudss``, ``lu``, ``det``,
+``eigsh``) and the large nonlinear solve were not captured in the same pass --
+the GPU context became unstable after a large-DOF out-of-memory and would not
+recover without a reboot; rather than fabricate numbers those CUDA points are
+omitted (the CPU plots cover them, and the GPU solve direct path is exercised in
+:doc:`backends`). The differentiable CUDA ops above (``cg``, ``logdet``,
+``spmv``, ``norm``) all show the forward and backward curves.
 
 ----
 
@@ -76,10 +118,15 @@ solution ``x = A⁻¹b``. For an SPD system the CG residual decays as below.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/cg_scaling.png
-   :alt: CG solve scaling
+.. figure:: ../../assets/benchmarks/cg_scaling.png
+   :alt: CG solve scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward solve and backward (adjoint gradient) pass vs DOF on CPU. The
+   backward curve tracks the forward one (the adjoint adds O(1) graph nodes,
+   independent of the CG iteration count). Device label is in the caption under
+   the figure; per-backend timing and accuracy are in :doc:`backends`.
 
 ----
 
@@ -207,10 +254,14 @@ pattern, which Newton reuses each iteration.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/nonlinear_solve_scaling.png
-   :alt: nonlinear_solve scaling
+.. figure:: ../../assets/benchmarks/nonlinear_solve_scaling.png
+   :alt: nonlinear_solve scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward Newton solve and backward (implicit-function adjoint) pass vs DOF on
+   CPU. The adjoint differentiates the converged solution without unrolling the
+   Newton iterations. Device label is in the caption under the figure.
 
 ----
 
@@ -259,10 +310,13 @@ is the general (non-symmetric) counterpart. Eigenvalues are differentiable.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/eigsh_scaling.png
-   :alt: eigsh scaling
+.. figure:: ../../assets/benchmarks/eigsh_scaling.png
+   :alt: eigsh scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward eigensolve and backward (eigenvalue adjoint) pass vs DOF on CPU.
+   Device label is in the caption under the figure.
 
 ----
 
@@ -303,10 +357,14 @@ V_k^T` -- the best rank-k approximation in Frobenius norm. Differentiable.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/svd_scaling.png
-   :alt: svd scaling
+.. figure:: ../../assets/benchmarks/svd_scaling.png
+   :alt: svd scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward truncated SVD and backward (singular-value adjoint) pass vs DOF on
+   CPU (the sparse SVD path is CPU-only). Device label is in the caption under
+   the figure.
 
 ----
 
@@ -348,10 +406,13 @@ non-zeros in that row.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/spmv_scaling.png
-   :alt: SpMV scaling
+.. figure:: ../../assets/benchmarks/spmv_scaling.png
+   :alt: SpMV scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward sparse matvec and backward (gradient w.r.t. the matrix values) pass
+   vs DOF on CPU. Device label is in the caption under the figure.
 
 ----
 
@@ -390,10 +451,15 @@ determinant is a scalar summary of it.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/det_scaling.png
-   :alt: det scaling
+.. figure:: ../../assets/benchmarks/det_scaling.png
+   :alt: det scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward determinant and backward (gradient) pass vs DOF on CPU. Unlike the
+   solves, the determinant adjoint needs the full inverse, so the backward curve
+   scales markedly worse than forward -- the plot makes that cost explicit.
+   Device label is in the caption under the figure.
 
 ----
 
@@ -425,10 +491,13 @@ Differentiable.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/logdet_scaling.png
-   :alt: logdet scaling
+.. figure:: ../../assets/benchmarks/logdet_scaling.png
+   :alt: logdet scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward log-determinant (Hutchinson estimator) and backward (gradient) pass
+   vs DOF on CPU. Device label is in the caption under the figure.
 
 ----
 
@@ -461,10 +530,13 @@ norm aggregates: :math:`\|A\|_F = \sqrt{\sum_{ij} a_{ij}^2}`.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/norm_scaling.png
-   :alt: norm scaling
+.. figure:: ../../assets/benchmarks/norm_scaling.png
+   :alt: norm scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward Frobenius norm and backward (gradient) pass vs DOF on CPU. Device
+   label is in the caption under the figure.
 
 ----
 
@@ -497,10 +569,13 @@ stronger anisotropy generally raises :math:`\kappa`.
 
 **Scaling**
 
-.. image:: ../../assets/benchmarks/condition_number_scaling.png
-   :alt: condition_number scaling
+.. figure:: ../../assets/benchmarks/condition_number_scaling.png
+   :alt: condition_number scaling, forward and backward
    :width: 80%
    :align: center
+
+   Forward spectral condition number and backward (gradient) pass vs DOF on CPU
+   (sparse SVD path, CPU-only). Device label is in the caption under the figure.
 
 ----
 
