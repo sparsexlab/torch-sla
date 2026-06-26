@@ -171,10 +171,19 @@ Backend Requirements
 Recommended Setup by Environment
 --------------------------------
 
-Use this table to pick the "best-bang-for-buck" backend mix for your machine.
+Pick your environment in the selector below and it shows the recommended
+backend plus the exact ``pip install`` command — no table-reading required.
 ``torch_sla.solve(..., backend="auto")`` will already pick a reasonable
 default for whatever's installed, but installing the extras below unlocks
 the fastest path for each environment.
+
+.. raw:: html
+
+   <div id="sla-recommend">
+     <noscript>JavaScript is disabled — see the table below for the recommended setup.</noscript>
+   </div>
+
+The full reference table (also a no-JavaScript fallback):
 
 .. list-table::
    :widths: 25 35 40
