@@ -1,0 +1,143 @@
+/* ============================================
+   torch-sla "Recommended Setup" interactive widget
+   Self-contained, no external deps, furo light+dark aware.
+   ============================================ */
+
+#sla-recommend {
+    border: 1px solid var(--color-background-border, #ccc);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    margin: 1.5rem 0;
+    background: var(--color-background-secondary, #f5f5f5);
+    color: var(--color-foreground-primary, #111);
+}
+
+#sla-recommend .sla-rec-title {
+    font-weight: 700;
+    font-size: 1.05rem;
+    margin: 0 0 0.85rem 0;
+    color: var(--color-foreground-primary, #111);
+}
+
+#sla-recommend .sla-rec-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem 1.25rem;
+    margin-bottom: 1.1rem;
+}
+
+#sla-recommend .sla-rec-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 12rem;
+    flex: 1 1 12rem;
+}
+
+#sla-recommend .sla-rec-field > label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-foreground-secondary, #555);
+}
+
+#sla-recommend .sla-rec-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+#sla-recommend button.sla-rec-opt {
+    cursor: pointer;
+    border: 1px solid var(--color-background-border, #ccc);
+    background: var(--color-background-primary, #fff);
+    color: var(--color-foreground-primary, #111);
+    border-radius: 6px;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.88rem;
+    line-height: 1.2;
+    transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+#sla-recommend button.sla-rec-opt:hover {
+    border-color: var(--color-brand-primary, #64288C);
+}
+
+#sla-recommend button.sla-rec-opt[aria-pressed="true"] {
+    background: var(--color-brand-primary, #64288C);
+    border-color: var(--color-brand-primary, #64288C);
+    color: #fff;
+    font-weight: 600;
+}
+
+#sla-recommend button.sla-rec-opt:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+#sla-recommend .sla-rec-result {
+    border-top: 1px solid var(--color-background-border, #ccc);
+    padding-top: 1rem;
+    margin-top: 0.25rem;
+}
+
+#sla-recommend .sla-rec-backend {
+    margin: 0 0 0.6rem 0;
+    font-size: 0.95rem;
+}
+
+#sla-recommend .sla-rec-backend strong {
+    color: var(--color-brand-content, #F15213);
+}
+
+#sla-recommend .sla-rec-cmd-wrap {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    gap: 0.5rem;
+}
+
+#sla-recommend pre.sla-rec-cmd {
+    flex: 1 1 auto;
+    margin: 0;
+    padding: 0.7rem 0.85rem;
+    border-radius: 6px;
+    background: var(--color-code-background, #1e1e1e);
+    color: var(--color-code-foreground, #eee);
+    font-family: var(--font-stack--monospace, monospace);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+#sla-recommend button.sla-rec-copy {
+    cursor: pointer;
+    border: 1px solid var(--color-background-border, #ccc);
+    background: var(--color-background-primary, #fff);
+    color: var(--color-foreground-primary, #111);
+    border-radius: 6px;
+    padding: 0 0.7rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+#sla-recommend button.sla-rec-copy:hover {
+    border-color: var(--color-brand-primary, #64288C);
+}
+
+#sla-recommend .sla-rec-note {
+    margin: 0.75rem 0 0 0;
+    font-size: 0.82rem;
+    color: var(--color-foreground-secondary, #555);
+}
+
+#sla-recommend .sla-rec-note a {
+    color: var(--color-brand-content, #F15213);
+}
+
+#sla-recommend .sla-rec-unavail {
+    color: var(--color-problematic, #b00);
+    font-weight: 600;
+}

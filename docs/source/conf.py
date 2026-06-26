@@ -74,8 +74,8 @@ gettext_uuid = True
 # -- Options for HTML output -------------------------------------------------
 html_theme = 'furo'
 html_static_path = ['_static']
-html_css_files = ['custom.css']
-html_js_files = []
+html_css_files = ['custom.css', 'recommend.css']
+html_js_files = ['recommend.js']
 autodoc_member_order = 'bysource'
 
 # Furo theme options with SEO enhancements
