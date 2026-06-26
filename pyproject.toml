@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torch-sla"
-version = "0.3.1"
+version = "0.3.2"
 description = "PyTorch Sparse Linear Algebra - Differentiable sparse solvers with CUDA support"
 readme = "README.md"
 license = {text = "Apache-2.0"}
