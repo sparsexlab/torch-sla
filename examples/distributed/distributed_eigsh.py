@@ -5,31 +5,54 @@ Distributed LOBPCG on a tridiagonal SPD matrix. Each rank holds the
 full Ritz basis ``X`` (replicated); the distributed step is the
 column-wise matvec via Shard(0). Spectrum compared against scipy.
 
+Device-aware: uses NCCL + CUDA (one GPU per ``LOCAL_RANK``) when a GPU
+is visible, else falls back to gloo + CPU so it still runs on a laptop.
+
 Run::
 
+    # single node (one box, N procs)
     torchrun --standalone --nproc_per_node=4 distributed_eigsh.py
+
+    # multiple nodes (run on EVERY node; HEAD_NODE_IP reachable by all)
+    torchrun --nnodes=2 --nproc_per_node=4 \
+        --rdzv-id=sla --rdzv-backend=c10d \
+        --rdzv-endpoint=HEAD_NODE_IP:29500 distributed_eigsh.py
 """
 
+import os
 import torch
 import torch.distributed as dist
 
 
 def main():
-    dist.init_process_group(backend="gloo")
+    use_cuda = torch.cuda.is_available()
+    backend = "nccl" if use_cuda else "gloo"
+    dist.init_process_group(backend=backend)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    if use_cuda:
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        mesh_device = "cuda"
+    else:
+        device = torch.device("cpu")
+        mesh_device = "cpu"
+
     if rank == 0:
-        print(f"{'=' * 60}\nDistributed eigsh: A v = lambda v  (world={world_size})\n{'=' * 60}")
+        print(f"{'=' * 60}\nDistributed eigsh: A v = lambda v  "
+              f"(world={world_size}, backend={backend}, device={mesh_device})"
+              f"\n{'=' * 60}")
 
     from torch.distributed.device_mesh import init_device_mesh
     from torch_sla import DSparseTensor, SparseTensor
 
     # SPD tridiagonal matrix, known spectrum.
     n = 200
-    A = SparseTensor.tridiagonal(n, diag=4.0, off_diag=-1.0)
+    A = SparseTensor.tridiagonal(n, diag=4.0, off_diag=-1.0).to(device)
 
-    mesh = init_device_mesh("cpu", (world_size,))
+    mesh = init_device_mesh(mesh_device, (world_size,))
     D = DSparseTensor.partition(A, mesh, partition_method="simple")
 
     # Distributed LOBPCG: 5 smallest-magnitude eigenpairs. SM is chosen
@@ -44,12 +67,15 @@ def main():
           f"evec0 norm={evecs[:, 0].norm().item():.6f}")
 
     # Cross-check against scipy on rank 0 only (post-solve, no comm).
+    # scipy is CPU/numpy only, so bring the matrix back to CPU first.
     if rank == 0:
         import numpy as np
         import scipy.sparse as sp
         import scipy.sparse.linalg as spla
+        A_cpu = A.to("cpu")
         A_sp = sp.coo_matrix(
-            (A.values.numpy(), (A.row_indices.numpy(), A.col_indices.numpy())),
+            (A_cpu.values.numpy(),
+             (A_cpu.row_indices.numpy(), A_cpu.col_indices.numpy())),
             shape=(n, n),
         ).tocsr()
         ref_vals, _ = spla.eigsh(A_sp, k=k, which="SM")

@@ -112,6 +112,7 @@ torch-sla 非常适合:
    sparse_tensor
    dsparse_tensor
    distributed_scaling
+   distributed_operations
    operations
    architecture
    backends

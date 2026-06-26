@@ -3,7 +3,7 @@
 Multi-process distributed sparse linear algebra via `DSparseTensor` —
 row-sharded matvec, Krylov solves, LOBPCG eigsh, and persistence.
 
-## Quick start
+## Quick start (single node)
 
 ```bash
 chmod +x launch.sh
@@ -14,19 +14,57 @@ torchrun --standalone --nproc_per_node=4 distributed_matvec.py
 torchrun --standalone --nproc_per_node=4 distributed_solve.py
 torchrun --standalone --nproc_per_node=4 distributed_eigsh.py
 torchrun --standalone --nproc_per_node=4 distributed_persistence.py
+torchrun --standalone --nproc_per_node=4 distributed_connected_components.py
+torchrun --standalone --nproc_per_node=4 distributed_nonlinear_solve.py
 ```
 
-The examples use `gloo` so they work on CPU-only machines. Swap to
-`nccl` (`dist.init_process_group(backend="nccl")`) for multi-GPU.
+Every script is **device-aware**: it picks `nccl` + CUDA when
+`torch.cuda.is_available()` (pinning one GPU per `LOCAL_RANK` via
+`torch.cuda.set_device(LOCAL_RANK)` and building the mesh on `"cuda"`),
+and otherwise falls back to `gloo` + CPU so the same script runs on a
+laptop with no GPU. Each prints a per-rank correctness value and asserts.
+
+## Multi-node (multiple machines)
+
+Use a `c10d` rendezvous instead of `--standalone`. Run the **same**
+command on **every** node; pick one node as the rendezvous head and make
+its `HEAD_NODE_IP:29500` reachable from all nodes.
+
+```bash
+# Recommended NCCL settings on a real cluster:
+export NCCL_DEBUG=INFO          # print the transport NCCL selected
+export NCCL_SOCKET_IFNAME=eth0  # pin the NIC if auto-detect picks wrong
+export NCCL_IB_DISABLE=0        # keep InfiniBand on (1 forces TCP)
+
+# on EVERY node (2 nodes × 4 GPUs = world size 8):
+torchrun \
+    --nnodes=2 --nproc_per_node=4 \
+    --rdzv-id=sla --rdzv-backend=c10d \
+    --rdzv-endpoint=HEAD_NODE_IP:29500 \
+    distributed_matvec.py
+```
+
+`torchrun` sets `WORLD_SIZE` / `RANK` / `LOCAL_RANK` per process;
+`LOCAL_RANK` is the per-node GPU index the scripts pin to. The
+`launch.sh` helper wraps this — set `RDZV_ENDPOINT` (and optionally
+`NNODES` / `RDZV_ID`) and it switches from `--standalone` to the
+`--nnodes ... --rdzv-*` form automatically:
+
+```bash
+# on each node:
+RDZV_ENDPOINT=HEAD_NODE_IP:29500 NNODES=2 ./launch.sh all 4
+```
 
 ## Examples
 
-| File                          | Operation                       | Key API                                                  |
-|-------------------------------|---------------------------------|----------------------------------------------------------|
-| `distributed_matvec.py`       | `y = A @ x`                     | `DSparseTensor.partition` → `D.scatter` → `D @ x_dt`     |
-| `distributed_solve.py`        | `A x = b` (CG + Jacobi)         | `solve(D, b_dt)` under `SolverConfig`                    |
-| `distributed_eigsh.py`        | `A v = λ v` (LOBPCG)            | `D.eigsh(k, which="LM")`                                 |
-| `distributed_persistence.py`  | save → load → re-matvec         | `D.save(dir)` / `DSparseTensor.load(dir, mesh)`          |
+| File                                 | Operation                              | Key API                                                  |
+|--------------------------------------|----------------------------------------|----------------------------------------------------------|
+| `distributed_matvec.py`              | `y = A @ x`                            | `DSparseTensor.partition` → `D.scatter` → `D @ x_dt`     |
+| `distributed_solve.py`               | `A x = b` (CG + Jacobi)                | `solve(D, b_dt)` under `SolverConfig`                    |
+| `distributed_eigsh.py`               | `A v = λ v` (LOBPCG)                   | `D.eigsh(k, which="SM")`                                 |
+| `distributed_persistence.py`         | save → load → re-matvec                | `D.save(dir)` / `DSparseTensor.load(dir, mesh)`          |
+| `distributed_connected_components.py`| graph components                       | `D.connected_components()` → `(labels_owned, n_comp)`   |
+| `distributed_nonlinear_solve.py`     | `A u − λ exp(u) = 0` (Newton)          | `D.nonlinear_solve(residual_fn, u0, jac_diag_fn=...)`   |
 
 ## API at a glance
 
