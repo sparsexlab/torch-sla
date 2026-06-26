@@ -1,0 +1,72 @@
+{
+  "op": "connected_components",
+  "backend": "torch (pure)",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "connected_components",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.0005450689932331443,
+      "tput": 1878661.2570383376
+    },
+    {
+      "op": "connected_components",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.0010196680668741465,
+      "tput": 4016993.5031470913
+    },
+    {
+      "op": "connected_components",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.0022128840209916234,
+      "tput": 7403912.6518063545
+    },
+    {
+      "op": "connected_components",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.003423342015594244,
+      "tput": 19143865.760845948
+    },
+    {
+      "op": "connected_components",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.011223993031308055,
+      "tput": 17881693.212046638
+    },
+    {
+      "op": "connected_components",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.02300218294840306,
+      "tput": 17807005.575026814
+    },
+    {
+      "op": "connected_components",
+      "dof": 692224,
+      "nnz": 3457792,
+      "time_s": 0.04810383100993931,
+      "tput": 14390205.217895664
+    },
+    {
+      "op": "connected_components",
+      "dof": 1048576,
+      "nnz": 5238784,
+      "time_s": 0.12615468900185078,
+      "tput": 8311827.394577594
+    }
+  ]
+}

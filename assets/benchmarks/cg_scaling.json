@@ -1,0 +1,70 @@
+{
+  "op": "linear solve (conjugate gradient)",
+  "backend": "pytorch/cg",
+  "differentiable": true,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.002140090975444764,
+      "tput": 478484.3316238869,
+      "time_bwd_s": 0.004459815507289022,
+      "check": 5.111693814488608e-11
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.03862687951186672,
+      "tput": 106040.14747662056,
+      "time_bwd_s": 0.07423383503919467,
+      "check": 9.287515380752384e-11
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.06135311699472368,
+      "tput": 267044.2970551767,
+      "time_bwd_s": 0.16329112503444776,
+      "check": 8.637946114504207e-11
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.34292780002579093,
+      "tput": 191107.28262646295,
+      "time_bwd_s": 0.6133440135163255,
+      "check": 1.006021964495631e-10
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.6528914669761434,
+      "tput": 307407.90797826997,
+      "time_bwd_s": 1.2516707120230421,
+      "check": 1.1098385887602513e-10
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 3.266805049031973,
+      "tput": 125382.44365741189,
+      "time_bwd_s": 6.612168696476147,
+      "check": 1.5559425922293186e-10
+    }
+  ]
+}

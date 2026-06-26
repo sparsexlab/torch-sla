@@ -1,0 +1,72 @@
+{
+  "op": "transpose (A^T)",
+  "backend": "torch",
+  "differentiable": false,
+  "device_label": {
+    "device": "cuda",
+    "device_kind": "CUDA",
+    "processor": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "dtype": "float64",
+    "torch": "2.6.0+cu124",
+    "compile": "eager, no compile",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "rows": [
+    {
+      "op": "transpose (A^T)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 2.410006709396839e-05,
+      "tput": 42489508.26598653
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 2.729997504502535e-05,
+      "tput": 150036767.18548432
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 2.6999972760677338e-05,
+      "tput": 606815427.0089338
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 2.4999957531690598e-05,
+      "tput": 2621444453.1325645
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 2.350006252527237e-05,
+      "tput": 8540573021.206199
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 2.41999514400959e-05,
+      "tput": 16925653797.856415
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 692224,
+      "nnz": 3457792,
+      "time_s": 2.3499946109950542e-05,
+      "tput": 29456407974.777985
+    },
+    {
+      "op": "transpose (A^T)",
+      "dof": 1048576,
+      "nnz": 5238784,
+      "time_s": 2.4999957531690598e-05,
+      "tput": 41943111250.12103
+    }
+  ]
+}

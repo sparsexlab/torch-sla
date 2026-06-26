@@ -1,0 +1,88 @@
+{
+  "op": "linear solve (LU)",
+  "backend": "scipy/lu",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "linear solve (LU)",
+      "dof": 256,
+      "nnz": 1216,
+      "time_s": 0.0007507210248149931,
+      "tput": 341005.5020945875,
+      "check": 8.214103050711436e-15
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.001749165530782193,
+      "tput": 585422.0095122084,
+      "check": 2.807818080930059e-14
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 2304,
+      "nnz": 11328,
+      "time_s": 0.0036533079692162573,
+      "tput": 630661.3128195365,
+      "check": 6.757960586650488e-14
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.005157791019883007,
+      "tput": 794138.4178246347,
+      "check": 1.0828403858979293e-13
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 9216,
+      "nnz": 45696,
+      "time_s": 0.01258230145322159,
+      "tput": 732457.4152243286,
+      "check": 2.654009167490915e-13
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.02783119899686426,
+      "tput": 588691.8490951821,
+      "check": 4.2644192389903664e-13
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 36864,
+      "nnz": 183552,
+      "time_s": 0.0799193435232155,
+      "tput": 461265.05017263436,
+      "check": 1.035244606125422e-12
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.1861195944948122,
+      "tput": 352117.6809883213,
+      "check": 1.7577427933550563e-12
+    },
+    {
+      "op": "linear solve (LU)",
+      "dof": 102400,
+      "nnz": 510720,
+      "time_s": 0.33978556853253394,
+      "tput": 301366.53667265846,
+      "check": 2.64781273844893e-12
+    }
+  ]
+}

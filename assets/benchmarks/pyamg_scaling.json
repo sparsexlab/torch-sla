@@ -1,0 +1,64 @@
+{
+  "op": "linear solve (PyAMG)",
+  "backend": "pyamg/ruge_stuben",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "linear solve (PyAMG)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.016105754009913653,
+      "tput": 63579.761578979305,
+      "check": 5.5605394923839794e-11
+    },
+    {
+      "op": "linear solve (PyAMG)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.01517953647999093,
+      "tput": 269836.96145130566,
+      "check": 5.344607512175874e-11
+    },
+    {
+      "op": "linear solve (PyAMG)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.02918602805584669,
+      "tput": 561364.4984048412,
+      "check": 5.2661985609890254e-11
+    },
+    {
+      "op": "linear solve (PyAMG)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.07350727351149544,
+      "tput": 891558.0305090644,
+      "check": 3.2635346681348766e-11
+    },
+    {
+      "op": "linear solve (PyAMG)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.1859202180057764,
+      "tput": 1079516.8064710654,
+      "check": 4.7103769748382795e-11
+    },
+    {
+      "op": "linear solve (PyAMG)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.4716665004962124,
+      "tput": 868410.1999380582,
+      "check": 5.0576438830370434e-11
+    }
+  ]
+}

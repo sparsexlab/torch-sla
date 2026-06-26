@@ -1,0 +1,80 @@
+{
+  "op": "sparse matvec (A @ x)",
+  "backend": "torch",
+  "differentiable": true,
+  "device_label": {
+    "device": "cuda",
+    "device_kind": "CUDA",
+    "processor": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "dtype": "float64",
+    "torch": "2.6.0+cu124",
+    "compile": "eager, no compile",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "rows": [
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.0002720000920817256,
+      "tput": 3764704.607865821,
+      "time_bwd_s": 0.0006371999625116587
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.0002908000024035573,
+      "tput": 14085281.864323309,
+      "time_bwd_s": 0.0006649000570178032
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.00028380006551742554,
+      "tput": 57730783.007849626,
+      "time_bwd_s": 0.0006315000355243683
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.0002831999445334077,
+      "tput": 231412474.70219418,
+      "time_bwd_s": 0.0006967999506741762
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.0003068000078201294,
+      "tput": 654185120.2222546,
+      "time_bwd_s": 0.0007080999203026295
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.0003208999987691641,
+      "tput": 1276410101.4990695,
+      "time_bwd_s": 0.000752299907617271
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 692224,
+      "nnz": 3457792,
+      "time_s": 0.0004941000370308757,
+      "tput": 1400979453.7957985,
+      "time_bwd_s": 0.0009027000050991774
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 1048576,
+      "nnz": 5238784,
+      "time_s": 0.0007004999788478017,
+      "tput": 1496896547.6982906,
+      "time_bwd_s": 0.002238400047644973
+    }
+  ]
+}

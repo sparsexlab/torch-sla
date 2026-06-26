@@ -1,0 +1,80 @@
+{
+  "op": "sparse matvec (A @ x)",
+  "backend": "torch",
+  "differentiable": true,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.0002059979597106576,
+      "tput": 4970923.020006115,
+      "time_bwd_s": 0.00043918401934206486
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.00024056097026914358,
+      "tput": 17026868.470880076,
+      "time_bwd_s": 0.00043621892109513283
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.0003231320297345519,
+      "tput": 50703732.50667602,
+      "time_bwd_s": 0.0006400629645213485
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.0019813099643215537,
+      "tput": 33077106.14701372,
+      "time_bwd_s": 0.0028634259942919016
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.004609683994203806,
+      "tput": 43539643.98695534,
+      "time_bwd_s": 0.007409684010781348
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.007521008024923503,
+      "tput": 54460784.86323196,
+      "time_bwd_s": 0.013826339039951563
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 692224,
+      "nnz": 3457792,
+      "time_s": 0.014408877003006637,
+      "tput": 48041495.520820715,
+      "time_bwd_s": 0.027560289949178696
+    },
+    {
+      "op": "sparse matvec (A @ x)",
+      "dof": 1048576,
+      "nnz": 5238784,
+      "time_s": 0.028207625029608607,
+      "tput": 37173494.71638767,
+      "time_bwd_s": 0.0664350870065391
+    }
+  ]
+}

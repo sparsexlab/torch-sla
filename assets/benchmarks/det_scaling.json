@@ -1,0 +1,64 @@
+{
+  "op": "determinant",
+  "backend": "scipy",
+  "differentiable": true,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "determinant",
+      "dof": 256,
+      "nnz": 1216,
+      "time_s": 0.0011253879638388753,
+      "tput": 227477.10854019067,
+      "time_bwd_s": 0.007066535472404212
+    },
+    {
+      "op": "determinant",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.0027775525231845677,
+      "tput": 368669.896051487,
+      "time_bwd_s": 0.05006098351441324
+    },
+    {
+      "op": "determinant",
+      "dof": 2304,
+      "nnz": 11328,
+      "time_s": 0.004164469544775784,
+      "tput": 553251.7347594261,
+      "time_bwd_s": 0.3200140754925087
+    },
+    {
+      "op": "determinant",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.006999250559601933,
+      "tput": 585205.5109501539,
+      "time_bwd_s": 1.5819711115327664
+    },
+    {
+      "op": "determinant",
+      "dof": 9216,
+      "nnz": 45696,
+      "time_s": 0.015604633488692343,
+      "tput": 590593.8134771466,
+      "time_bwd_s": 6.3895460510393605
+    },
+    {
+      "op": "determinant",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.04227450501639396,
+      "tput": 387562.1960244436,
+      "time_bwd_s": 25.416600150521845
+    }
+  ]
+}

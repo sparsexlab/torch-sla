@@ -1,0 +1,72 @@
+{
+  "op": "sparse matmat (A @ A)",
+  "backend": "torch",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.0008900800021365285,
+      "tput": 1150458.3830015424
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.0027463010046631098,
+      "tput": 1491460.6931451268
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.0152948300819844,
+      "tput": 1071211.638977181
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.030392308020964265,
+      "tput": 2156335.0817185068
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.12617495201993734,
+      "tput": 1590680.21653209
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.28237668506335467,
+      "tput": 1450544.6861099782
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 692224,
+      "nnz": 3457792,
+      "time_s": 0.4733835329534486,
+      "tput": 1462289.9864750295
+    },
+    {
+      "op": "sparse matmat (A @ A)",
+      "dof": 1048576,
+      "nnz": 5238784,
+      "time_s": 0.8559472459601238,
+      "tput": 1225047.4605170353
+    }
+  ]
+}

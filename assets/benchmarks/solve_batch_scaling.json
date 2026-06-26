@@ -1,0 +1,64 @@
+{
+  "op": "batched linear solve (4x, CG)",
+  "backend": "pytorch/cg (batch=4)",
+  "differentiable": false,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "AMD Ryzen 7 255 w/ Radeon 780M Graphics",
+    "dtype": "float64",
+    "torch": "2.12.1+cpu",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.8.0-124-generic-x86_64-with-glibc2.39"
+  },
+  "rows": [
+    {
+      "op": "batched linear solve (4x, CG)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.008767956984229386,
+      "tput": 116788.89413369985,
+      "check": 5.1118487847295725e-11
+    },
+    {
+      "op": "batched linear solve (4x, CG)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.43203547346638516,
+      "tput": 9480.70297824443,
+      "check": 9.289662584852165e-11
+    },
+    {
+      "op": "batched linear solve (4x, CG)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.15327981155132875,
+      "tput": 106889.48423265445,
+      "check": 8.646215998576449e-11
+    },
+    {
+      "op": "batched linear solve (4x, CG)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.9463803970138542,
+      "tput": 69249.10977318205,
+      "check": 1.0070642130462935e-10
+    },
+    {
+      "op": "batched linear solve (4x, CG)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 3.5733760114526376,
+      "tput": 56166.493354392456,
+      "check": 1.1098385887602513e-10
+    },
+    {
+      "op": "batched linear solve (4x, CG)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 19.4226254185196,
+      "tput": 21088.80705743538,
+      "check": 1.5559425922293186e-10
+    }
+  ]
+}

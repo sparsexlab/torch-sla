@@ -1,0 +1,70 @@
+{
+  "op": "linear solve (conjugate gradient)",
+  "backend": "pytorch/cg",
+  "differentiable": true,
+  "device_label": {
+    "device": "cuda",
+    "device_kind": "CUDA",
+    "processor": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "dtype": "float64",
+    "torch": "2.6.0+cu124",
+    "compile": "eager, no compile",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "rows": [
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.010807999991811812,
+      "tput": 94744.63367651618,
+      "time_bwd_s": 0.02507555001648143,
+      "check": 5.11127202248267e-11
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.022990349971223623,
+      "tput": 178161.70720005778,
+      "time_bwd_s": 0.046742199978325516,
+      "check": 9.285212664516806e-11
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.044102000014390796,
+      "tput": 371502.42607259954,
+      "time_bwd_s": 0.08447055000578985,
+      "check": 8.64073963314402e-11
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 0.09275910002179444,
+      "tput": 706518.2821372979,
+      "time_bwd_s": 0.18133900000248104,
+      "check": 1.0056287670595059e-10
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 200704,
+      "nnz": 1001728,
+      "time_s": 0.13876439997693524,
+      "tput": 1446365.206301905,
+      "time_bwd_s": 0.29389430000446737,
+      "check": 1.1107026385702698e-10
+    },
+    {
+      "op": "linear solve (conjugate gradient)",
+      "dof": 409600,
+      "nnz": 2045440,
+      "time_s": 0.2435696999891661,
+      "tput": 1681654.1631336692,
+      "time_bwd_s": 0.4902832999941893,
+      "check": 1.5936583448982475e-10
+    }
+  ]
+}
