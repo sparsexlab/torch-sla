@@ -325,8 +325,8 @@ parameters: any combination where the cell is ✔ is supported::
 
 ----
 
-Future backends (roadmap)
--------------------------
+Backend status and roadmap
+--------------------------
 
 The next wave of backends will extend the table with cross-platform AMG
 preconditioning and high-end GPU AMG:

@@ -256,7 +256,7 @@ torch-sla vs torch.linalg.solve
      - ✅ **~80 MB**
      - ❌ ~8 TB（不可能）
    * - 最大问题规模
-     - ✅ **5亿+ DOF** （多卡可扩展）
+     - ✅ **1.69亿+ DOF 实测**（多卡扩展中）
      - ❌ ~5万（GPU 内存限制）
    * - 专用求解器
      - ✅ **LU, Cholesky, CG, BiCGStab**
@@ -334,7 +334,7 @@ torch-sla vs PETSc
      - ✅ **DSparseTensor 多卡并行**
      - ✅ **完整 MPI 支持**
    * - 生产规模
-     - ✅ **5亿+ DOF** (多卡)
+     - ✅ **1.69亿+ DOF 实测**（多卡扩展中）
      - ✅ **百亿级已验证**
 
 总结：何时使用 torch-sla
@@ -350,7 +350,7 @@ torch-sla vs PETSc
      - 不使用 PyTorch
    * - ✅ 需要 **梯度流** 通过求解
      - 不需要梯度
-   * - ✅ 问题规模 5亿+ DOF (多卡)
+   * - ✅ 问题规模达 **1.69亿+ DOF 实测**（多卡扩展中）
      - 百亿级问题（使用 PETSc）
    * - ✅ 想要 **简单的 pip 安装**
      - 需要 AMG 预处理器（AmgX）

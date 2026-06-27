@@ -497,8 +497,8 @@ condition_number
 
 .. _op-predicates:
 
-is_symmetric / is_positive_definite
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+判定谓词 is_symmetric / is_positive_definite
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``A.is_symmetric() -> bool``  ·  ``A.is_positive_definite() -> bool``
 
@@ -729,8 +729,8 @@ distributed solve
 
 .. _op-distributed-cc:
 
-distributed connected_components
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+分布式 distributed connected_components
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``D.connected_components() -> (labels, n_components)``
 
