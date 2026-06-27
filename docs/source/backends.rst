@@ -104,7 +104,7 @@ The current backend lineup and what each supports:
 ----
 
 The STRUMPACK backend
---------------------
+---------------------
 
 ``backend="strumpack"`` is a **portable multifrontal sparse direct
 solver**. Unlike cuDSS (which is NVIDIA CUDA only), STRUMPACK runs on
@@ -183,7 +183,7 @@ which OS each one builds on today.
 ----
 
 When ``backend="auto"`` picks what
----------------------------------
+----------------------------------
 
 * **NVIDIA CUDA tensors**: try ``cudss`` (best direct solver) ->
   ``pytorch`` (iterative fallback).

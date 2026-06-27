@@ -545,13 +545,16 @@ Each domain has **owned nodes** and **halo/ghost nodes** from neighbors.
 
 .. code-block:: python
 
-   from torch_sla import DSparseTensor
+   from torch.distributed.device_mesh import init_device_mesh
+   from torch_sla import SparseTensor, DSparseTensor
 
-   D = DSparseTensor(val, row, col, (16, 16), num_partitions=2)
-   
-   for i in range(D.num_partitions):
-       p = D[i]
-       # p.num_owned, p.num_halo, p.num_local
+   A = SparseTensor(val, row, col, (16, 16))
+   mesh = init_device_mesh("cpu", (2,))          # 2 domains, one per rank
+   D = DSparseTensor.partition(A, mesh, partition_method="metis")
+
+   # Each rank owns a block of rows plus a thin halo of neighbour rows; the
+   # owned/halo bookkeeping is computed once and cached on the placement (D.spec).
+   print(D.num_partitions)                        # 2
 
 ----
 
@@ -615,13 +618,16 @@ Distribute global vectors to partitions and gather back.
 
 .. code-block:: python
 
-   from torch_sla import DSparseTensor
+   from torch.distributed.device_mesh import init_device_mesh
+   from torch_sla import SparseTensor, DSparseTensor
 
-   D = DSparseTensor(val, row, col, shape, num_partitions=2)
+   A = SparseTensor(val, row, col, shape)
+   mesh = init_device_mesh("cpu", (2,))
+   D = DSparseTensor.partition(A, mesh)
+
    x_global = torch.arange(16, dtype=torch.float64)
-   
-   x_local = D.scatter_local(x_global)
-   x_gathered = D.gather_global(x_local)
+   x_sharded = D.scatter(x_global)        # global vector -> DTensor[Shard(0)]
+   x_gathered = x_sharded.full_tensor()   # gather back to a global vector
 
 ----
 
@@ -1067,13 +1073,15 @@ This is computed efficiently using the adjoint method with :math:`O(1)` graph no
 
 .. code-block:: python
 
-   from torch_sla import DSparseTensor
-   
-   # Create distributed sparse tensor
-   D = DSparseTensor(val, row, col, (n, n), num_partitions=4)
-   
-   # Compute determinant (gathers all partitions)
-   det = D.det()  # Warning: requires data gather
+   from torch.distributed.device_mesh import init_device_mesh
+   from torch_sla import SparseTensor, DSparseTensor
+
+   A = SparseTensor(val, row, col, (n, n))
+   mesh = init_device_mesh("cpu", (4,))
+   D = DSparseTensor.partition(A, mesh)
+
+   # Determinant gathers the shards back to one rank before factorizing
+   det = D.det()  # Warning: requires a data gather
 
 **Numerical Considerations:**
 

@@ -124,10 +124,16 @@ Distributed sparse tensor with domain decomposition and halo exchange.
 
 .. code-block:: python
 
-    from torch_sla import DSparseTensor
-    
-    D = DSparseTensor(val, row, col, shape, num_partitions=4)
-    x_list = D.solve_all(b_list)
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch_sla import SparseTensor, DSparseTensor, solve
+
+    A = SparseTensor(val, row, col, shape)
+    mesh = init_device_mesh("cuda", (world_size,))         # one shard per rank
+    D = DSparseTensor.partition(A, mesh, partition_method="metis")
+
+    b = D.scatter(b_global)          # global RHS -> Shard(0)
+    x = solve(D, b)                  # row-sharded CG/GMRES with halo exchange
+    x_global = x.full_tensor()       # gather the solution back to a global vector
 
 LUFactorization
 ~~~~~~~~~~~~~~~
@@ -661,7 +667,7 @@ If you use torch-sla in your research, please cite our paper:
 
    @article{chi2026torchsla,
      title={torch-sla: Differentiable Sparse Linear Algebra with Adjoint Solvers and Sparse Tensor Parallelism for PyTorch},
-     author={Chi, Mingyuan},
+     author={Chi, Mingyuan and Wen, Shizheng},
      journal={arXiv preprint arXiv:2601.13994},
      year={2026},
      url={https://arxiv.org/abs/2601.13994}

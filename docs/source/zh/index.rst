@@ -374,7 +374,7 @@ torch-sla 采用 Apache License 2.0 发布。版权所有 2024-2026 Mingyuan Chi
 --------
 
 | **作者**: Mingyuan Chi
-| **邮箱**: x = walker.chi.000@gmail.com
+| **邮箱**: walker.chi.000@gmail.com
 | **作者**: Shizheng Wen
 | **邮箱**: shizheng.wen@sam.math.ethz.ch
 

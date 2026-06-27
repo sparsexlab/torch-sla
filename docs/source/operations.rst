@@ -610,7 +610,7 @@ mirrored across the diagonal.
 :meth:`~torch_sla.SparseTensor.is_positive_definite`,
 :meth:`~torch_sla.SparseTensor.is_hermitian`.
 
-**Scaling** Scaling plot coming soon (these are O(nnz) checks).
+**Scaling** Not plotted separately --- these are :math:`O(\mathrm{nnz})` structural checks (a single sparse pass), not solver workloads.
 
 ----
 

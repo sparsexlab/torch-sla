@@ -464,13 +464,15 @@ CG 在最多 :math:`n` 次迭代内收敛（精确算术）。条件数为 :math
 
 .. code-block:: python
 
-   from torch_sla import DSparseTensor
+   from torch.distributed.device_mesh import init_device_mesh
+   from torch_sla import SparseTensor, DSparseTensor
 
-   D = DSparseTensor(val, row, col, (16, 16), num_partitions=2)
-   
-   for i in range(D.num_partitions):
-       p = D[i]
-       # p.num_owned, p.num_halo, p.num_local
+   A = SparseTensor(val, row, col, (16, 16))
+   mesh = init_device_mesh("cpu", (2,))          # 2 个子域，每 rank 一个
+   D = DSparseTensor.partition(A, mesh, partition_method="metis")
+
+   # 每个 rank 拥有一块行 + 邻居的薄 halo；owned/halo 簿记一次算好缓存在 D.spec 上。
+   print(D.num_partitions)                        # 2
 
 ----
 
@@ -500,12 +502,15 @@ Halo 交换
 
 .. code-block:: python
 
-   from torch_sla import DSparseTensor
+   from torch.distributed.device_mesh import init_device_mesh
+   from torch_sla import SparseTensor, DSparseTensor
 
-   D = DSparseTensor(val, row, col, shape, num_partitions=4)
-   x_list = [torch.randn(D[i].num_local) for i in range(D.num_partitions)]
-   
-   D.halo_exchange_local(x_list)
+   A = SparseTensor(val, row, col, shape)
+   mesh = init_device_mesh("cpu", (4,))
+   D = DSparseTensor.partition(A, mesh)
+
+   x = D.scatter(torch.randn(A.shape[0], dtype=torch.float64))
+   y = (D @ x).full_tensor()   # SpMV：ghost（halo）值在内部自动交换
 
 ----
 

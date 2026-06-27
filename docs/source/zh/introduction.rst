@@ -102,10 +102,16 @@ DSparseTensor
 
 .. code-block:: python
 
-    from torch_sla import DSparseTensor
-    
-    D = DSparseTensor(val, row, col, shape, num_partitions=4)
-    x_list = D.solve_all(b_list)
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch_sla import SparseTensor, DSparseTensor, solve
+
+    A = SparseTensor(val, row, col, shape)
+    mesh = init_device_mesh("cuda", (world_size,))         # 每个 rank 一个分片
+    D = DSparseTensor.partition(A, mesh, partition_method="metis")
+
+    b = D.scatter(b_global)          # 全局右端项 -> Shard(0)
+    x = solve(D, b)                  # 行切分 CG/GMRES，自动 halo 交换
+    x_global = x.full_tensor()       # 把解 gather 回全局向量
 
 LUFactorization
 ~~~~~~~~~~~~~~~
