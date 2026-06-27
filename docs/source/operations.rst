@@ -125,8 +125,7 @@ solution ``x = A⁻¹b``. For an SPD system the CG residual decays as below.
 
    Forward solve and backward (adjoint gradient) pass vs DOF on CPU. The
    backward curve tracks the forward one (the adjoint adds O(1) graph nodes,
-   independent of the CG iteration count). Device label is in the caption under
-   the figure; per-backend timing and accuracy are in :doc:`backends`.
+   independent of the CG iteration count). Per-backend timing and accuracy are in :doc:`backends`.
 
 ----
 
@@ -261,7 +260,7 @@ pattern, which Newton reuses each iteration.
 
    Forward Newton solve and backward (implicit-function adjoint) pass vs DOF on
    CPU. The adjoint differentiates the converged solution without unrolling the
-   Newton iterations. Device label is in the caption under the figure.
+   Newton iterations.
 
 ----
 
@@ -316,7 +315,6 @@ is the general (non-symmetric) counterpart. Eigenvalues are differentiable.
    :align: center
 
    Forward eigensolve and backward (eigenvalue adjoint) pass vs DOF on CPU.
-   Device label is in the caption under the figure.
 
 ----
 
@@ -363,8 +361,7 @@ V_k^T` -- the best rank-k approximation in Frobenius norm. Differentiable.
    :align: center
 
    Forward truncated SVD and backward (singular-value adjoint) pass vs DOF on
-   CPU (the sparse SVD path is CPU-only). Device label is in the caption under
-   the figure.
+   CPU (the sparse SVD path is CPU-only).
 
 ----
 
@@ -412,7 +409,7 @@ non-zeros in that row.
    :align: center
 
    Forward sparse matvec and backward (gradient w.r.t. the matrix values) pass
-   vs DOF on CPU. Device label is in the caption under the figure.
+   vs DOF on CPU.
 
 ----
 
@@ -459,7 +456,6 @@ determinant is a scalar summary of it.
    Forward determinant and backward (gradient) pass vs DOF on CPU. Unlike the
    solves, the determinant adjoint needs the full inverse, so the backward curve
    scales markedly worse than forward -- the plot makes that cost explicit.
-   Device label is in the caption under the figure.
 
 ----
 
@@ -497,7 +493,7 @@ Differentiable.
    :align: center
 
    Forward log-determinant (Hutchinson estimator) and backward (gradient) pass
-   vs DOF on CPU. Device label is in the caption under the figure.
+   vs DOF on CPU.
 
 ----
 
@@ -575,7 +571,7 @@ stronger anisotropy generally raises :math:`\kappa`.
    :align: center
 
    Forward spectral condition number and backward (gradient) pass vs DOF on CPU
-   (sparse SVD path, CPU-only). Device label is in the caption under the figure.
+   (sparse SVD path, CPU-only).
 
 ----
 
