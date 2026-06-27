@@ -196,8 +196,8 @@ triple and (optionally) a list of pre-computed cases::
 
 ----
 
-Test Environment
-----------------
+Large-scale test environment (H200 / EPYC)
+------------------------------------------
 
 .. list-table::
    :widths: 30 70
@@ -796,11 +796,20 @@ each op exercises is shown in every plot legend.
 **Latency** (wall time) is the primary y-axis — throughput in ``DOF/s`` mixes
 work-units across ops (matvec ~ ``nnz``, solve ~ ``iter·nnz``) and reads ambiguously.
 
-**Test environment** (recorded in each run's JSON ``env`` block): CPU =
-**AMD Ryzen 7 255** (16 cores / 44 GB); CUDA = **NVIDIA RTX 4070 Ti SUPER**
-(torch 2.6 + cu124); ROCm = **AMD Radeon 780M** iGPU (torch 2.10 + rocm7.2,
-``HSA_OVERRIDE_GFX_VERSION=11.0.0``). All timings are **eager** — no
-``torch.compile``.
+**Per-op test environment** (recorded in each run's JSON ``env`` block; all
+timings **eager**, no ``torch.compile``). This is a *different* machine from the
+large-scale H200 runs above:
+
+.. list-table::
+   :widths: 14 86
+   :header-rows: 0
+
+   * - **CPU**
+     - AMD Ryzen 7 255 (16 cores / 44 GB)
+   * - **CUDA**
+     - NVIDIA RTX 4070 Ti SUPER (torch 2.6 + cu124)
+   * - **ROCm**
+     - AMD Radeon 780M iGPU (torch 2.10 + rocm7.2, ``HSA_OVERRIDE_GFX_VERSION=11.0.0``)
 
 Measured on the Ryzen 7 255 CPU, 2-D Poisson sweep to ~10\ :sup:`6` DOF:
 
@@ -888,6 +897,16 @@ small DOF only (the 780M iGPU OOMs ``hipsparse`` at scale).
 ``linear solve`` figure can overlay backends on the same SPD problem. On a 4070 Ti
 SUPER over a well-conditioned Poisson, CG beats cuDSS (few iterations vs a full
 factorization); cuDSS's edge is robustness on ill-conditioned / non-symmetric systems.
+
+.. figure:: ../../assets/benchmarks/solve_backends_scaling.png
+   :alt: Linear-solve time vs DOF across scipy/lu, strumpack, pytorch/cg and pyamg
+   :width: 100%
+   :align: center
+
+   Linear solve --- time vs DOF on the same SPD 2-D Poisson problem (Ryzen 7 255
+   CPU, float64). Log--log slopes: scipy/lu direct 1.01, strumpack direct 0.26,
+   pytorch CG 0.86, PyAMG 0.44 --- the iterative / multigrid backends flatten
+   while the direct factorization's fill-in grows.
 
 Distributed scaling (DSparseTensor)
 -----------------------------------
