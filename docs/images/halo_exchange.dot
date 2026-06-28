@@ -1,0 +1,31 @@
+digraph halo {
+  rankdir=LR; compound=true; bgcolor="transparent";
+  nodesep=0.55; ranksep=1.7;
+  node [shape=circle, fontsize=12, fixedsize=true, width=0.55, fontname="Helvetica", penwidth=1.5];
+  edge [penwidth=1.6, arrowsize=0.8];
+
+  subgraph cluster_r0 {
+    label="rank 0  ·  owns rows 0 … k"; labelloc=t; labeljust=l; fontsize=13;
+    style="rounded,filled"; fillcolor="#eef4fb"; color="#3b6ea5"; fontcolor="#3b6ea5"; margin=16;
+    o0a   [label="0",  style=filled, fillcolor="#cfe2f3", color="#3b6ea5"];
+    o0b   [label="1",  style=filled, fillcolor="#cfe2f3", color="#3b6ea5"];
+    o0bnd [label="k",  style=filled, fillcolor="#9fc5e8", color="#3b6ea5"];
+    g0    [label="ghost", style="dashed,filled", fillcolor="#f0f0f0", color="#999999", fontsize=10];
+    o0a -> o0b -> o0bnd -> g0 [style=invis];
+  }
+  subgraph cluster_r1 {
+    label="rank 1  ·  owns rows k+1 … n"; labelloc=b; labeljust=l; fontsize=13;
+    style="rounded,filled"; fillcolor="#fbf0e8"; color="#a55b3b"; fontcolor="#a55b3b"; margin=16;
+    g1    [label="ghost", style="dashed,filled", fillcolor="#f0f0f0", color="#999999", fontsize=10];
+    o1bnd [label="k+1", style=filled, fillcolor="#f9cb9c", color="#a55b3b"];
+    o1a   [label="…",  style=filled, fillcolor="#fce5cd", color="#a55b3b"];
+    o1b   [label="n",  style=filled, fillcolor="#fce5cd", color="#a55b3b"];
+    g1 -> o1bnd -> o1a -> o1b [style=invis];
+  }
+  // halo: boundary owned row -> neighbour ghost (dashed, per-rank colour)
+  o0bnd -> g1 [color="#3b6ea5", style=dashed, constraint=false];
+  o1bnd -> g0 [color="#a55b3b", style=dashed, constraint=false];
+  // local SpMV consumes the filled ghost (dotted)
+  g0 -> o0bnd [color="#888888", style=dotted, constraint=false];
+  g1 -> o1bnd [color="#888888", style=dotted, constraint=false];
+}
