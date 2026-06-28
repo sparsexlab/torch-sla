@@ -15,7 +15,7 @@
 
    50×50 网格(2,500 DOF)的 ``A.spy()`` —— 带状的五点模板。
 
-扩展性图来自 ``benchmarks/benchmark_all_ops_scaling.py``(CPU = AMD
+扩展性图来自 ``benchmarks/benchmark_all_ops_scaling.py``\ (CPU = AMD
 Ryzen 7 255;CUDA = RTX 4070 Ti SUPER)。完整方法学以及大规模单卡/多卡的
 数据见 :doc:`benchmarks`。
 
@@ -66,7 +66,7 @@ SPD 系统,CG 残差按下图衰减。
    规模递增的二维 Poisson 系统的 CG 收敛过程。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(见 :ref:`op-distributed-solve`)。
+:class:`~torch_sla.DSparseTensor`\ (见 :ref:`op-distributed-solve`)。
 
 **API** :meth:`~torch_sla.SparseTensor.solve`,函数式
 :func:`~torch_sla.spsolve`。
@@ -109,7 +109,7 @@ solve_batch
 非零值不同。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(``BatchShard`` 布局)。
+:class:`~torch_sla.DSparseTensor`\ (``BatchShard`` 布局)。
 
 **API** :meth:`~torch_sla.SparseTensor.solve_batch`。
 
@@ -195,7 +195,7 @@ nonlinear_solve
 迭代都会复用它。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(Shard(0) Newton,需要 ``jac_diag_fn``)。
+:class:`~torch_sla.DSparseTensor`\ (Shard(0) Newton,需要 ``jac_diag_fn``)。
 
 **API** :meth:`~torch_sla.SparseTensor.nonlinear_solve`,函数式
 :func:`~torch_sla.nonlinear_solve`。
@@ -247,7 +247,7 @@ eigsh / eigs
    6 个最小特征值被高亮标出。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(见 :ref:`op-distributed-eigsh`)。
+:class:`~torch_sla.DSparseTensor`\ (见 :ref:`op-distributed-eigsh`)。
 
 **API** :meth:`~torch_sla.SparseTensor.eigsh`、
 :meth:`~torch_sla.SparseTensor.eigs`。
@@ -315,7 +315,7 @@ matvec / ``@`` (SpMV)
 ``A @ x -> y``  (稀疏矩阵—向量或矩阵—矩阵乘积)
 
 稀疏矩阵—向量乘积 :math:`y = Ax`。``x`` 可以是一个向量、一摞向量,或另一个
-:class:`~torch_sla.SparseTensor`(稀疏矩阵—矩阵乘)。它是每个迭代求解器的
+:class:`~torch_sla.SparseTensor`\ (稀疏矩阵—矩阵乘)。它是每个迭代求解器的
 骨干。
 
 **示例**
@@ -334,7 +334,7 @@ matvec / ``@`` (SpMV)
 ``y`` 的第 ``i`` 行对该行的非零元求和 ``A[i, j] * x[j]``。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(halo 交换 SpMV,见
+:class:`~torch_sla.DSparseTensor`\ (halo 交换 SpMV,见
 :ref:`op-distributed-matvec`)。
 
 **API** :meth:`~torch_sla.SparseTensor.__matmul__`。
@@ -376,7 +376,7 @@ det
 **输入 / 输出可视化** ``A.spy()`` 展示了算子;行列式是它的一个标量概括。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(汇聚到单个 rank)。
+:class:`~torch_sla.DSparseTensor`\ (汇聚到单个 rank)。
 
 **API** :meth:`~torch_sla.SparseTensor.det`。
 
@@ -410,7 +410,7 @@ logdet
 **输入 / 输出可视化** 与 ``det`` 算子相同;见 ``A.spy()``。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(汇聚到单个 rank)。
+:class:`~torch_sla.DSparseTensor`\ (汇聚到单个 rank)。
 
 **API** :meth:`~torch_sla.SparseTensor.logdet`。
 
@@ -482,7 +482,7 @@ condition_number
 通常会抬高 :math:`\kappa`。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(汇聚到单个 rank)。
+:class:`~torch_sla.DSparseTensor`\ (汇聚到单个 rank)。
 
 **API** :meth:`~torch_sla.SparseTensor.condition_number`。
 
@@ -554,7 +554,7 @@ connected_components
 单一稠密带意味着只有一个。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(见 :ref:`op-distributed-cc`)。
+:class:`~torch_sla.DSparseTensor`\ (见 :ref:`op-distributed-cc`)。
 
 **API** :meth:`~torch_sla.SparseTensor.connected_components`。
 
@@ -645,7 +645,7 @@ partition
 最小化;对每个 rank 所拥有的行做 ``A.spy()``,会看到一块近似块对角的切片
 外加一条细窄的 halo。
 
-**可用于** :class:`~torch_sla.DSparseTensor`(类方法)。另见
+**可用于** :class:`~torch_sla.DSparseTensor`\ (类方法)。另见
 :meth:`~torch_sla.DSparseTensor.partition_batch`、
 :meth:`~torch_sla.DSparseTensor.from_global_distributed`。
 

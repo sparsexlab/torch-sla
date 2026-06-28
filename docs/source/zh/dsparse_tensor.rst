@@ -32,8 +32,8 @@ DSparseTensor
    # Re-wrap shards that were already produced per-rank (no re-partitioning)
    D = DSparseTensor.from_global_distributed(local_shard, spec, mesh)
 
-``partition_method`` 选择如何分配行:``"simple"``(连续块)、``"metis"``
-(图分区,最小化 halo)或 ``"coordinates"``(基于几何,需要 ``coords``)。
+``partition_method`` 选择如何分配行:``"simple"``\ (连续块)、``"metis"``
+(图分区,最小化 halo)或 ``"coordinates"``\ (基于几何,需要 ``coords``)。
 owned/halo 的簿记只计算一次并缓存在 placement 上。
 
 Scatter / gather 在全局向量与分片布局之间来回搬运:
@@ -92,7 +92,7 @@ Scatter / gather 在全局向量与分片布局之间来回搬运:
 Halo 交换 SpMV
 --------------
 
-矩阵—向量乘积 ``D @ x``(以及每次求解内部的 matvec)是 kernel 执行期间各
+矩阵—向量乘积 ``D @ x``\ (以及每次求解内部的 matvec)是 kernel 执行期间各
 rank 唯一进行通信的地方。相乘之前,每个 rank 通过一次点对点 halo 交换,用
 邻居 rank 所拥有的值填满自己的 halo 项,然后在自己拥有的行上跑一次纯本地
 SpMV。这使每个 rank 的内存和计算都正比于它在矩阵中所占的份额;见

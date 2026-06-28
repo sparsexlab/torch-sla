@@ -215,7 +215,7 @@ SafeTensors 格式
 
 **正定性：** 所有特征值 :math:`\lambda_i > 0`
 
-对于三对角矩阵：:math:`\lambda_1 \approx 2.59, \lambda_2 = 4.0, \lambda_3 \approx 5.41`（全为正 → SPD）
+对于三对角矩阵：:math:`\lambda_1 \approx 2.59, \lambda_2 = 4.0, \lambda_3 \approx 5.41`\ （全为正 → SPD）
 
 **代码：**
 
@@ -665,7 +665,7 @@ LU分解用于重复求解
 
 对于同一矩阵的 :math:`k` 次求解：
 
-- 无缓存：:math:`O(k \cdot n^{1.5})`（稀疏直接法）
+- 无缓存：:math:`O(k \cdot n^{1.5})`\ （稀疏直接法）
 - 使用LU缓存：:math:`O(n^{1.5} + k \cdot n)` — 最多快 :math:`\sqrt{n}` 倍！
 
 **用例：** 固定刚度矩阵的时间步进

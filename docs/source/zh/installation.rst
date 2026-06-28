@@ -21,8 +21,8 @@
 
 .. note::
 
-   两个**原生编译后端** —— ``torch-amgx``（NVIDIA AmgX）与
-   ``torch-strumpack``（STRUMPACK）—— 是 PyTorch 的 C++/CUDA 扩展，
+   两个**原生编译后端** —— ``torch-amgx``\ （NVIDIA AmgX）与
+   ``torch-strumpack``\ （STRUMPACK）—— 是 PyTorch 的 C++/CUDA 扩展，
    **不在 PyPI 上**，而是以预编译 wheel 形式发布在 **GitHub Releases**。
    选 wheel 时必须同时匹配你的 CUDA 版本**和** PyTorch 版本，详见
    :ref:`prebuilt-native-wheels-zh`。
@@ -43,7 +43,7 @@
 * **torch-strumpack** —— https://github.com/sparsexlab/torch-strumpack/releases
   —— Linux（cpu / cuda / rocm）+ macOS arm64，Python 3.10-3.13。
   **支持 Windows（CPU）** —— STRUMPACK 可在 Windows 上用 conda-forge 的
-  ``clang-cl``（C/C++）+ ``flang``（Fortran）编译，链接 MSVC 构建的 PyTorch
+  ``clang-cl``\ （C/C++）+ ``flang``\ （Fortran）编译，链接 MSVC 构建的 PyTorch
   （干净环境下求解相对残差约 1.7e-16）；CI 预编译的 Windows wheel 正在添加中。
 
 .. warning::
@@ -52,7 +52,7 @@
    绑定 (a) 编译时的 CUDA 版本，**和** (b) 具体的 PyTorch 版本。你必须：
    (1) 选择 ``0_cuXXX`` 标签与 ``torch.version.cuda`` 一致的 wheel；
    (2) 安装与该 wheel 编译时一致的 PyTorch 版本。
-   不匹配会在 **import 时**（而非安装时）报错：Windows 上是
+   不匹配会在 **import 时**\ （而非安装时）报错：Windows 上是
    ``DLL load failed ... procedure not found``，Linux 上是 undefined symbol。
 
 用 ``--no-deps`` 直接按 URL 安装 release wheel（避免 pip 去解析不存在的

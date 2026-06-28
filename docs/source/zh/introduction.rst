@@ -572,7 +572,7 @@ CUDA 用法
    * - :meth:`D @ x <torch_sla.DSparseTensor.__matmul__>`
      - ✓
      - ✓
-     - 分布式矩阵向量乘，伴随 :math:`A^{\top}g`（``VertexShard`` halo 交换）
+     - 分布式矩阵向量乘，伴随 :math:`A^{\top}g`\ （``VertexShard`` halo 交换）
    * - :meth:`D.solve(b) <torch_sla.DSparseTensor.solve>`
      - ✓
      - ✓

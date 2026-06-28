@@ -19,7 +19,7 @@
   169M DOF 的那个方法。
 - 超出单 GPU 时,:class:`~torch_sla.DSparseTensor` 会把矩阵分区到多个设备上。
 - 要做**可移植的 GPU 直接求解** —— 包括没有 cuDSS 的 AMD ROCm —— 用
-  ``strumpack``(CPU/CUDA/ROCm 上的多波前 LU)。
+  ``strumpack``\ (CPU/CUDA/ROCm 上的多波前 LU)。
 
 跨求解复用计算
 --------------
@@ -29,7 +29,7 @@
 - 要在许多次求解上套用同一组默认设置,把它们包进一个
   :class:`~torch_sla.SolverConfig` 作用域(见 :doc:`introduction` 的
   *Configuring solves* 一节),而不是反复传同样的 kwargs。
-- 迭代求解是朝着一个容差精化的,所以一个好的 ``x0``(例如时间循环中上一步
+- 迭代求解是朝着一个容差精化的,所以一个好的 ``x0``\ (例如时间循环中上一步
   的解)能减少迭代次数。
 
 精度 vs 速度
