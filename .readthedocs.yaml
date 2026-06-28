@@ -7,6 +7,11 @@ version: 2
 
 build:
   os: ubuntu-24.04
+  # sphinx.ext.graphviz needs the `dot` binary to render the halo-exchange
+  # diagram; the build image doesn't ship it and our custom commands run
+  # without sudo, so request it here (installed before the commands run).
+  apt_packages:
+    - graphviz
   tools:
     python: "3.11"
   commands:

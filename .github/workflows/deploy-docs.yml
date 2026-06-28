@@ -32,6 +32,8 @@ jobs:
 
     - name: Install dependencies
       run: |
+        # graphviz `dot` renders the halo-exchange diagram (sphinx.ext.graphviz)
+        sudo apt-get update && sudo apt-get install -y graphviz
         python -m pip install --upgrade pip
         pip install sphinx furo sphinx-sitemap
         # Install all dependencies for autodoc to work properly
