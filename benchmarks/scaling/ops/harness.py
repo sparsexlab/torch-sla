@@ -199,15 +199,17 @@ def fit_slope(dofs: Sequence[float], vals: Sequence[float]) -> float:
 # ---------------------------------------------------------------------------
 # Sweep (with a per-point TIME CAP)
 # ---------------------------------------------------------------------------
-def sweep_op(spec: OpSpec, device: str, *, time_cap: float, quick: bool = False):
+def sweep_op(spec: OpSpec, device: str, *, time_cap: float, quick: bool = False,
+             sides_override: Optional[Sequence[int]] = None):
     """Run ``spec`` over its DOF sweep; return list of row dicts.
 
     Stops growing DOF once a point's median time exceeds ``time_cap`` (the
     larger tail points are skipped) or on the first OOM / error. This keeps a
     single op's sweep well under a couple of minutes so the server is not
-    overloaded.
+    overloaded. ``sides_override`` (from ``--sizes``) replaces the per-op sweep.
     """
-    sides = list(spec.sweep_quick if quick else spec.sweep)
+    sides = list(sides_override) if sides_override else list(
+        spec.sweep_quick if quick else spec.sweep)
     rows = []
     print(f"\n--- {spec.name}  [{spec.backend}]  device={device}  sides={sides} ---",
           flush=True)
@@ -264,7 +266,8 @@ def sweep_op(spec: OpSpec, device: str, *, time_cap: float, quick: bool = False)
 # Plot: a single scaling curve per op -> assets/benchmarks/<png_name>_scaling.png
 # ---------------------------------------------------------------------------
 def plot_scaling(spec: OpSpec, rows, device: str, out_dir: Path,
-                 info: Optional[dict] = None) -> Optional[Path]:
+                 info: Optional[dict] = None,
+                 no_title: bool = False, transparent: bool = False) -> Optional[Path]:
     """Per-op scaling curve. Plots the FORWARD curve and, for differentiable
     ops (``time_bwd_s`` present), a BACKWARD (gradient) curve on the same axes so
     the O(1)-adjoint cost is visible. The device/dtype/torch/compile label goes
@@ -296,15 +299,17 @@ def plot_scaling(spec: OpSpec, rows, device: str, out_dir: Path,
     plt.loglog(d0, anchor * d0[0] * (d0 / d0[0]) ** 2, "k:", alpha=0.3, label="O(N^2) ref")
     plt.xlabel("DOF (N)")
     plt.ylabel("time [s]")
-    plt.title(f"{spec.name}: time vs DOF  [{spec.backend}]")
+    if not no_title:
+        plt.title(f"{spec.name}: time vs DOF  [{spec.backend}]")
     plt.grid(True, which="both", alpha=0.3)
     plt.legend()
-    fig.text(0.5, 0.005, device_caption(info), ha="center", va="bottom",
-             fontsize=8, color="0.35")
+    if not no_title:
+        fig.text(0.5, 0.005, device_caption(info), ha="center", va="bottom",
+                 fontsize=8, color="0.35")
     plt.tight_layout(rect=(0, 0.03, 1, 1))
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{spec.png_name}_scaling.png"
-    plt.savefig(path, dpi=110)
+    plt.savefig(path, dpi=110, transparent=transparent)
     plt.close()
     extra = "" if not bwd_rows else f", bwd slope={fit_slope([r['dof'] for r in bwd_rows], [r['time_bwd_s'] for r in bwd_rows]):.2f}"
     print(f"  [plot] wrote {path}  (fwd slope={slope:.2f}{extra})", flush=True)
@@ -321,6 +326,15 @@ def add_common_args(ap):
     ap.add_argument("--quick", action="store_true", help="fast smoke sweep")
     ap.add_argument("--time-cap", type=float, default=20.0,
                     help="skip larger DOF once a point exceeds this many seconds")
+    ap.add_argument("--no-title", action="store_true",
+                    help="drop the plot title + device footer (for slides)")
+    ap.add_argument("--transparent", action="store_true",
+                    help="transparent figure background (for slides)")
+    ap.add_argument("--sizes", type=int, nargs="+", default=None,
+                    help="override the per-op DOF sweep with these poisson_2d "
+                         "side lengths (DOF = side**2). Push these up on fast "
+                         "GPUs so cheap ops aren't overhead-bound; the time-cap "
+                         "still trims the expensive tail.")
     return ap
 
 
@@ -346,7 +360,8 @@ def run_and_plot(spec: OpSpec, args) -> Optional[Path]:
     if not spec.avail(device):
         print(f"[skip] {spec.name}: backend/dep unavailable on device={device}")
         return None
-    rows = sweep_op(spec, device, time_cap=args.time_cap, quick=args.quick)
+    rows = sweep_op(spec, device, time_cap=args.time_cap, quick=args.quick,
+                    sides_override=getattr(args, "sizes", None))
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "op": spec.name,
@@ -358,7 +373,9 @@ def run_and_plot(spec: OpSpec, args) -> Optional[Path]:
     jpath = out_dir / f"{spec.png_name}_scaling.json"
     jpath.write_text(json.dumps(payload, indent=2, default=str))
     print(f"  [json] wrote {jpath}", flush=True)
-    return plot_scaling(spec, rows, device, out_dir, info)
+    return plot_scaling(spec, rows, device, out_dir, info,
+                        no_title=getattr(args, "no_title", False),
+                        transparent=getattr(args, "transparent", False))
 
 
 def main_for(spec: OpSpec):

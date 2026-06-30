@@ -1,0 +1,79 @@
+{
+  "op": "eigsh (smallest-k)",
+  "backend": "lobpcg",
+  "differentiable": true,
+  "device_label": {
+    "device": "cuda",
+    "device_kind": "CUDA",
+    "processor": "NVIDIA GH200 120GB",
+    "dtype": "float64",
+    "torch": "2.12.1+cu130",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.4.0-150600.23.53-64kb-aarch64-with-glibc2.35"
+  },
+  "rows": [
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 1024,
+      "nnz": 4992,
+      "time_s": 0.17935625849986536,
+      "tput": 5709.307322558631,
+      "time_bwd_s": 0.17822252999940247,
+      "check": 19.724305271643463
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.3797674015004304,
+      "tput": 10785.549217276242,
+      "time_bwd_s": 0.38749302650012396,
+      "check": 19.735366533680647
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 9216,
+      "nnz": 45696,
+      "time_s": 0.6998988374998589,
+      "tput": 13167.617241544365,
+      "time_bwd_s": 0.6985311414991884,
+      "check": 19.73748340300105
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 1.072541866499705,
+      "tput": 15275.860562413305,
+      "time_bwd_s": 1.0978125964993524,
+      "check": 19.7382332281416
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 36864,
+      "nnz": 183552,
+      "time_s": 2.3068582824998884,
+      "tput": 15980.175409844138,
+      "time_bwd_s": 1.8200189144999968,
+      "check": 19.73877295946838
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 65536,
+      "nnz": 326656,
+      "time_s": 2.976220946000467,
+      "tput": 22019.870563732577,
+      "time_bwd_s": 2.8941098414998123,
+      "check": 19.73896300333772
+    },
+    {
+      "op": "eigsh (smallest-k)",
+      "dof": 122500,
+      "nnz": 611100,
+      "time_s": 4.391109688500364,
+      "tput": 27897.276244501136,
+      "time_bwd_s": 4.382735690000118,
+      "check": 19.73907702723248
+    }
+  ]
+}
