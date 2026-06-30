@@ -111,8 +111,16 @@ def build_problem(dof_target: int, dim: int):
 
     n = prob.shape[0]
     A = SparseTensor(prob.val.to(torch.float64), prob.row, prob.col, prob.shape)
-    # Fixed RHS: the manufactured ``f`` from the dataset (reproducible, SPD-safe).
-    b_global = prob.rhs.to(torch.float64).contiguous()
+    # RHS for a *scaling* study: a seeded RANDOM vector, NOT the dataset's
+    # smooth manufactured ``f``. The manufactured RHS is dominated by a few
+    # low-frequency modes (nearly an eigenvector of A), so CG converges in
+    # ~O(1) iterations regardless of N -- the solve then finishes in ~1 ms
+    # even at 40M DOF and measures fixed overhead, not the solver. A random
+    # RHS has full spectral content, forcing CG to do its real ~O(sqrt(N))
+    # work. Re-seeded here so every rank builds an identical b (each rank
+    # constructs the global problem, then partitions/scatters it).
+    torch.manual_seed(SEED + 1)
+    b_global = torch.randn(n, dtype=torch.float64).contiguous()
     return A, b_global, side, n
 
 
@@ -160,7 +168,10 @@ def run_once(args, rank: int, world_size: int, device: str) -> dict:
     if needs_coords:
         coords = _grid_coords(side, args.dim).to(device)
 
-    mesh = init_device_mesh(device if device != "cpu" else "cpu", (world_size,))
+    # init_device_mesh wants a device *type* ("cuda" / "cpu"), not an indexed
+    # device ("cuda:0") -- newer torch rejects the latter. Each rank's GPU is
+    # already pinned via torch.cuda.set_device(local_rank) above.
+    mesh = init_device_mesh(torch.device(device).type, (world_size,))
     D = DSparseTensor.partition(A, mesh, partition_method=method_str, coords=coords)
     b_dt = D.scatter(b_global)
 
@@ -307,9 +318,15 @@ def _efficiency(rows_for_mode: list) -> list:
 # Plotting
 # --------------------------------------------------------------------------- #
 def plot(rows: list, plot_path: Path, no_title: bool = False) -> Path:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[plot] matplotlib not installed -- skipping PNG. The JSON is "
+              "saved; run `pip install matplotlib` then re-render offline with "
+              "`--plot-only`.")
+        return plot_path
 
     modes = [m for m in ("weak", "strong", "throughput")
              if any(r["mode"] == m for r in rows)]
@@ -334,16 +351,18 @@ def plot(rows: list, plot_path: Path, no_title: bool = False) -> Path:
                 ax.axhline(ys[0], ls="--", color=color, alpha=0.4,
                            label="ideal (flat)")
             ax.set_ylabel("solve time (s)  [lower = better]", fontsize=11)
-            ax.set_title("Weak scaling\n(fixed DOF/rank)", fontsize=12,
-                         fontweight="bold")
+            if not no_title:
+                ax.set_title("Weak scaling\n(fixed DOF/rank)", fontsize=12,
+                             fontweight="bold")
         elif mode == "strong":
             sp = [r["speedup"] for r in mrows]
             ax.plot(ranks, ranks, "k--", lw=1.4, alpha=0.6, label="ideal linear")
             ax.plot(ranks, sp, "o-", color=color, lw=2.2, ms=8,
                     markeredgecolor="white", markeredgewidth=1, label="measured")
             ax.set_ylabel("speedup  T(1) / T(p)", fontsize=11)
-            ax.set_title("Strong scaling\n(fixed total DOF)", fontsize=12,
-                         fontweight="bold")
+            if not no_title:
+                ax.set_title("Strong scaling\n(fixed total DOF)", fontsize=12,
+                             fontweight="bold")
         else:  # throughput
             thr = [r["throughput_dof_s"] for r in mrows]
             ax.plot(ranks, thr, "o-", color=color, lw=2.2, ms=8,
@@ -352,8 +371,9 @@ def plot(rows: list, plot_path: Path, no_title: bool = False) -> Path:
                 ax.plot(ranks, [thr[0] * p for p in ranks], "--", color=color,
                         alpha=0.4, label="ideal linear")
             ax.set_ylabel("throughput (DOF / s)", fontsize=11)
-            ax.set_title("Throughput\n(DOF/s vs ranks)", fontsize=12,
-                         fontweight="bold")
+            if not no_title:
+                ax.set_title("Throughput\n(DOF/s vs ranks)", fontsize=12,
+                             fontweight="bold")
 
         ax.set_xlabel("# ranks (world size)", fontsize=11)
         if ranks:
@@ -370,7 +390,8 @@ def plot(rows: list, plot_path: Path, no_title: bool = False) -> Path:
             fontsize=13, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.96) if not no_title else None)
     plot_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    # Transparent canvas so the PNG drops onto any slide background.
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight", transparent=True)
     plt.close(fig)
     return plot_path
 

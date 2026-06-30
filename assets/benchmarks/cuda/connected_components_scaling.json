@@ -5,68 +5,47 @@
   "device_label": {
     "device": "cuda",
     "device_kind": "CUDA",
-    "processor": "NVIDIA GeForce RTX 4070 Ti SUPER",
+    "processor": "NVIDIA GH200 120GB",
     "dtype": "float64",
-    "torch": "2.6.0+cu124",
+    "torch": "2.12.1+cu130",
     "compile": "eager, no compile",
-    "platform": "Windows-11-10.0.26200-SP0"
+    "platform": "Linux-6.4.0-150600.23.53-64kb-aarch64-with-glibc2.35"
   },
   "rows": [
     {
       "op": "connected_components",
-      "dof": 1024,
-      "nnz": 4992,
-      "time_s": 0.003028300008736551,
-      "tput": 338143.51188646833
-    },
-    {
-      "op": "connected_components",
-      "dof": 4096,
-      "nnz": 20224,
-      "time_s": 0.0036921000573784113,
-      "tput": 1109395.7196025667
-    },
-    {
-      "op": "connected_components",
-      "dof": 16384,
-      "nnz": 81408,
-      "time_s": 0.004698900040239096,
-      "tput": 3486773.47032186
-    },
-    {
-      "op": "connected_components",
-      "dof": 65536,
-      "nnz": 326656,
-      "time_s": 0.004923200001940131,
-      "tput": 13311667.20307394
-    },
-    {
-      "op": "connected_components",
-      "dof": 200704,
-      "nnz": 1001728,
-      "time_s": 0.012833099928684533,
-      "tput": 15639557.169767424
-    },
-    {
-      "op": "connected_components",
-      "dof": 409600,
-      "nnz": 2045440,
-      "time_s": 0.04485279996879399,
-      "tput": 9132094.32376521
-    },
-    {
-      "op": "connected_components",
-      "dof": 692224,
-      "nnz": 3457792,
-      "time_s": 0.08428069995716214,
-      "tput": 8213315.745500937
+      "dof": 262144,
+      "nnz": 1308672,
+      "time_s": 0.0032113670004036976,
+      "tput": 81630034.80045916
     },
     {
       "op": "connected_components",
       "dof": 1048576,
       "nnz": 5238784,
-      "time_s": 0.05508289998397231,
-      "tput": 19036325.253483538
+      "time_s": 0.003320547000839724,
+      "tput": 315784116.2118255
+    },
+    {
+      "op": "connected_components",
+      "dof": 4194304,
+      "nnz": 20963328,
+      "time_s": 0.005662977999236318,
+      "tput": 740653416.0234462
+    },
+    {
+      "op": "connected_components",
+      "dof": 16777216,
+      "nnz": 83869696,
+      "time_s": 0.01685188200099219,
+      "tput": 995569278.1976639
+    },
+    {
+      "op": "connected_components",
+      "dof": 33547264,
+      "nnz": 167713152,
+      "time_s": 0.03246782999849529,
+      "tput": 1033246262.5791355
     }
   ]
 }

@@ -147,6 +147,13 @@ def partition_coordinates(
     method : str
         ``"rcb"`` / ``"slicing"`` / ``"hilbert"``.
     """
+    # Partitioning is a one-time setup; the other partitioners (simple /
+    # metis) return CPU int64 ids and the consumer (build_partition) works
+    # on CPU. Do the same here so geometric methods stay device-safe when
+    # coords live on CUDA -- otherwise a CPU index tensor (node_indices /
+    # arange) meets a CUDA mask (from coords) and torch raises. Cost is
+    # negligible vs the solve.
+    coords = coords.detach().to("cpu")
     num_nodes = coords.size(0)
     partition_ids = torch.zeros(num_nodes, dtype=torch.int64)
 

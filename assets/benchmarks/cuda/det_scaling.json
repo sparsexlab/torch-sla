@@ -1,0 +1,48 @@
+{
+  "op": "determinant",
+  "backend": "scipy",
+  "differentiable": true,
+  "device_label": {
+    "device": "cpu",
+    "device_kind": "CPU",
+    "processor": "aarch64",
+    "dtype": "float64",
+    "torch": "2.12.1+cu130",
+    "compile": "eager, no compile",
+    "platform": "Linux-6.4.0-150600.23.53-64kb-aarch64-with-glibc2.35"
+  },
+  "rows": [
+    {
+      "op": "determinant",
+      "dof": 4096,
+      "nnz": 20224,
+      "time_s": 0.033257121500355424,
+      "tput": 123161.59111834815,
+      "time_bwd_s": 0.9077690100002656
+    },
+    {
+      "op": "determinant",
+      "dof": 9216,
+      "nnz": 45696,
+      "time_s": 0.0729412165001122,
+      "tput": 126348.31775784577,
+      "time_bwd_s": 5.106300184999782
+    },
+    {
+      "op": "determinant",
+      "dof": 16384,
+      "nnz": 81408,
+      "time_s": 0.09814880350040767,
+      "tput": 166930.20613269063,
+      "time_bwd_s": 17.64391502449962
+    },
+    {
+      "op": "determinant",
+      "dof": 36864,
+      "nnz": 183552,
+      "time_s": 0.2356811679992461,
+      "tput": 156414.70344426468,
+      "time_bwd_s": 66.5009079929996
+    }
+  ]
+}
