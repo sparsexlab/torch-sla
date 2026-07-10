@@ -1,26 +1,41 @@
 简介
 ====
 
-.. raw:: html
-
-   <p><strong>torch-sla</strong> (<span class="gradient-text">Torch Sparse Linear Algebra</span>) 是一个高效的 PyTorch 稀疏线性代数库。它提供可微分的稀疏线性方程求解器，支持多种后端，兼容 CPU 和 CUDA。</p>
+torch-sla 为 PyTorch 提供稀疏线性代数：它为稀疏的 ``A`` 求解 :math:`Ax = b`，
+计算特征值、SVD 和行列式，并让梯度通过 ``torch.autograd`` 流经所有这些运算。
+它可在 CPU 和 GPU 上运行，并分派到多个求解器后端。
 
 核心特性
 --------
 
-.. raw:: html
+.. list-table::
+   :widths: 22 78
+   :header-rows: 0
+   :class: feature-grid
 
-   <ul class="feature-list">
-     <li><span class="gradient-text">内存高效</span>: 仅存储非零元素 — 使用最少内存求解百万级未知数</li>
-     <li><span class="gradient-text">多后端支持</span>: 可选择 <a href="https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html">SciPy</a>、<a href="https://pytorch.org/">PyTorch原生</a>、<a href="https://docs.nvidia.com/cuda/cudss/">cuDSS</a>（NVIDIA）或 STRUMPACK（支持 CPU/CUDA/ROCm 的可移植直接求解器）</li>
-     <li><span class="gradient-text">后端/方法分离</span>: 独立指定后端和求解方法</li>
-     <li><span class="gradient-text">自动选择</span>: 根据设备、数据类型和问题规模自动选择最佳后端和方法</li>
-     <li><span class="gradient-text">梯度支持</span>: 通过 PyTorch autograd 完整计算梯度，<span class="badge-gradient">O(1) 计算图节点</span></li>
-     <li><span class="gradient-text">批量操作</span>: 支持形状为 <code>[..., M, N, ...]</code> 的批量稀疏张量</li>
-     <li><span class="gradient-text">属性检测</span>: 自动检测对称性和正定性</li>
-     <li><span class="gradient-text">分布式支持</span>: 支持 halo 交换的分布式稀疏矩阵并行计算</li>
-     <li><span class="gradient-text">大规模测试</span>: 经过 <span class="badge-gradient">1.69亿自由度</span> 测试，近线性扩展</li>
-   </ul>
+   * - **稀疏存储**
+     - 只保留非零元，因此百万级未知数的问题也能留在内存中；矩阵以 COO/CSR
+       存储，从不稠密化。
+   * - **多后端**
+     - CPU 上用 `SciPy <https://docs.scipy.org/doc/scipy/reference/sparse.linalg.html>`_
+       和 `PyTorch 原生 <https://pytorch.org/>`_，NVIDIA 上用 `cuDSS
+       <https://docs.nvidia.com/cuda/cudss/>`_，以及 STRUMPACK 作为
+       CPU/CUDA/ROCm 上的可移植直接求解器。后端与方法独立选择，``solve()``
+       会根据设备、dtype 和规模自动选出合理的一对。
+   * - **梯度 / 伴随**
+     - ``solve``、``eigsh``、``svd`` 和 ``det`` 的反向传播使用伴随法，向
+       autograd 图添加 O(1) 个节点，而不是每次迭代一个。
+   * - **批处理**
+     - 形状为 ``[..., M, N, ...]`` 的批量稀疏张量，以及用于*不同*稀疏模式
+       集合的 :class:`~torch_sla.SparseTensorList`。
+   * - **属性检测**
+     - 对称性和正定性检查为自动求解器选择（``matrix_type="auto"``）提供依据。
+   * - **分布式**
+     - 按行分片的 :class:`~torch_sla.DSparseTensor`，配合 halo 交换用于
+       多进程 / 多 GPU 求解。
+
+在下文的 2D Poisson 基准中，PyTorch CG 路径在单个 GPU 上达到 1.69亿 DOF；
+数字和硬件见 :doc:`benchmarks`。
 
 推荐后端
 --------

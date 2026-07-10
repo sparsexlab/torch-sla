@@ -3,6 +3,62 @@
 All notable changes to this project are documented in this file. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`show_backends()` / `get_available_backends()` now report every
+  backend.** They previously probed only `scipy`, `pytorch`, `cudss`,
+  `strumpack` and silently omitted `pyamg` and `amgx`, so an installed
+  PyAMG never showed up. Both functions now derive from a single source
+  of truth covering all six registered backends. Added a
+  `tests/backends/test_backend_registry.py` guard so any future backend
+  added to `BACKEND_METHODS` but forgotten in the discovery helpers fails
+  CI.
+- **cuDSS complex gradients were wrong.** The cuDSS adjoint (LU / Cholesky
+  / LDLT and the batched path) omitted the conjugation that every other
+  backend applies, so gradients for `complex128` matrices were fully wrong
+  (relative error ≈ 1.0). Now solves `Aᴴ` and multiplies by `conj(u)` like
+  scipy/pytorch/strumpack; real dtypes are unaffected (`.conj()` is a
+  no-op). Verified against the scipy reference to machine precision.
+- **`SolverConfig.spd().cpu().direct()` (and `auto()` for SPD-on-CPU) no
+  longer crashes.** It resolved to `scipy + cholesky`, but SciPy has no
+  Cholesky method, so the recommended auto path raised `ValueError` for the
+  most common (SPD) case. It now resolves to `scipy + lu` (SuperLU).
+- **`scipy` `minres` crashed on SciPy ≥ 1.14** (`TypeError: unexpected
+  keyword 'tol'`). Switched to the `rtol` kwarg.
+- **`mean()` over a single sparse axis** divided every slice by the *total*
+  nnz instead of that slice's own nnz count, yielding meaningless values.
+  It now divides per row/column by that slice's nnz (empty slices → 0).
+- **`sum()` / `mean()` with `keepdim=True` over a sparse axis** dropped the
+  reduced axis instead of keeping it as size 1; the reduced sparse axis is
+  now re-inserted.
+- **`SparseTensor.detach()` / `clone()` / `contiguous()` / `requires_grad`
+  / `grad`** and the element-wise math ops (`sin`, `cos`, `tanh`,
+  `sigmoid`, `relu`, `clamp`, `sign`, `floor`, `ceil`, `round`,
+  `reciprocal`, `pow`, `log2`, `log10`, `logical_*`, `isnan/isinf/isfinite`)
+  were defined in `ops.py` but never bound to the class, so they raised
+  `AttributeError`. They are now wired through.
+- **`SparseSolveFunction`** raised `NameError` because `scipy_solve` was
+  referenced but never imported.
+- **Version string mismatch**: `torch_sla.__version__` reported `0.3.1`
+  while the package metadata was `0.3.2`; synced to `0.3.2`.
+- Added the missing **`[pyamg]`** install extra (the docs already referenced
+  `pip install torch-sla[pyamg]`) and corrected the **`[all]`** extra to the
+  PyPI-installable backend set (`cudss` + `pyamg`), excluding the native
+  `amgx` / `strumpack` release wheels as documented.
+
+### Known issues (reported, not yet fixed)
+
+- Matrix-free `nonlinear_solve` (no explicit `jacobian_fn`) ignores
+  `linear_method` and its JVP uses a VJP (`Jᵀv`), so gradients are wrong for
+  non-symmetric Jacobians. Needs a forward-mode JVP + method-aware
+  (BiCGSTAB/GMRES) Krylov solver.
+- Distributed polynomial/Neumann preconditioner estimates `τ` from the
+  owned-by-owned block only (drops halo columns) and densifies it.
+- `eigsh` `which="LM"/"SM"` is treated as largest/smallest *algebraic*
+  rather than *magnitude* for indefinite matrices.
+
 ## [0.3.1] - 2026-06-17
 
 Patch release — `eigsh` correctness + perf fixes on top of v0.3.0.

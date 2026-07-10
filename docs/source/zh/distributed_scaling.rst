@@ -14,7 +14,7 @@
 它是分布式求解扩展性的唯一标准入口。脚本会从一个可复现的 Poisson 问题
 (:mod:`torch_sla.datasets`)构建一个按行分片的
 :class:`~torch_sla.DSparseTensor`,运行统一的分布式 :func:`~torch_sla.solve`,
-并记录求解的墙钟时间、相对残差 ``||A x - b|| / ||b||``(正确性门槛)、
+并记录求解的墙钟时间、相对残差 ``||A x - b|| / ||b||``\ (正确性门槛)、
 吞吐量以及并行效率。
 
 它衡量什么
@@ -56,8 +56,8 @@
 * ``LOCAL_RANK`` —— 本进程在其节点内的 rank;用于通过
   ``torch.cuda.set_device(LOCAL_RANK)`` 选定 GPU。
 
-后端会自动选择:CUDA 可用时用 **NCCL**(每个 GPU 一个 rank),CPU 上用
-**gloo**(多进程 CPU,适合在单 GPU 或纯 CPU 机器上跑通分布式代码路径)。
+后端会自动选择:CUDA 可用时用 **NCCL**\ (每个 GPU 一个 rank),CPU 上用
+**gloo**\ (多进程 CPU,适合在单 GPU 或纯 CPU 机器上跑通分布式代码路径)。
 
 单节点、多 GPU
 ~~~~~~~~~~~~~~
@@ -98,7 +98,7 @@
 先跑 ``p=1`` 基线,再跑更大的 world size。JSON 和图会累积,所以只需换一个
 ``--nproc_per_node`` 重新启动即可。
 
-**弱扩展 (weak scaling)**(固定每 rank 的 DOF):
+**弱扩展 (weak scaling)**\ (固定每 rank 的 DOF):
 
 .. code-block:: bash
 
@@ -108,7 +108,7 @@
        --mode weak --dof-per-rank 100000 --method cg --partitioner simple
    done
 
-**强扩展 (strong scaling)**(固定总 DOF):
+**强扩展 (strong scaling)**\ (固定总 DOF):
 
 .. code-block:: bash
 
@@ -210,7 +210,7 @@ CPU/gloo 冒烟测试的示例输出**,用于确认脚本能端到端跑通、�
 ----------------------------------
 
 * **弱扩展** —— 求解时间曲线应尽量保持平坦。出现一点向上的缓坡是正常的,
-  因为每次 Krylov 迭代要付出一次 ``all_reduce``(用于点积)外加一次 halo
+  因为每次 Krylov 迭代要付出一次 ``all_reduce``\ (用于点积)外加一次 halo
   交换,而这部分通信随 rank 数缓慢增长。
 * **强扩展** —— 加速比一开始应贴着虚线表示的理想线性曲线,等到每个 rank
   的问题小到无法掩盖通信时就会拐弯。这个拐点正是有用的信号:它告诉你仍能

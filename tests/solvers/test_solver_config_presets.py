@@ -31,10 +31,12 @@ def test_spd_cpu_iterative_picks_pyamg_amg():
     assert cfg.method == "amg"
 
 
-def test_spd_cpu_direct_picks_scipy_cholesky():
+def test_spd_cpu_direct_picks_scipy_lu():
+    # SciPy has no Cholesky method, so SPD-on-CPU-direct must resolve to a
+    # method scipy can actually execute (SuperLU 'lu'), not 'cholesky'.
     cfg = SolverConfig.spd().cpu().direct()
     assert cfg.backend == "scipy"
-    assert cfg.method == "cholesky"
+    assert cfg.method == "lu"
 
 
 def test_spd_bare_picks_auto_device():
@@ -128,7 +130,7 @@ def test_iterative_undoes_direct():
 def test_cpu_undoes_gpu():
     cfg = SolverConfig.spd().gpu().direct().cpu()
     assert cfg.backend == "scipy"
-    assert cfg.method == "cholesky"
+    assert cfg.method == "lu"
 
 
 # ---------------------------------------------------------------- modifiers
@@ -171,7 +173,7 @@ def test_preset_works_as_context_manager():
     context-manager + decorator + LIFO scope machinery."""
     with SolverConfig.spd().cpu().direct() as cfg:
         assert cfg.backend == "scipy"
-        assert cfg.method == "cholesky"
+        assert cfg.method == "lu"
 
 
 def test_private_axis_state_excluded_from_scope_kwargs():
@@ -261,7 +263,7 @@ def test_auto_chains_with_axis_modifiers():
     auto_cfg = SolverConfig.auto(A)
     forced = auto_cfg.cpu().direct()
     assert forced.backend == "scipy"
-    assert forced.method == "cholesky"
+    assert forced.method == "lu"
 
 
 def test_auto_chains_with_high_accuracy():

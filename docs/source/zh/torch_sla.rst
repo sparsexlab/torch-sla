@@ -17,6 +17,7 @@ SparseTensor
    :members:
    :undoc-members:
    :show-inheritance:
+   :special-members: __matmul__
 
 SparseTensorList
 ~~~~~~~~~~~~~~~~
@@ -52,6 +53,16 @@ DSparseTensor
    :members:
    :undoc-members:
    :show-inheritance:
+   :special-members: __matmul__
+
+Partition
+~~~~~~~~~
+
+表示分布式计算中单个分区/子域的数据类。
+
+.. autoclass:: torch_sla.Partition
+   :members:
+   :undoc-members:
 
 ----
 
@@ -88,6 +99,14 @@ spsolve_batch_different_layout
 
 .. autofunction:: torch_sla.spsolve_batch_different_layout
 
+ParallelBatchSolver
+~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: torch_sla.ParallelBatchSolver
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 ----
 
 非线性求解
@@ -103,6 +122,14 @@ adjoint_solve
 
 .. autofunction:: torch_sla.adjoint_solve
 
+NonlinearSolveAdjoint
+~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: torch_sla.NonlinearSolveAdjoint
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 ----
 
 持久化 (I/O)
@@ -111,33 +138,148 @@ adjoint_solve
 safetensors 格式
 ~~~~~~~~~~~~~~~~
 
+save_sparse
+^^^^^^^^^^^
+
 .. autofunction:: torch_sla.save_sparse
+
+load_sparse
+^^^^^^^^^^^
 
 .. autofunction:: torch_sla.load_sparse
 
-.. autofunction:: torch_sla.save_distributed
+load_metadata
+^^^^^^^^^^^^^
 
-.. autofunction:: torch_sla.load_partition
+.. autofunction:: torch_sla.load_metadata
+
+save_sparse_sharded
+^^^^^^^^^^^^^^^^^^^
+
+.. autofunction:: torch_sla.save_sparse_sharded
+
+load_sparse_shard
+^^^^^^^^^^^^^^^^^
+
+.. autofunction:: torch_sla.load_sparse_shard
+
+save_dsparse
+^^^^^^^^^^^^
+
+.. autofunction:: torch_sla.save_dsparse
+
+load_dsparse
+^^^^^^^^^^^^
+
+.. autofunction:: torch_sla.load_dsparse
 
 Matrix Market 格式
 ~~~~~~~~~~~~~~~~~~
 
+save_mtx
+^^^^^^^^
+
 .. autofunction:: torch_sla.save_mtx
 
+load_mtx
+^^^^^^^^
+
 .. autofunction:: torch_sla.load_mtx
+
+load_mtx_info
+^^^^^^^^^^^^^
+
+.. autofunction:: torch_sla.load_mtx_info
+
+----
+
+分区函数
+--------
+
+partition_graph_metis
+~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.partition_graph_metis
+
+partition_coordinates
+~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.partition_coordinates
+
+partition_simple
+~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.partition_simple
 
 ----
 
 后端工具
 --------
 
+get_available_backends
+~~~~~~~~~~~~~~~~~~~~~~
+
 .. autofunction:: torch_sla.get_available_backends
+
+show_backends
+~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.show_backends
+
+get_backend_methods
+~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: torch_sla.get_backend_methods
 
+get_default_method
+~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.get_default_method
+
+select_backend
+~~~~~~~~~~~~~~
+
 .. autofunction:: torch_sla.select_backend
 
+select_method
+~~~~~~~~~~~~~
+
 .. autofunction:: torch_sla.select_method
+
+后端可用性检查
+~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.is_scipy_available
+
+.. autofunction:: torch_sla.is_pytorch_available
+
+.. autofunction:: torch_sla.is_cudss_available
+
+.. autofunction:: torch_sla.is_pyamg_available
+
+.. autofunction:: torch_sla.is_amgx_available
+
+.. autofunction:: torch_sla.is_strumpack_available
+
+----
+
+工具函数
+--------
+
+auto_select_method
+~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.auto_select_method
+
+estimate_direct_solver_memory
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.estimate_direct_solver_memory
+
+get_available_gpu_memory
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: torch_sla.get_available_gpu_memory
 
 ----
 
@@ -176,3 +318,8 @@ DEFAULT_METHODS
        'strumpack': 'lu',
    }
 
+类型别名
+~~~~~~~~
+
+- ``BackendType``：后端名称的 Literal 类型：``'scipy'``、``'pytorch'``、``'cudss'``、``'pyamg'``、``'amgx'``、``'strumpack'``、``'auto'``
+- ``MethodType``：求解方法的 Literal 类型：``'lu'``、``'umfpack'``、``'cg'``、``'cgs'``、``'bicgstab'``、``'gmres'``、``'minres'``、``'cholesky'``、``'ldlt'``、``'lsqr'``、``'lsmr'``

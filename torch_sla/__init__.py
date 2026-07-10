@@ -99,7 +99,11 @@ from .backends import (
     select_method,
     # Availability checks
     is_scipy_available,
+    is_pytorch_available,
     is_cudss_available,
+    is_pyamg_available,
+    is_amgx_available,
+    is_strumpack_available,
     # Backend-method mappings
     BACKEND_METHODS,
     DEFAULT_METHODS,
@@ -144,7 +148,7 @@ from .nonlinear_solve import (
     NonlinearSolveAdjoint,
 )
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __author__ = "Mingyuan Chi, Shizheng Wen"
 
 __all__ = [
@@ -173,7 +177,11 @@ __all__ = [
     "select_backend",
     "select_method",
     "is_scipy_available",
+    "is_pytorch_available",
     "is_cudss_available",
+    "is_pyamg_available",
+    "is_amgx_available",
+    "is_strumpack_available",
     "BACKEND_METHODS",
     "DEFAULT_METHODS",
     "BackendType",

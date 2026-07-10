@@ -108,12 +108,12 @@ STRUMPACK 后端
 AMD ROCm** 上运行,支持实数和复数矩阵,并提供多波前 LU 分解。它是完全可微的:
 梯度通过伴随(A\ :sup:`H`)求解流动,因此能像其他后端一样接入 autograd 流程。
 
-实践中,在 cuDSS 无法触及的硬件上要做 GPU **直接**求解时,STRUMPACK 就是
+实践中,在 cuDSS 无法触及的硬件上要做 GPU **直接**\ 求解时,STRUMPACK 就是
 答案 —— 其中最重要的是 AMD ROCm GPU,那里没有 cuDSS。它需要可选的
 ``torch-strumpack`` 包,该包以 **GitHub Releases 上的预编译 wheel** 形式发布
 (不在 PyPI;见 :ref:`prebuilt-native-wheels`),覆盖 Linux cpu / cuda / rocm
 以及 macOS arm64。**Windows(CPU)也受支持** —— STRUMPACK 可在 Windows 上用
-conda-forge 的 ``clang-cl``(C/C++)+ ``flang``(Fortran)构建,并链接到
+conda-forge 的 ``clang-cl``\ (C/C++)+ ``flang``\ (Fortran)构建,并链接到
 MSVC 编译的 PyTorch(纯净环境下求解的相对残差约 1.7e-16);经 CI 构建的
 预编译 Windows wheel 正在添加中::
 
@@ -176,8 +176,8 @@ MSVC 编译的 PyTorch(纯净环境下求解的相对残差约 1.7e-16);经 CI �
 ``backend="auto"`` 在何时选谁
 ----------------------------
 
-* **NVIDIA CUDA 张量**:先试 ``cudss``(最好的直接求解器)->
-  ``pytorch``(迭代法兜底)。
+* **NVIDIA CUDA 张量**:先试 ``cudss``\ (最好的直接求解器)->
+  ``pytorch``\ (迭代法兜底)。
 * **AMD ROCm 张量**:cuDSS **仅限 NVIDIA**,在这里永不运行,因此 auto 路径
   使用 ``pytorch``(迭代法),需要直接求解时则用 ``strumpack``
   (ROCm 上可移植的多波前直接求解器)。
@@ -199,11 +199,11 @@ MSVC 编译的 PyTorch(纯净环境下求解的相对残差约 1.7e-16);经 CI �
 精度表中,直接法后端标注 ``~1e-14``,迭代法标注 ``~1e-6``。这道差距是结构性
 的,而不是 bug:
 
-* **直接法**求解器对矩阵做分解(``LU`` / ``Cholesky`` / ``LDL``)再回代。结果
+* **直接法**\ 求解器对矩阵做分解(``LU`` / ``Cholesky`` / ``LDL``)再回代。结果
   *在浮点舍入意义下是精确的* —— 对一个良态的 ``float64`` 系统,相对残差落在
   机器 epsilon 附近(``~1e-14``..``1e-16``)。没有收敛旋钮;你一次性付出分解
   代价,换来一个完全精确的答案。
-* **迭代法**求解器(CG、BiCGStab、GMRES 等)不断精化一个猜测,直到残差
+* **迭代法**\ 求解器(CG、BiCGStab、GMRES 等)不断精化一个猜测,直到残差
   ``‖Ax − b‖ / ‖b‖`` 降到你设定的*容差*以下(``atol`` / ``rtol``,默认
   ``~1e-6``)。它们在容差处停止,所以答案只精确到你要求的程度。把 ``atol``
   收紧到 ``1e-12``,残差就跟着下去 —— 代价是更多迭代。``A`` 的病态程度
@@ -221,7 +221,7 @@ MSVC 编译的 PyTorch(纯净环境下求解的相对残差约 1.7e-16);经 CI �
      - 空间
      - 精度
    * - 直接法 (LU / Cholesky)
-     - :math:`O(n^{1.5})`(二维)到 :math:`O(n^{2})`(三维)
+     - :math:`O(n^{1.5})`\ (二维)到 :math:`O(n^{2})`\ (三维)
      - :math:`O(n\log n)` 到 :math:`O(n^{4/3})` 的填充
      - 精确到舍入(``~1e-14``)
    * - 迭代法 (CG / GMRES)
@@ -286,13 +286,13 @@ MSVC 编译的 PyTorch(纯净环境下求解的相对残差约 1.7e-16);经 CI �
      - 能力
      - 备注
    * - ``pyamg``
-     - **已可用**(本次发布)
+     - **已可用**\ (本次发布)
      - CPU AMG setup + 跨设备 V-cycle
      - 已经在用。见上文。独立求解器 +
        :class:`~torch_sla.backends.pyamg_backend.PyAMGHierarchy` 用于
        复用预处理器。
    * - ``amgx``
-     - **已可用**(本次发布)
+     - **已可用**\ (本次发布)
      - CUDA AMG + Krylov(Nvidia AmgX)
      - 仅 Linux + Windows。需要 NVIDIA GPU(含 cu12.8 上的 Blackwell
        ``sm_120``)。从

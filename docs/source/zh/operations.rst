@@ -15,9 +15,47 @@
 
    50×50 网格(2,500 DOF)的 ``A.spy()`` —— 带状的五点模板。
 
-扩展性图来自 ``benchmarks/benchmark_all_ops_scaling.py``(CPU = AMD
-Ryzen 7 255;CUDA = RTX 4070 Ti SUPER)。完整方法学以及大规模单卡/多卡的
-数据见 :doc:`benchmarks`。
+扩展性图来自 ``benchmarks/scaling/ops/`` 中的逐运算测量脚本(用
+``run_all.py`` 一次性全部运行)。每张图都在图下方的说明里标注了它测量所在的
+确切设备 —— **CPU = AMD Ryzen 7 255 w/ Radeon 780M,CUDA = NVIDIA RTX
+4070 Ti SUPER**,均为 ``float64``、eager(无 ``torch.compile``)—— 所以某个
+数字*来自哪里*从不含糊。对每个**可微**运算(solve、eigsh、svd、det、logdet、
+norm、condition_number、matvec、nonlinear_solve),图中都画出**两条曲线**:
+前向传播和反向(梯度)传播,分别在 CUDA 同步下计时。反向曲线让伴随 /
+autograd 图相对于前向的开销变得可见 —— 对隐式求解,它与前向同步(O(1) 节点
+的伴随),而 ``det`` 则表现出预期中的稠密伴随膨胀。每张图背后的原始
+``(dof, forward, backward)`` 行以 ``<op>_scaling.json`` 的形式连同设备标签
+保存在 PNG 旁边。完整方法学以及大规模单卡/多卡数据见 :doc:`benchmarks`,
+多后端求解对比和精度图见 :doc:`backends`。
+
+下文每个运算下方内嵌的逐运算图是 **CPU** 运行结果。同一套脚本在 **CUDA**
+设备上运行(``run_all.py --device cuda``,RTX 4070 Ti SUPER)产生下面对应的
+GPU 前向+反向曲线;每张都带有各自的 ``CUDA: NVIDIA GeForce RTX 4070 Ti
+SUPER`` 说明。
+
+.. list-table:: CUDA(RTX 4070 Ti SUPER,float64,eager)—— 前向 + 反向
+   :widths: 50 50
+   :class: borderless
+
+   * - .. image:: ../../../assets/benchmarks/cuda/cg_scaling.png
+          :width: 100%
+     - .. image:: ../../../assets/benchmarks/cuda/logdet_scaling.png
+          :width: 100%
+   * - .. image:: ../../../assets/benchmarks/cuda/spmv_scaling.png
+          :width: 100%
+     - .. image:: ../../../assets/benchmarks/cuda/matmat_scaling.png
+          :width: 100%
+   * - .. image:: ../../../assets/benchmarks/cuda/norm_scaling.png
+          :width: 100%
+     - .. image:: ../../../assets/benchmarks/cuda/transpose_scaling.png
+          :width: 100%
+
+在这台共享的 Windows GPU 机器上,直接法/特征值运算(``cudss``、``lu``、
+``det``、``eigsh``)以及大规模非线性求解未能在同一轮中采集 —— GPU 上下文在
+一次大 DOF 显存溢出后变得不稳定,不重启就无法恢复;与其编造数字,不如省略
+这些 CUDA 数据点(CPU 图已覆盖它们,GPU 直接求解路径在 :doc:`backends` 中有
+演示)。上面这些可微的 CUDA 运算(``cg``、``logdet``、``spmv``、``norm``)都
+画出了前向和反向曲线。
 
 ----
 
@@ -315,7 +353,7 @@ matvec / ``@`` (SpMV)
 ``A @ x -> y``  (稀疏矩阵—向量或矩阵—矩阵乘积)
 
 稀疏矩阵—向量乘积 :math:`y = Ax`。``x`` 可以是一个向量、一摞向量,或另一个
-:class:`~torch_sla.SparseTensor`(稀疏矩阵—矩阵乘)。它是每个迭代求解器的
+:class:`~torch_sla.SparseTensor`\ (稀疏矩阵—矩阵乘)。它是每个迭代求解器的
 骨干。
 
 **示例**
@@ -376,7 +414,7 @@ det
 **输入 / 输出可视化** ``A.spy()`` 展示了算子;行列式是它的一个标量概括。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(汇聚到单个 rank)。
+:class:`~torch_sla.DSparseTensor`\ (汇聚到单个 rank)。
 
 **API** :meth:`~torch_sla.SparseTensor.det`。
 
@@ -410,7 +448,7 @@ logdet
 **输入 / 输出可视化** 与 ``det`` 算子相同;见 ``A.spy()``。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(汇聚到单个 rank)。
+:class:`~torch_sla.DSparseTensor`\ (汇聚到单个 rank)。
 
 **API** :meth:`~torch_sla.SparseTensor.logdet`。
 
@@ -482,7 +520,7 @@ condition_number
 通常会抬高 :math:`\kappa`。
 
 **可用于** :class:`~torch_sla.SparseTensor`、
-:class:`~torch_sla.DSparseTensor`(汇聚到单个 rank)。
+:class:`~torch_sla.DSparseTensor`\ (汇聚到单个 rank)。
 
 **API** :meth:`~torch_sla.SparseTensor.condition_number`。
 

@@ -129,9 +129,10 @@ def _lookup(kind: str, device: str, direct: bool) -> "SolverConfig":
                                 preconditioner="amg",
                                 atol=1e-9, maxiter=500,
                                 _kind=kind, _device=device, _direct=direct)
-        # cpu
+        # cpu -- SciPy has no Cholesky method; SuperLU (lu) is the direct
+        # path for SPD on CPU (a symmetric matrix is still solved exactly).
         if direct:
-            return SolverConfig(backend="scipy", method="cholesky",
+            return SolverConfig(backend="scipy", method="lu",
                                 _kind=kind, _device=device, _direct=direct)
         return SolverConfig(backend="pyamg", method="amg",
                             atol=1e-9, maxiter=500,
