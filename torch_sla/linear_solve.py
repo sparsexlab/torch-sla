@@ -192,14 +192,18 @@ class SparseLinearSolveCuDSS(Function):
         m, n = ctx.A_shape
         matrix_type = ctx.matrix_type
 
+        # Adjoint of Ax=b solves A^H gradb = gradu (conjugate transpose).
+        # For real dtypes .conj() is a no-op; for complex it is required for
+        # a correct Wirtinger gradient. For Hermitian (hpd) A^H = A, so the
+        # untransposed solve with the original values is already A^H.
         if matrix_type in ['symmetric', 'spd', 'hpd']:
             indices = torch.stack([row, col], 0)
             gradb = cudss.solve(indices, val, m, n, gradu, matrix_type, "default")
         else:
             indices_T = torch.stack([col, row], 0)
-            gradb = cudss.solve(indices_T, val, n, m, gradu, "general", "default")
+            gradb = cudss.solve(indices_T, val.conj(), n, m, gradu, "general", "default")
 
-        gradval = -gradb[row] * u[col]
+        gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb, None
@@ -222,9 +226,10 @@ class SparseLinearSolveCuDSSLU(Function):
         cudss = get_cudss_module()
         val, row, col, u = ctx.saved_tensors
         m, n = ctx.A_shape
+        # Adjoint solves A^H gradb = gradu; .conj() is a no-op for real dtypes.
         indices_T = torch.stack([col, row], 0)
-        gradb = cudss.lu(indices_T, val, n, m, gradu)
-        gradval = -gradb[row] * u[col]
+        gradb = cudss.lu(indices_T, val.conj(), n, m, gradu)
+        gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb
@@ -247,9 +252,11 @@ class SparseLinearSolveCuDSSCholesky(Function):
         cudss = get_cudss_module()
         val, row, col, u = ctx.saved_tensors
         m, n = ctx.A_shape
+        # Cholesky is Hermitian PD: A^H = A, so the untransposed solve is the
+        # adjoint. .conj() on u[col] is a no-op for real, needed for complex.
         indices = torch.stack([row, col], 0)
         gradb = cudss.cholesky(indices, val, m, n, gradu)
-        gradval = -gradb[row] * u[col]
+        gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb
@@ -272,9 +279,11 @@ class SparseLinearSolveCuDSSLDLT(Function):
         cudss = get_cudss_module()
         val, row, col, u = ctx.saved_tensors
         m, n = ctx.A_shape
+        # LDLT symmetric/Hermitian: A^H = A for the Hermitian case, so the
+        # untransposed solve is the adjoint. .conj() no-op for real dtypes.
         indices = torch.stack([row, col], 0)
         gradb = cudss.ldlt(indices, val, m, n, gradu)
-        gradval = -gradb[row] * u[col]
+        gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
         return gradval, None, None, None, gradb

@@ -209,31 +209,38 @@ def is_strumpack_available() -> bool:
     return _strumpack_available
 
 
-def get_available_backends() -> List[str]:
-    """Get list of available backends"""
-    backends = []
-
-    if is_scipy_available():
-        backends.append('scipy')
-
-    backends.append('pytorch')  # Always available
-
-    if is_cudss_available():
-        backends.append('cudss')
-
-    if is_strumpack_available():
-        backends.append('strumpack')
-
-    return backends
-
-
-# Per-backend status descriptors used by show_backends()
+# Per-backend status descriptors used by get_available_backends() and
+# show_backends(). The order here defines the canonical display order and is
+# the single source of truth for which backends exist -- keep it in sync with
+# BACKEND_METHODS above. Each entry pairs a device tag + install hint with the
+# runtime availability probe for that backend.
 _BACKEND_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
-    'scipy':   {'device': 'CPU',  'install': 'pip install scipy'},
-    'pytorch': {'device': 'CPU/CUDA', 'install': 'bundled with torch (always available)'},
-    'cudss':   {'device': 'CUDA', 'install': 'pip install torch-sla[cudss]'},
-    'strumpack': {'device': 'CPU/CUDA/ROCm', 'install': 'pip install torch-strumpack'},
+    'scipy':     {'device': 'CPU',            'install': 'pip install scipy'},
+    'pytorch':   {'device': 'CPU/CUDA',       'install': 'bundled with torch (always available)'},
+    'cudss':     {'device': 'CUDA',           'install': 'pip install torch-sla[cudss]'},
+    'pyamg':     {'device': 'CPU',            'install': 'pip install torch-sla[pyamg]'},
+    'amgx':      {'device': 'CUDA',           'install': 'pip install torch-sla[amgx]'},
+    'strumpack': {'device': 'CPU/CUDA/ROCm',  'install': 'pip install torch-strumpack'},
 }
+
+
+def _backend_availability() -> "List[tuple]":
+    """Return ``[(name, is_available), ...]`` for every known backend, in the
+    canonical order of :data:`_BACKEND_DESCRIPTIONS`."""
+    probes = {
+        'scipy':     is_scipy_available,
+        'pytorch':   is_pytorch_available,
+        'cudss':     is_cudss_available,
+        'pyamg':     is_pyamg_available,
+        'amgx':      is_amgx_available,
+        'strumpack': is_strumpack_available,
+    }
+    return [(name, probes[name]()) for name in _BACKEND_DESCRIPTIONS]
+
+
+def get_available_backends() -> List[str]:
+    """Get list of available backends on the current machine."""
+    return [name for name, ok in _backend_availability() if ok]
 
 
 def show_backends() -> None:
@@ -248,18 +255,20 @@ def show_backends() -> None:
     >>> import torch_sla
     >>> torch_sla.show_backends()
     torch-sla backend status (CUDA: available)
-      scipy    [CPU]      available
-      pytorch  [CPU/CUDA] available
-      cudss    [CUDA]     not available — pip install torch-sla[cudss]
+      scipy      [CPU]           available
+      pytorch    [CPU/CUDA]      available
+      cudss      [CUDA]          available
+      pyamg      [CPU]           available
+      amgx       [CUDA]          not available — pip install torch-sla[amgx]
+      strumpack  [CPU/CUDA/ROCm] not available — pip install torch-strumpack
     """
-    checks = [
-        ('scipy',   is_scipy_available()),
-        ('pytorch', is_pytorch_available()),
-        ('cudss',   is_cudss_available()),
-        ('strumpack', is_strumpack_available()),
-    ]
+    checks = _backend_availability()
     cuda_status = 'available' if _check_cuda() else 'not available'
     print(f"torch-sla backend status (CUDA: {cuda_status})")
+    # Width the columns to the longest name / device tag so the report stays
+    # aligned as backends are added.
+    name_w = max(len(name) for name, _ in checks)
+    dev_w = max(len(info['device']) for info in _BACKEND_DESCRIPTIONS.values()) + 2
     for name, ok in checks:
         info = _BACKEND_DESCRIPTIONS[name]
         device = f"[{info['device']}]"
@@ -267,7 +276,7 @@ def show_backends() -> None:
             status = "available"
         else:
             status = f"not available — {info['install']}"
-        print(f"  {name:<8} {device:<11} {status}")
+        print(f"  {name:<{name_w}}  {device:<{dev_w}} {status}")
 
 
 def get_backend_methods(backend: str) -> List[str]:

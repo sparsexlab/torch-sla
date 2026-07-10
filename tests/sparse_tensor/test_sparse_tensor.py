@@ -675,13 +675,16 @@ class TestEigenvalueSVD:
     
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_svd_cuda(self):
-        """Test SVD on CUDA (uses power iteration)."""
+        """SVD on CUDA is intentionally unsupported and must raise an
+        informative error pointing at the documented CPU workaround."""
         val, row, col, shape = create_tridiagonal_spd(50)
         A = SparseTensor(val.cuda(), row.cuda(), col.cuda(), shape)
-        
-        U, S, Vt = A.svd(k=5)
-        
-        assert S.device.type == 'cuda'
+
+        with pytest.raises(NotImplementedError):
+            A.svd(k=5)
+
+        # The documented workaround: compute on CPU, move results back.
+        U, S, Vt = A.cpu().svd(k=5)
         assert (S > 0).all()
 
 

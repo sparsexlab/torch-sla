@@ -92,7 +92,7 @@ pip install --no-deps \
   https://github.com/sparsexlab/torch-amgx/releases/download/<tag>/torch_amgx-<ver>-0_cu126-cp313-cp313-linux_x86_64.whl
 ```
 
-> **Note**: The core install (`pip install torch-sla`) pulls in `torch`, `numpy`, `scipy`, and `ninja` — enough to run CPU solvers out of the box. `torch-sla[all]` additionally bundles `pytest` and `nvmath-python`, but **does not** include `[dev]`, `[docs]`, or the native `torch-amgx` / `torch-strumpack` release wheels — install those separately if needed.
+> **Note**: The core install (`pip install torch-sla`) pulls in `torch`, `numpy`, `scipy`, and `ninja` — enough to run CPU solvers out of the box. `torch-sla[all]` additionally bundles `pytest`, `nvmath-python` (cuDSS), and `pyamg`, but **does not** include `[dev]`, `[docs]`, or the native `torch-amgx` / `torch-strumpack` release wheels — install those separately if needed.
 
 After installation, you can inspect which backends are available on your machine:
 
@@ -543,10 +543,12 @@ torchrun --standalone --nproc_per_node=4 examples/distributed/distributed_solve.
 
 ### Backend Utilities
 
-- `get_available_backends()` - List available backends
+- `show_backends()` - Print a status report of every backend (available / install hint)
+- `get_available_backends()` - List backends available on this machine
 - `get_backend_methods(backend)` - List methods for a backend
+- `get_default_method(backend)` - Default method for a backend
 - `select_backend(device, n, dtype)` - Auto-select backend
-- `is_scipy_available()`, `is_cudss_available()`, etc.
+- Availability checks: `is_scipy_available()`, `is_pytorch_available()`, `is_cudss_available()`, `is_pyamg_available()`, `is_amgx_available()`, `is_strumpack_available()`
 
 ## Performance Tips
 

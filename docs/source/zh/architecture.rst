@@ -23,7 +23,7 @@ torch-sla 的类层级与分布式模型,镜像了 PyTorch 自身
    * - **本地数据**
      - ``torch.Tensor``
      - :class:`~torch_sla.SparseTensor`
-   * - **分布式包装**(本地数据 + spec)
+   * - **分布式包装**\ (本地数据 + spec)
      - ``torch.distributed.tensor.DTensor``
      - :class:`~torch_sla.DSparseTensor`
    * - **每个 rank 的本地块**
@@ -36,7 +36,7 @@ torch-sla 的类层级与分布式模型,镜像了 PyTorch 自身
      - ``Shard(dim)``、``Replicate()``、``Partial(op)``
      - :class:`~torch_sla.SparseShard(axis)`、:class:`~torch_sla.Replicated`
 
-关键不变量:``SparseTensor`` **永远**是本地数据。``DSparseTensor`` **永远**是
+关键不变量:``SparseTensor`` **永远**\ 是本地数据。``DSparseTensor`` **永远**\ 是
 一个分布式包装,持有某个 rank 的 ``SparseTensor`` 外加一个 spec。不存在
 “混合”类。
 
@@ -55,11 +55,11 @@ torch-sla 的类层级与分布式模型,镜像了 PyTorch 自身
            └──dense───┘   └sparse└──dense──┘
             leading        2 dims  trailing
 
-两个稀疏维度**永远**是矩阵轴 ``M`` 和 ``N`` —— 它们不能移动。稠密轴分列其
+两个稀疏维度**永远**\ 是矩阵轴 ``M`` 和 ``N`` —— 它们不能移动。稠密轴分列其
 两侧:
 
-* ``batch_shape``(左)—— 用于批量 SpMV / 求解的稠密 batch 维。
-* ``block_shape``(右)—— 用于块稀疏格式(BSR / BCSC)的稠密块维。
+* ``batch_shape``\ (左)—— 用于批量 SpMV / 求解的稠密 batch 维。
+* ``block_shape``\ (右)—— 用于块稀疏格式(BSR / BCSC)的稠密块维。
 
 如果用户的张量里稀疏轴不在这个位置,``SparseTensor.permute(...)`` 会把它重排
 成规范布局。该契约是按位置确定的,而非靠稀疏维元数据,因此每个算法
@@ -142,7 +142,7 @@ Placement 词汇表
      - matvec 算法
      - 跨 rank 通信
    * - ``Replicated``
-     - 本地 ``A @ x``(无通信)
+     - 本地 ``A @ x``\ (无通信)
      - 无
    * - ``Shard(batch_dim)``
      - 逐 batch 独立 SpMV

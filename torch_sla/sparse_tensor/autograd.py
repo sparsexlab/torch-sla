@@ -389,6 +389,7 @@ class SparseSolveFunction(Function):
     
     @staticmethod
     def forward(ctx, val, row, col, shape, b, method, atol, maxiter):
+        from ..backends.scipy_backend import scipy_solve
         u = scipy_solve(val, row, col, shape, b, method=method, atol=atol, maxiter=maxiter)
         ctx.save_for_backward(val, row, col, u, b)
         ctx.shape = shape
@@ -399,6 +400,7 @@ class SparseSolveFunction(Function):
     
     @staticmethod
     def backward(ctx, grad_u):
+        from ..backends.scipy_backend import scipy_solve
         val, row, col, u, b = ctx.saved_tensors
         shape = ctx.shape
         method = ctx.method

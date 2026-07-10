@@ -148,30 +148,20 @@ load_sparse
 
 .. autofunction:: torch_sla.load_sparse
 
-save_distributed
-^^^^^^^^^^^^^^^^
-
-.. autofunction:: torch_sla.save_distributed
-
-load_partition
-^^^^^^^^^^^^^^
-
-.. autofunction:: torch_sla.load_partition
-
 load_metadata
 ^^^^^^^^^^^^^
 
 .. autofunction:: torch_sla.load_metadata
 
-load_sparse_as_partition
-^^^^^^^^^^^^^^^^^^^^^^^^
+save_sparse_sharded
+^^^^^^^^^^^^^^^^^^^
 
-.. autofunction:: torch_sla.load_sparse_as_partition
+.. autofunction:: torch_sla.save_sparse_sharded
 
-load_distributed_as_sparse
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+load_sparse_shard
+^^^^^^^^^^^^^^^^^
 
-.. autofunction:: torch_sla.load_distributed_as_sparse
+.. autofunction:: torch_sla.load_sparse_shard
 
 save_dsparse
 ^^^^^^^^^^^^
@@ -261,9 +251,15 @@ Backend Availability Checks
 
 .. autofunction:: torch_sla.is_scipy_available
 
+.. autofunction:: torch_sla.is_pytorch_available
+
 .. autofunction:: torch_sla.is_cudss_available
 
-.. autofunction:: torch_sla.backends.is_strumpack_available
+.. autofunction:: torch_sla.is_pyamg_available
+
+.. autofunction:: torch_sla.is_amgx_available
+
+.. autofunction:: torch_sla.is_strumpack_available
 
 ----
 

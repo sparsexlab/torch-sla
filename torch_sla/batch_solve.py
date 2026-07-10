@@ -146,18 +146,21 @@ class BatchSparseLinearSolveSameLayout(Function):
             u = u_batch[i]
             gradu = gradu_batch[i]
             
-            # Solve A^T * gradb = gradu
+            # Adjoint solves A^H * gradb = gradu (conjugate transpose). For real
+            # dtypes .conj() is a no-op; for complex it is required for a correct
+            # gradient. Hermitian (cholesky/ldlt) has A^H = A, so those use the
+            # untransposed values.
             if method in _PYTORCH_METHODS:
                 # transpose = swap (row, col); device-agnostic (CPU / CUDA / ROCm)
                 from .backends.pytorch_backend import pytorch_solve
-                gradb = pytorch_solve(val, col, row, (n, m), gradu, method=method, atol=atol, maxiter=maxiter)
+                gradb = pytorch_solve(val.conj(), col, row, (n, m), gradu, method=method, atol=atol, maxiter=maxiter)
             elif method == 'strumpack':
                 from .backends import strumpack_backend as _sp
-                crow, ccol, cval = _sp._coo_to_csr(val, row, col, (m, n))
+                crow, ccol, cval = _sp._coo_to_csr(val.conj(), row, col, (m, n))
                 gradb = _sp.solve_transpose(_sp.factor(crow, ccol, cval, n), gradu)
             elif method in ['cudss_lu']:
                 _cudss = get_cudss_module()
-                gradb = _cudss.lu(torch.stack([col, row], 0), val, n, m, gradu)
+                gradb = _cudss.lu(torch.stack([col, row], 0), val.conj(), n, m, gradu)
             elif method == 'cudss_cholesky':
                 _cudss = get_cudss_module()
                 gradb = _cudss.cholesky(torch.stack([row, col], 0), val, m, n, gradu)
@@ -166,8 +169,8 @@ class BatchSparseLinearSolveSameLayout(Function):
                 gradb = _cudss.ldlt(torch.stack([row, col], 0), val, m, n, gradu)
             else:
                 raise ValueError(f"Unknown method: {method}")
-            
-            gradval = -gradb[row] * u[col]
+
+            gradval = -gradb[row] * u[col].conj()
             gradval_list.append(gradval)
             gradb_list.append(gradb)
         

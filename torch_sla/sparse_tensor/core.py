@@ -1068,6 +1068,126 @@ class SparseTensor:
         from .ops import _log_impl as _impl
         return _impl(self, *args, **kwargs)
 
+    def log10(self, *args, **kwargs):
+        from .ops import log10 as _impl
+        return _impl(self, *args, **kwargs)
+
+    def log2(self, *args, **kwargs):
+        from .ops import log2 as _impl
+        return _impl(self, *args, **kwargs)
+
+    def sin(self, *args, **kwargs):
+        from .ops import sin as _impl
+        return _impl(self, *args, **kwargs)
+
+    def cos(self, *args, **kwargs):
+        from .ops import cos as _impl
+        return _impl(self, *args, **kwargs)
+
+    def tan(self, *args, **kwargs):
+        from .ops import tan as _impl
+        return _impl(self, *args, **kwargs)
+
+    def sinh(self, *args, **kwargs):
+        from .ops import sinh as _impl
+        return _impl(self, *args, **kwargs)
+
+    def cosh(self, *args, **kwargs):
+        from .ops import cosh as _impl
+        return _impl(self, *args, **kwargs)
+
+    def tanh(self, *args, **kwargs):
+        from .ops import tanh as _impl
+        return _impl(self, *args, **kwargs)
+
+    def sigmoid(self, *args, **kwargs):
+        from .ops import sigmoid as _impl
+        return _impl(self, *args, **kwargs)
+
+    def relu(self, *args, **kwargs):
+        from .ops import relu as _impl
+        return _impl(self, *args, **kwargs)
+
+    def clamp(self, *args, **kwargs):
+        from .ops import clamp as _impl
+        return _impl(self, *args, **kwargs)
+
+    def sign(self, *args, **kwargs):
+        from .ops import sign as _impl
+        return _impl(self, *args, **kwargs)
+
+    def floor(self, *args, **kwargs):
+        from .ops import floor as _impl
+        return _impl(self, *args, **kwargs)
+
+    def ceil(self, *args, **kwargs):
+        from .ops import ceil as _impl
+        return _impl(self, *args, **kwargs)
+
+    def round(self, *args, **kwargs):
+        from .ops import round as _impl
+        return _impl(self, *args, **kwargs)
+
+    def reciprocal(self, *args, **kwargs):
+        from .ops import reciprocal as _impl
+        return _impl(self, *args, **kwargs)
+
+    def pow(self, *args, **kwargs):
+        from .ops import pow as _impl
+        return _impl(self, *args, **kwargs)
+
+    def logical_not(self, *args, **kwargs):
+        from .ops import logical_not as _impl
+        return _impl(self, *args, **kwargs)
+
+    def logical_and(self, *args, **kwargs):
+        from .ops import logical_and as _impl
+        return _impl(self, *args, **kwargs)
+
+    def logical_or(self, *args, **kwargs):
+        from .ops import logical_or as _impl
+        return _impl(self, *args, **kwargs)
+
+    def logical_xor(self, *args, **kwargs):
+        from .ops import logical_xor as _impl
+        return _impl(self, *args, **kwargs)
+
+    def isnan(self, *args, **kwargs):
+        from .ops import isnan as _impl
+        return _impl(self, *args, **kwargs)
+
+    def isinf(self, *args, **kwargs):
+        from .ops import isinf as _impl
+        return _impl(self, *args, **kwargs)
+
+    def isfinite(self, *args, **kwargs):
+        from .ops import isfinite as _impl
+        return _impl(self, *args, **kwargs)
+
+    # -- Autograd / tensor management -----------------------------------------
+
+    def detach(self, *args, **kwargs):
+        from .ops import detach as _impl
+        return _impl(self, *args, **kwargs)
+
+    def clone(self, *args, **kwargs):
+        from .ops import clone as _impl
+        return _impl(self, *args, **kwargs)
+
+    def contiguous(self, *args, **kwargs):
+        from .ops import contiguous as _impl
+        return _impl(self, *args, **kwargs)
+
+    @property
+    def requires_grad(self) -> bool:
+        """Whether gradient tracking is enabled on the underlying values."""
+        return self.values.requires_grad
+
+    @property
+    def grad(self) -> Optional[torch.Tensor]:
+        """Gradient of ``values`` if it has been populated, else ``None``."""
+        return self.values.grad
+
     # =========================================================================
     # Persistence (I/O)
     # =========================================================================

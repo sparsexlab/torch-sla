@@ -76,15 +76,21 @@ cudss = [
 amgx = [
     "torch-amgx>=0.1.0a1",
 ]
+# PyAMG algebraic-multigrid backend (CPU; cross-platform)
+pyamg = [
+    "pyamg>=4.0",
+]
 # STRUMPACK sparse direct backend (CPU / CUDA / ROCm; portable, incl. AMD)
 strumpack = [
     "torch-strumpack",
 ]
-# Full installation with all runtime backends (does not include dev/docs)
+# All PyPI-installable runtime backends (cuDSS + PyAMG). Does NOT include
+# dev/docs, nor the native amgx / strumpack backends -- those ship as
+# ABI-specific prebuilt wheels from GitHub Releases (see their extras).
 all = [
     "pytest>=6.0",
     "nvmath-python[cu12]",
-    "torch-amgx>=0.1.0a1",
+    "pyamg>=4.0",
 ]
 
 [project.urls]

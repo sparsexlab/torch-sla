@@ -177,7 +177,17 @@ def _sum_over_sparse(
     if other_axes:
         result_axes = [self._values_axis_for_dim(a) for a in other_axes]
         result = result.sum(dim=tuple(result_axes), keepdim=keepdim)
-    
+
+    # keepdim for the reduced *sparse* axes: they were collapsed above, so
+    # re-insert them as size-1 dims at their logical positions. Insert in
+    # ascending order so earlier insertions don't shift later positions.
+    if keepdim:
+        reduced_sparse = sorted(
+            ([dim_m] if reduce_m else []) + ([dim_n] if reduce_n else [])
+        )
+        for d in reduced_sparse:
+            result = result.unsqueeze(d)
+
     return result
 
 def _sum_over_batch_block(
@@ -245,27 +255,49 @@ def _mean_impl(
         return self.values.mean()
     
     axes = self._normalize_axis(axis)
-    
+
     # For sparse dims, we compute sum/count of nnz (not M*N)
     sum_result = self.sum(axis=axis, keepdim=keepdim)
-    
+
+    dim_types = [self._get_dim_type(a) for a in axes]
+    reduce_m = 'sparse_m' in dim_types
+    reduce_n = 'sparse_n' in dim_types
+
+    # Special case: averaging over exactly ONE sparse axis of an unbatched,
+    # non-block matrix. The number of stored (nonzero) values differs per
+    # output slice (per-row or per-column nnz), so a single scalar divisor is
+    # wrong -- we must divide each slice by its own nnz count. (Reducing over
+    # *both* sparse axes divides by the total nnz, handled by the scalar path
+    # below, matching ``self.values.mean()``.)
+    if (reduce_m ^ reduce_n) and not self.is_batched and not self.is_block:
+        M, N = self.sparse_shape
+        if reduce_n:  # per-row mean -> count nnz per row
+            counts = torch.bincount(self.row_indices, minlength=M)
+        else:         # reduce_m: per-column mean -> count nnz per column
+            counts = torch.bincount(self.col_indices, minlength=N)
+        counts = counts.clamp(min=1).to(sum_result.dtype).to(sum_result.device)
+        # sum_result has one non-trivial dim (the surviving sparse axis); its
+        # numel equals len(counts), so reshape counts to broadcast cleanly
+        # (handles both keepdim shapes like (M,1)/(1,N) and the flat (M,)/(N,)).
+        counts = counts.reshape(sum_result.shape)
+        return sum_result / counts
+
     # Compute divisor based on axes
     divisor = 1
     for a in axes:
         divisor *= self._shape[a]
-    
+
     # But for sparse dimensions, divisor should be nnz not M*N
-    dim_types = [self._get_dim_type(a) for a in axes]
-    if 'sparse_m' in dim_types or 'sparse_n' in dim_types:
+    if reduce_m or reduce_n:
         # For sparse reduction, we're averaging over nnz values
         sparse_divisor = 1
-        if 'sparse_m' in dim_types:
+        if reduce_m:
             sparse_divisor *= self.sparse_shape[0]
-        if 'sparse_n' in dim_types:
+        if reduce_n:
             sparse_divisor *= self.sparse_shape[1]
         # Replace M*N with nnz
         divisor = divisor // sparse_divisor * self.nnz
-    
+
     if isinstance(sum_result, SparseTensor):
         return SparseTensor(
             sum_result.values / divisor,

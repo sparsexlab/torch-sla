@@ -6,6 +6,13 @@ import os
 sys.path.insert(0, os.path.abspath('../'))
 from conf import *
 
+# The parent conf.py's ``sys.path`` insert is relative to *this* (zh) confdir,
+# so it resolves to ``docs/`` and misses the package -- autodoc would then
+# silently import a stale ``torch_sla`` from site-packages. Point explicitly at
+# the repo root (three levels up from ``docs/source/zh``) so the API reference
+# is generated from the current source tree.
+sys.path.insert(0, os.path.abspath('../../../'))
+
 # Override templates path for Chinese
 templates_path = ['_templates', '../_templates']
 

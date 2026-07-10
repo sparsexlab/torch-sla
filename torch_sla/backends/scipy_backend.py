@@ -173,7 +173,8 @@ def scipy_solve(
         x_np = _iterative_solve(spla.lgmres, A, b_np, atol=atol, maxiter=maxiter, M=M_scipy)
 
     elif method == "minres":
-        x_np = _iterative_solve(spla.minres, A, b_np, tol=atol, maxiter=maxiter, M=M_scipy)
+        # scipy>=1.14 removed the ``tol`` kwarg on minres; it takes ``rtol``.
+        x_np = _iterative_solve(spla.minres, A, b_np, rtol=atol, maxiter=maxiter, M=M_scipy)
 
     elif method == "qmr":
         x_np = _iterative_solve(spla.qmr, A, b_np, atol=atol, maxiter=maxiter, M1=M_scipy)
