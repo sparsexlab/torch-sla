@@ -10,8 +10,10 @@ import subprocess
 from setuptools import setup, find_packages
 from setuptools.command.build_ext import build_ext
 
-# Version
-VERSION = "0.2.1"
+# No VERSION here on purpose. pyproject.toml's [project] table is PEP 621 and
+# already authoritative for name/version/deps; the copy that used to live here
+# sat at 0.2.1 while the package shipped 0.3.2, which is exactly the kind of
+# drift that produced __version__ reporting 0.3.1 from a 0.3.2 wheel.
 
 
 def get_long_description():
@@ -51,7 +53,6 @@ class CustomBuildExt(build_ext):
 
 setup(
     name='torch-sla',
-    version=VERSION,
     author='Mingyuan Chi, Shizheng Wen',
     author_email='walker.chi.000@gmail.com, shizheng.wen@sam.math.ethz.ch',
     description='PyTorch Sparse Linear Algebra - Differentiable sparse solvers with CUDA support',
