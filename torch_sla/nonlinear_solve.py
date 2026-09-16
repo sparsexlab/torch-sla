@@ -494,6 +494,16 @@ def _solve_adjoint_system(
     device = u.device
     dtype = u.dtype
     n = u.numel()
+
+    # ``rhs`` here is dL/du, a gradient, so this solve has to be invariant to
+    # its scale -- lambda is linear in it. Both branches below stop on an
+    # absolute floor (``atol`` in the CG loop, ``max(atol, rtol*||b||)`` inside
+    # ``spsolve``), which does not scale: as the outer optimisation converges
+    # ||dL/du|| shrinks past the floor and the solve returns zero before doing
+    # any work, silently killing the gradient. Normalise here and undo it at the
+    # single return below. See ``linear_solve._adjoint_solve``.
+    rhs_scale = rhs.norm()
+    rhs = rhs / torch.where(rhs_scale > 0, rhs_scale, torch.ones_like(rhs_scale))
     
     if jacobian_fn is not None:
         # Explicit Jacobian: transpose and solve
@@ -539,8 +549,9 @@ def _solve_adjoint_system(
             beta = rs_new / rs_old
             p = r + beta * p
             rs_old = rs_new
-    
-    return lambda_adj
+
+    # Undo the normalisation applied to ``rhs`` above. A zero rhs stays zero.
+    return lambda_adj * rhs_scale
 
 
 def _armijo_line_search(

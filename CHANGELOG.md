@@ -7,6 +7,40 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Adjoint solves silently returned zero (or partially converged)
+  gradients as an optimisation converged.** The backward pass solves
+  `Aᴴ λ = ∂L/∂x`, which is linear in its right-hand side, but every
+  iterative backend stops on `max(atol, rtol·‖b‖)` (AmgX: an absolute
+  `tolerance` with `convergence=ABSOLUTE`). That absolute floor does not
+  scale, and the adjoint's right-hand side *is* the gradient: as training
+  converges `‖∂L/∂x‖` shrinks past the floor, the solver's first residual
+  check passes before it does any work, and it returns its zero initial
+  guess. The gradient became identically zero -- finite, correctly shaped
+  and wrong -- exactly when the optimisation was going well, and was
+  already wrong by ~6e-4 relative a decade above the cliff. Measured on
+  2-D Poisson against an exact adjoint, scaling `∂L/∂x` by `c`:
+
+  | backend+method | c=1e+00 | c=1e-04 | c=1e-08 | c=1e-12 |
+  |---|---|---|---|---|
+  | `scipy+lu`, `cudss`, `pyamg` | ~1e-15 | ~1e-15 | ~1e-15 | ~1e-15 |
+  | `scipy+cg` | 1.2e-05 | 1.2e-05 | **6.1e-04** | **1.0e+00** |
+  | `pytorch+cg` (CPU and CUDA) | 5.8e-11 | 2.4e-08 | **6.1e-04** | **1.0e+00** |
+  | `amgx+pcg` | 1.9e-12 | 4.4e-08 | **1.2e-03** | **1.0e+00** |
+
+  Direct backends and PyAMG's fixed-cycle AMG were unaffected; everything
+  that iterates to a tolerance was not. The floor is the right convention
+  for the *forward* solve, where `b` is data and `atol` is the accuracy the
+  caller asked for -- it is wrong for the adjoint, whose right-hand side has
+  no meaningful absolute scale. Every adjoint now solves on a unit-norm
+  right-hand side and undoes the scaling (`linear_solve._adjoint_solve`),
+  which is exact and restores the scale invariance the adjoint method
+  requires. Applied to all nine `autograd.Function`s in `linear_solve.py`,
+  to `batch_solve.py` (both the batched-CG fast path and the per-system
+  loop), to the nonlinear implicit-differentiation adjoints in
+  `sparse_tensor/autograd.py` and `nonlinear_solve.py`. Guarded by
+  `tests/solvers/test_adjoint_scale_invariance.py`, which asserts
+  `grad(c·g) == c·grad(g)` across every available backend.
+
 - **`show_backends()` / `get_available_backends()` now report every
   backend.** They previously probed only `scipy`, `pytorch`, `cudss`,
   `strumpack` and silently omitted `pyamg` and `amgx`, so an installed

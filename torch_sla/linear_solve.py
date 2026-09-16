@@ -61,6 +61,46 @@ from .backends.pytorch_backend import pytorch_solve
 
 
 # ============================================================================
+# Adjoint right-hand-side scaling
+# ============================================================================
+
+def _adjoint_solve(solve_fn, gradu, dim=0):
+    """Run an adjoint solve on a unit-norm right-hand side and undo the scaling.
+
+    The adjoint system ``A^H lambda = dL/dx`` is linear in its right-hand side,
+    so ``lambda`` must scale exactly with ``||dL/dx||``. Iterative backends stop
+    on ``max(atol, rtol * ||b||)`` -- or, for AmgX, on an absolute ``tolerance``
+    -- and that absolute floor does not scale.
+
+    The floor is the right convention for the *forward* solve: there ``b`` is
+    data with a meaningful absolute scale and ``atol`` is the accuracy the
+    caller asked for. It is wrong for the adjoint, whose right-hand side is a
+    gradient. As an optimisation converges ``||dL/dx||`` shrinks, the floor
+    takes over, and once ``||dL/dx|| < atol`` the solver's first residual check
+    passes before it has done any work and it returns its zero initial guess:
+    the gradient silently becomes zero -- finite, correctly shaped and wrong --
+    precisely when training is going well. Well above that cliff the same
+    mechanism stops the iteration early and returns a partially converged
+    adjoint (measured: 6e-4 relative error for ``pytorch+cg`` on 2-D Poisson
+    while the result still looked entirely healthy).
+
+    Normalising restores the scale invariance the adjoint method requires. It
+    costs one norm, one divide and one multiply, needs no device sync, and is a
+    no-op in exact arithmetic for the direct backends that share this path.
+
+    A 2-D gradient is normalised per solution vector, so one large vector cannot
+    mask a small one; an all-zero vector stays zero. ``dim`` is the axis the
+    solution vector runs along -- 0 for the ``[n, nrhs]`` multi-RHS layout used
+    here, 1 for the ``[batch, n]`` layout in :mod:`torch_sla.batch_solve`.
+    """
+    scale = gradu.norm() if gradu.dim() == 1 else gradu.norm(dim=dim, keepdim=True)
+    # Guard the divide. A zero right-hand side must give a zero adjoint, which
+    # the ``* scale`` below restores without branching on a device scalar.
+    safe = torch.where(scale > 0, scale, torch.ones_like(scale))
+    return solve_fn(gradu / safe) * scale
+
+
+# ============================================================================
 # Autograd Functions for gradient support
 # ============================================================================
 
@@ -89,8 +129,11 @@ class SparseLinearSolveScipySuperLU(Function):
         # Solve the adjoint system A^H * gradb = gradu (conjugate transpose,
         # not just A^T). For real matrices .conj() is a no-op; for complex it
         # makes the Wirtinger gradient correct.
-        gradb = scipy_solve(torch.conj_physical(val), col, row, (shape[1], shape[0]), gradu,
-                           method=method, atol=atol, maxiter=maxiter)
+        gradb = _adjoint_solve(
+            lambda rhs: scipy_solve(torch.conj_physical(val), col, row,
+                                    (shape[1], shape[0]), rhs,
+                                    method=method, atol=atol, maxiter=maxiter),
+            gradu)
         gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -126,11 +169,13 @@ class SparseLinearSolveAmgX(Function):
         from .backends.amgx_backend import amgx_solve
         val, row, col, u = ctx.saved_tensors
         shape = ctx.shape
-        gradb = amgx_solve(torch.conj_physical(val), col, row,
-                           (shape[1], shape[0]), gradu,
-                           tol=ctx.tol, maxiter=ctx.maxiter,
-                           method=ctx.method,
-                           preconditioner=ctx.preconditioner)
+        gradb = _adjoint_solve(
+            lambda rhs: amgx_solve(torch.conj_physical(val), col, row,
+                                   (shape[1], shape[0]), rhs,
+                                   tol=ctx.tol, maxiter=ctx.maxiter,
+                                   method=ctx.method,
+                                   preconditioner=ctx.preconditioner),
+            gradu)
         gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -163,9 +208,12 @@ class SparseLinearSolvePyAMG(Function):
         from .backends.pyamg_backend import pyamg_solve
         val, row, col, u = ctx.saved_tensors
         shape = ctx.shape
-        gradb = pyamg_solve(torch.conj_physical(val), col, row,
-                            (shape[1], shape[0]), gradu,
-                            tol=ctx.tol, maxiter=ctx.maxiter, method=ctx.method)
+        gradb = _adjoint_solve(
+            lambda rhs: pyamg_solve(torch.conj_physical(val), col, row,
+                                    (shape[1], shape[0]), rhs,
+                                    tol=ctx.tol, maxiter=ctx.maxiter,
+                                    method=ctx.method),
+            gradu)
         gradval = -gradb[row] * torch.conj_physical(u[col])
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -198,10 +246,14 @@ class SparseLinearSolveCuDSS(Function):
         # untransposed solve with the original values is already A^H.
         if matrix_type in ['symmetric', 'spd', 'hpd']:
             indices = torch.stack([row, col], 0)
-            gradb = cudss.solve(indices, val, m, n, gradu, matrix_type, "default")
+            gradb = _adjoint_solve(
+                lambda rhs: cudss.solve(indices, val, m, n, rhs, matrix_type, "default"),
+                gradu)
         else:
             indices_T = torch.stack([col, row], 0)
-            gradb = cudss.solve(indices_T, val.conj(), n, m, gradu, "general", "default")
+            gradb = _adjoint_solve(
+                lambda rhs: cudss.solve(indices_T, val.conj(), n, m, rhs, "general", "default"),
+                gradu)
 
         gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
@@ -228,7 +280,8 @@ class SparseLinearSolveCuDSSLU(Function):
         m, n = ctx.A_shape
         # Adjoint solves A^H gradb = gradu; .conj() is a no-op for real dtypes.
         indices_T = torch.stack([col, row], 0)
-        gradb = cudss.lu(indices_T, val.conj(), n, m, gradu)
+        gradb = _adjoint_solve(
+            lambda rhs: cudss.lu(indices_T, val.conj(), n, m, rhs), gradu)
         gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -255,7 +308,8 @@ class SparseLinearSolveCuDSSCholesky(Function):
         # Cholesky is Hermitian PD: A^H = A, so the untransposed solve is the
         # adjoint. .conj() on u[col] is a no-op for real, needed for complex.
         indices = torch.stack([row, col], 0)
-        gradb = cudss.cholesky(indices, val, m, n, gradu)
+        gradb = _adjoint_solve(
+            lambda rhs: cudss.cholesky(indices, val, m, n, rhs), gradu)
         gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -282,7 +336,8 @@ class SparseLinearSolveCuDSSLDLT(Function):
         # LDLT symmetric/Hermitian: A^H = A for the Hermitian case, so the
         # untransposed solve is the adjoint. .conj() no-op for real dtypes.
         indices = torch.stack([row, col], 0)
-        gradb = cudss.ldlt(indices, val, m, n, gradu)
+        gradb = _adjoint_solve(
+            lambda rhs: cudss.ldlt(indices, val, m, n, rhs), gradu)
         gradval = -gradb[row] * u[col].conj()
         if gradval.dim() == 2:
             gradval = gradval.sum(-1)
@@ -322,9 +377,13 @@ class SparseLinearSolvePyTorch(Function):
 
         # Solve the adjoint system A^H * gradb = gradu (conjugate transpose);
         # .conj is a no-op for real, correct Wirtinger gradient for complex.
-        gradb = pytorch_solve(torch.conj_physical(val), col, row, (shape[1], shape[0]), gradu,
-                              method=method, atol=atol, rtol=rtol, maxiter=maxiter,
-                              preconditioner=preconditioner, mixed_precision=mixed_precision)
+        gradb = _adjoint_solve(
+            lambda rhs: pytorch_solve(torch.conj_physical(val), col, row,
+                                      (shape[1], shape[0]), rhs,
+                                      method=method, atol=atol, rtol=rtol,
+                                      maxiter=maxiter, preconditioner=preconditioner,
+                                      mixed_precision=mixed_precision),
+            gradu)
         if gradb.dtype != val.dtype:
             gradb = gradb.to(val.dtype)
         gradval = -gradb[row] * torch.conj_physical(u[col])
@@ -368,7 +427,7 @@ class SparseLinearSolveStrumpack(Function):
         # complex. STRUMPACK re-factors A^H (a different matrix when complex).
         crow, ccol, cvals = _sp._coo_to_csr(torch.conj_physical(val), col, row, (n, n))
         fac_h = _sp.factor(crow, ccol, cvals, n)
-        grad_b = _sp.solve(fac_h, grad_u)
+        grad_b = _adjoint_solve(lambda rhs: _sp.solve(fac_h, rhs), grad_u)
         if ctx.b_dim == 1:
             grad_val = -(grad_b[row] * torch.conj_physical(u[col]))
         else:  # multiple RHS: sum over the rhs columns

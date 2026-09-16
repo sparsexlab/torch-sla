@@ -22,6 +22,7 @@ from torch.autograd.function import Function
 from typing import Tuple, List, Optional, Union, Literal
 import warnings
 
+from .linear_solve import _adjoint_solve
 from .backends import (
     get_cudss_module,
     is_cudss_available,
@@ -133,8 +134,10 @@ class BatchSparseLinearSolveSameLayout(Function):
         # batched gather: dL/dval_i = -gradb_i[row] * u_i[col].
         if method == 'cg':
             from .backends.pytorch_backend import batched_cg_same_pattern
-            gradb_batch = batched_cg_same_pattern(
-                val_batch, col, row, (n, m), gradu_batch, atol=atol, maxiter=maxiter)
+            gradb_batch = _adjoint_solve(
+                lambda rhs: batched_cg_same_pattern(
+                    val_batch, col, row, (n, m), rhs, atol=atol, maxiter=maxiter),
+                gradu_batch, dim=1)
             gradval_batch = -gradb_batch[:, row] * u_batch[:, col]
             return gradval_batch, None, None, None, gradb_batch, None, None, None
 
@@ -153,20 +156,30 @@ class BatchSparseLinearSolveSameLayout(Function):
             if method in _PYTORCH_METHODS:
                 # transpose = swap (row, col); device-agnostic (CPU / CUDA / ROCm)
                 from .backends.pytorch_backend import pytorch_solve
-                gradb = pytorch_solve(val.conj(), col, row, (n, m), gradu, method=method, atol=atol, maxiter=maxiter)
+                gradb = _adjoint_solve(
+                    lambda rhs: pytorch_solve(val.conj(), col, row, (n, m), rhs,
+                                              method=method, atol=atol, maxiter=maxiter),
+                    gradu)
             elif method == 'strumpack':
                 from .backends import strumpack_backend as _sp
                 crow, ccol, cval = _sp._coo_to_csr(val.conj(), row, col, (m, n))
-                gradb = _sp.solve_transpose(_sp.factor(crow, ccol, cval, n), gradu)
+                fac_h = _sp.factor(crow, ccol, cval, n)
+                gradb = _adjoint_solve(lambda rhs: _sp.solve_transpose(fac_h, rhs), gradu)
             elif method in ['cudss_lu']:
                 _cudss = get_cudss_module()
-                gradb = _cudss.lu(torch.stack([col, row], 0), val.conj(), n, m, gradu)
+                gradb = _adjoint_solve(
+                    lambda rhs: _cudss.lu(torch.stack([col, row], 0), val.conj(), n, m, rhs),
+                    gradu)
             elif method == 'cudss_cholesky':
                 _cudss = get_cudss_module()
-                gradb = _cudss.cholesky(torch.stack([row, col], 0), val, m, n, gradu)
+                gradb = _adjoint_solve(
+                    lambda rhs: _cudss.cholesky(torch.stack([row, col], 0), val, m, n, rhs),
+                    gradu)
             elif method == 'cudss_ldlt':
                 _cudss = get_cudss_module()
-                gradb = _cudss.ldlt(torch.stack([row, col], 0), val, m, n, gradu)
+                gradb = _adjoint_solve(
+                    lambda rhs: _cudss.ldlt(torch.stack([row, col], 0), val, m, n, rhs),
+                    gradu)
             else:
                 raise ValueError(f"Unknown method: {method}")
 
