@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The `DSparseTensor` persistence tests failed instead of skipping when
+  `safetensors` was missing.** `torch_sla/io.py` guards the optional import
+  (`SAFETENSORS_AVAILABLE`) and only raises at call time, but
+  `tests/distributed/test_dsparse_io_multiprocess.py` and
+  `test_dsparse_io_single_process.py` had no `pytest.importorskip`, so a
+  machine without `safetensors` saw 9 hard failures (the multiprocess ones
+  surfacing indirectly as `Expected 2 results, got 0` when the child died).
+  Both files now skip with a reason, matching the air-gapped-CI convention the
+  rest of the suite follows.
+
 - **Adjoint solves silently returned zero (or partially converged)
   gradients as an optimisation converged.** The backward pass solves
   `Aᴴ λ = ∂L/∂x`, which is linear in its right-hand side, but every

@@ -17,6 +17,13 @@ import numpy as np
 import pytest
 import torch
 
+# ``torch_sla.io`` imports fine without safetensors (it flips
+# SAFETENSORS_AVAILABLE to False) and only raises when a persistence call is
+# actually made, so guard here: skip rather than fail when it is absent, the
+# air-gapped-CI convention the rest of the suite follows.
+pytest.importorskip("safetensors",
+                    reason="safetensors is required for torch_sla.io persistence")
+
 from torch_sla import DSparseTensor, SparseTensor
 from torch_sla.datasets import Synthetic
 from torch_sla.io import (
