@@ -7,6 +7,27 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Three AmgX tests had never run, and two of them were wrong.** They
+  require CUDA plus `torch-amgx`, and CI is CPU-only, so nothing had ever
+  executed them. Once AmgX was installed:
+
+  - `test_amgx_solve_through_solve_api` and
+    `test_solve_api_threads_preconditioner_through` called `solve()` with
+    `spsolve()`'s signature — five positional arguments where `solve(A, b, *,
+    ...)` takes two, and `tol=` where the parameter is `atol`. Both now pass
+    the matrix as a `(val, row, col, shape)` tuple.
+  - `test_amgx_solve_with_alternative_preconditioner[chebyshev]` stalled at
+    rel-err 1.1e-01. Not a solver bug: `"chebyshev"` maps to AmgX's
+    `CHEBYSHEV_POLY`, a multigrid *smoother* that estimates only an upper
+    bound on the spectrum (a Gershgorin row sum) and applies a fixed damping
+    schedule, so the operator is not SPD and PCG's recurrence does not hold —
+    PCG exhausted all 2000 iterations without converging. The same
+    preconditioner converges in **4** FGMRES iterations (8.8e-10) or 97
+    PBiCGStab ones (1.8e-07). The test now parametrizes
+    `(preconditioner, method)` pairs and drives Chebyshev with FGMRES, and
+    `amgx_solve`'s docstring documents that Chebyshev must not be paired with
+    `cg`/`pcg` — it does not error, it silently returns a stalled answer.
+
 - **The `DSparseTensor` persistence tests failed instead of skipping when
   `safetensors` was missing.** `torch_sla/io.py` guards the optional import
   (`SAFETENSORS_AVAILABLE`) and only raises at call time, but

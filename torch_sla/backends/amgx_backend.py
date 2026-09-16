@@ -211,6 +211,16 @@ def amgx_solve(val: Tensor, row: Tensor, col: Tensor,
         ``"multicolor_ilu"`` / ``"chebyshev"`` / ``"polynomial"`` /
         ``"kaczmarz"`` / ``"none"`` (unpreconditioned Krylov).
         Ignored when ``method="amg"`` (AMG is itself the solver).
+
+        ``"chebyshev"`` maps to AmgX's ``CHEBYSHEV_POLY``, a multigrid
+        *smoother*: it estimates only an upper bound on the spectrum and
+        applies a fixed damping schedule, so the operator it defines is
+        not SPD and **must not be paired with** ``method="pcg"``/``"cg"``,
+        whose recurrence assumes an SPD preconditioner. It does not error
+        -- it silently exhausts ``maxiter`` and returns a stalled answer
+        (measured on 1-D Poisson n=128: 2000 PCG iterations, rel-err
+        1.1e-01). Use ``"fgmres"`` (4 iterations, 8.8e-10 there) or
+        ``"pbicgstab"`` (97 iterations) instead.
     solver : AmgXSolver, optional
         Reuse a caller-managed AmgX solver explicitly, skipping the
         cache. Caller ensures sparsity + config match.

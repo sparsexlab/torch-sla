@@ -54,28 +54,43 @@ def test_amgx_solve_through_solve_api():
     from torch_sla import solve
     device = torch.device("cuda")
     val, row, col, shape, b, x_exact = _poisson_1d_coo(128, device)
-    x = solve(val, row, col, shape, b,
-              backend="amgx", tol=1e-10, maxiter=200, method="pbicgstab")
+    x = solve((val, row, col, shape), b,
+              backend="amgx", atol=1e-10, maxiter=200, method="pbicgstab")
     err = (x - x_exact).norm() / x_exact.norm()
     assert err.item() < 1e-6, f"||x - x*|| / ||x*|| = {err.item():.2e}"
 
 
-@pytest.mark.parametrize("preconditioner", [
-    "jacobi_l1", "block_jacobi", "multicolor_dilu", "chebyshev", "none",
+@pytest.mark.parametrize("preconditioner,method", [
+    ("jacobi_l1", "pcg"),
+    ("block_jacobi", "pcg"),
+    ("multicolor_dilu", "pcg"),
+    # 'chebyshev' maps to AmgX's CHEBYSHEV_POLY, which is a *multigrid
+    # smoother*, not a general preconditioner: it estimates only an upper
+    # bound on the spectrum (a Gershgorin row sum, see AMGX
+    # src/solvers/chebyshev_poly.cu::compute_eigenmax_estimate) and then
+    # applies a fixed damping schedule, so the operator it defines is not
+    # SPD and PCG's recurrence does not hold. Measured on this problem:
+    # PCG burns all 2000 iterations without converging and stalls at
+    # rel-err 1.1e-01, while the same preconditioner converges in 4
+    # FGMRES iterations (8.8e-10) or 97 PBiCGStab ones (1.8e-07). Pair it
+    # with a method that does not assume an SPD preconditioner.
+    ("chebyshev", "fgmres"),
+    ("none", "pcg"),
 ])
-def test_amgx_solve_with_alternative_preconditioner(preconditioner):
-    """Each non-default preconditioner can drive a PCG solve to
-    convergence on the 1-D Poisson stencil. Tolerance is loose because
-    'none' (unpreconditioned) and 'chebyshev' need plenty of iterations."""
+def test_amgx_solve_with_alternative_preconditioner(preconditioner, method):
+    """Each non-default preconditioner drives its Krylov method to
+    convergence on the 1-D Poisson stencil. The tolerance is loose because
+    'none' (unpreconditioned) needs the full ~n/2 iterations."""
     from torch_sla.backends.amgx_backend import amgx_solve
     device = torch.device("cuda")
     val, row, col, shape, b, x_exact = _poisson_1d_coo(128, device)
     x = amgx_solve(val, row, col, shape, b,
-                   tol=1e-8, maxiter=2000, method="pcg",
+                   tol=1e-8, maxiter=2000, method=method,
                    preconditioner=preconditioner)
     err = (x - x_exact).norm() / x_exact.norm()
     assert err.item() < 1e-4, \
-        f"preconditioner={preconditioner!r} stalled: rel-err {err.item():.2e}"
+        f"preconditioner={preconditioner!r} + {method!r} stalled: " \
+        f"rel-err {err.item():.2e}"
 
 
 def test_solve_api_threads_preconditioner_through():
@@ -84,7 +99,7 @@ def test_solve_api_threads_preconditioner_through():
     from torch_sla import solve
     device = torch.device("cuda")
     val, row, col, shape, b, x_exact = _poisson_1d_coo(64, device)
-    x = solve(val, row, col, shape, b,
+    x = solve((val, row, col, shape), b,
               backend="amgx", method="pcg",
               preconditioner="multicolor_dilu",
               atol=1e-9, maxiter=500)
