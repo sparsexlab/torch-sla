@@ -538,7 +538,7 @@ class NonlinearSolveFunction(Function):
 
     @staticmethod
     def backward(ctx, grad_u):
-        from ..linear_solve import spsolve
+        from ..linear_solve import _adjoint_solve, spsolve
 
         saved = ctx.saved_tensors
         u = saved[0]
@@ -583,8 +583,12 @@ class NonlinearSolveFunction(Function):
             jshape = (n, n)
 
         # Adjoint solve  J^T lambda = grad_u  (swap row/col, conj for complex).
-        lam = spsolve(jval.conj(), jcol, jrow, (jshape[1], jshape[0]), grad_u,
-                      backend=ctx.linear_solver, method=ctx.linear_method)
+        # Scale-invariant: grad_u is a gradient, so an absolute stopping floor
+        # must not reach it (see linear_solve._adjoint_solve).
+        lam = _adjoint_solve(
+            lambda rhs: spsolve(jval.conj(), jcol, jrow, (jshape[1], jshape[0]), rhs,
+                                backend=ctx.linear_solver, method=ctx.linear_method),
+            grad_u)
 
         # dL/dtheta = -(dF/dtheta)^T lambda  via one VJP through F at u*.
         with torch.enable_grad():

@@ -7,6 +7,71 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Three AmgX tests had never run, and two of them were wrong.** They
+  require CUDA plus `torch-amgx`, and CI is CPU-only, so nothing had ever
+  executed them. Once AmgX was installed:
+
+  - `test_amgx_solve_through_solve_api` and
+    `test_solve_api_threads_preconditioner_through` called `solve()` with
+    `spsolve()`'s signature — five positional arguments where `solve(A, b, *,
+    ...)` takes two, and `tol=` where the parameter is `atol`. Both now pass
+    the matrix as a `(val, row, col, shape)` tuple.
+  - `test_amgx_solve_with_alternative_preconditioner[chebyshev]` stalled at
+    rel-err 1.1e-01. Not a solver bug: `"chebyshev"` maps to AmgX's
+    `CHEBYSHEV_POLY`, a multigrid *smoother* that estimates only an upper
+    bound on the spectrum (a Gershgorin row sum) and applies a fixed damping
+    schedule, so the operator is not SPD and PCG's recurrence does not hold —
+    PCG exhausted all 2000 iterations without converging. The same
+    preconditioner converges in **4** FGMRES iterations (8.8e-10) or 97
+    PBiCGStab ones (1.8e-07). The test now parametrizes
+    `(preconditioner, method)` pairs and drives Chebyshev with FGMRES, and
+    `amgx_solve`'s docstring documents that Chebyshev must not be paired with
+    `cg`/`pcg` — it does not error, it silently returns a stalled answer.
+
+- **The `DSparseTensor` persistence tests failed instead of skipping when
+  `safetensors` was missing.** `torch_sla/io.py` guards the optional import
+  (`SAFETENSORS_AVAILABLE`) and only raises at call time, but
+  `tests/distributed/test_dsparse_io_multiprocess.py` and
+  `test_dsparse_io_single_process.py` had no `pytest.importorskip`, so a
+  machine without `safetensors` saw 9 hard failures (the multiprocess ones
+  surfacing indirectly as `Expected 2 results, got 0` when the child died).
+  Both files now skip with a reason, matching the air-gapped-CI convention the
+  rest of the suite follows.
+
+- **Adjoint solves silently returned zero (or partially converged)
+  gradients as an optimisation converged.** The backward pass solves
+  `Aᴴ λ = ∂L/∂x`, which is linear in its right-hand side, but every
+  iterative backend stops on `max(atol, rtol·‖b‖)` (AmgX: an absolute
+  `tolerance` with `convergence=ABSOLUTE`). That absolute floor does not
+  scale, and the adjoint's right-hand side *is* the gradient: as training
+  converges `‖∂L/∂x‖` shrinks past the floor, the solver's first residual
+  check passes before it does any work, and it returns its zero initial
+  guess. The gradient became identically zero -- finite, correctly shaped
+  and wrong -- exactly when the optimisation was going well, and was
+  already wrong by ~6e-4 relative a decade above the cliff. Measured on
+  2-D Poisson against an exact adjoint, scaling `∂L/∂x` by `c`:
+
+  | backend+method | c=1e+00 | c=1e-04 | c=1e-08 | c=1e-12 |
+  |---|---|---|---|---|
+  | `scipy+lu`, `cudss`, `pyamg` | ~1e-15 | ~1e-15 | ~1e-15 | ~1e-15 |
+  | `scipy+cg` | 1.2e-05 | 1.2e-05 | **6.1e-04** | **1.0e+00** |
+  | `pytorch+cg` (CPU and CUDA) | 5.8e-11 | 2.4e-08 | **6.1e-04** | **1.0e+00** |
+  | `amgx+pcg` | 1.9e-12 | 4.4e-08 | **1.2e-03** | **1.0e+00** |
+
+  Direct backends and PyAMG's fixed-cycle AMG were unaffected; everything
+  that iterates to a tolerance was not. The floor is the right convention
+  for the *forward* solve, where `b` is data and `atol` is the accuracy the
+  caller asked for -- it is wrong for the adjoint, whose right-hand side has
+  no meaningful absolute scale. Every adjoint now solves on a unit-norm
+  right-hand side and undoes the scaling (`linear_solve._adjoint_solve`),
+  which is exact and restores the scale invariance the adjoint method
+  requires. Applied to all nine `autograd.Function`s in `linear_solve.py`,
+  to `batch_solve.py` (both the batched-CG fast path and the per-system
+  loop), to the nonlinear implicit-differentiation adjoints in
+  `sparse_tensor/autograd.py` and `nonlinear_solve.py`. Guarded by
+  `tests/solvers/test_adjoint_scale_invariance.py`, which asserts
+  `grad(c·g) == c·grad(g)` across every available backend.
+
 - **`show_backends()` / `get_available_backends()` now report every
   backend.** They previously probed only `scipy`, `pytorch`, `cudss`,
   `strumpack` and silently omitted `pyamg` and `amgx`, so an installed
