@@ -5,6 +5,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-16
+
+Patch release. Every entry is a fix, and three of them silently produced wrong
+numbers rather than failing -- see the adjoint and cuDSS items in particular.
+
 ### Fixed
 
 - **Three AmgX tests had never run, and two of them were wrong.** They
@@ -123,6 +128,41 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   owned-by-owned block only (drops halo columns) and densifies it.
 - `eigsh` `which="LM"/"SM"` is treated as largest/smallest *algebraic*
   rather than *magnitude* for indefinite matrices.
+
+## [0.3.2] - 2026-06-26
+
+No section was written at the time; reconstructed from
+[#59](https://github.com/sparsexlab/torch-sla/pull/59) and the commit range.
+The release cut PyPI so it would carry the accumulated `dev` work plus the
+documentation overhaul, and so Read the Docs' `stable` built from a commit
+containing `.readthedocs.yaml`.
+
+### Added
+
+- **STRUMPACK backend** -- portable multifrontal sparse direct solve on
+  CPU / CUDA / **ROCm**, real and complex, with an `Aᴴ` adjoint. This is the
+  GPU direct path on AMD, where cuDSS (NVIDIA-only) is unavailable.
+- **GMRES and MINRES** in the pytorch-native backend (restarted
+  right-preconditioned GMRES; Paige-Saunders MINRES with scipy-style stopping).
+- **LSQR and LSMR** least-squares solvers, device-agnostic.
+- **Differentiable nonlinear solve** -- Newton with implicit-function-theorem
+  gradients, validated against the analytical 1-D Bratu solution and
+  `scipy.optimize.root`.
+- **ILU(0) and additive-Schwarz preconditioners** in the pytorch backend.
+- **Genuinely batched CG** for matrices sharing a sparsity pattern.
+- **`torch_sla.datasets`** -- one package for public and built-in problems.
+- Distributed sugar on `DSparseTensor`: `solve` / `nonlinear_solve` /
+  `connected_components` / `lsqr` / `lsmr`.
+
+### Changed
+
+- **Removed the `eigen` and `cupy` backends**; their capabilities are covered
+  by `scipy` + `pytorch` + `cudss`.
+- `connected_components` reimplemented as FastSV -- O(log N) rounds, no
+  diameter upturn, stays on device.
+- Vectorised stencil assembly in `datasets` (no per-node Python loops).
+- Operation-centric documentation restructure, full Chinese translation, Read
+  the Docs config, and per-op scaling benchmarks across CPU / CUDA / ROCm.
 
 ## [0.3.1] - 2026-06-17
 

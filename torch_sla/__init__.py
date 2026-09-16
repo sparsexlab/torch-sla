@@ -148,7 +148,7 @@ from .nonlinear_solve import (
     NonlinearSolveAdjoint,
 )
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 __author__ = "Mingyuan Chi, Shizheng Wen"
 
 __all__ = [
