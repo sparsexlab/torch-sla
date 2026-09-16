@@ -83,3 +83,52 @@ jobs:
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
 
+  # A pushed tag publishes to PyPI but never created a GitHub Release, so the
+  # Releases page stopped at v0.2.1 while v0.3.1 and v0.3.2 shipped normally.
+  # Nothing was broken -- a git tag and a Release are different objects, and
+  # this workflow only ever made the former. Create it here so it cannot drift
+  # again.
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    # Tag pushes only. On `release: published` the Release already exists, and
+    # creating one there would recurse.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+    - name: Extract this version's CHANGELOG section
+      run: |
+        VERSION="${GITHUB_REF_NAME#v}"
+        # Print the "## [x.y.z]" block, stopping at the next "## [". Matched by
+        # literal prefix rather than regex, since the dots in a version are
+        # metacharacters. A missing section must not block the release, so fall
+        # back to a pointer.
+        awk -v tag="## [$VERSION]" '
+          index($0, tag) == 1 { found = 1; next }
+          found && /^## \[/  { exit }
+          found               { print }
+        ' CHANGELOG.md > notes.md
+        if [ ! -s notes.md ]; then
+          printf 'No CHANGELOG section for %s.\n' "$VERSION" > notes.md
+        fi
+        printf '\nPublished to PyPI: https://pypi.org/project/torch-sla/%s/\n' \
+          "$VERSION" >> notes.md
+
+    - name: Create the GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: ${{ github.ref_name }}
+        body_path: notes.md
+        files: dist/*
+
