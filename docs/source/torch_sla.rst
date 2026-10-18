@@ -130,6 +130,19 @@ NonlinearSolveAdjoint
    :undoc-members:
    :show-inheritance:
 
+vi_solve
+~~~~~~~~
+
+.. autofunction:: torch_sla.vi_solve
+
+VISolveAdjoint
+~~~~~~~~~~~~~~
+
+.. autoclass:: torch_sla.VISolveAdjoint
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 ----
 
 Persistence (I/O)

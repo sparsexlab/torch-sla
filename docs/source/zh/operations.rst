@@ -247,6 +247,50 @@ nonlinear_solve
 
 ----
 
+.. _op-vi-solve:
+
+vi_solve
+~~~~~~~~
+
+``vi_solve(residual_fn, u0, *params, lower=None, upper=None, jacobian_fn=None, **kwargs) -> u``
+
+在上下界 :math:`l \le u \le r` 约束下求解 :math:`F(u, \theta) = 0`:分量只有在
+:math:`F` 把它往界外推时才能停在界上(在 :math:`l_i` 处 :math:`F_i \ge 0`,在
+:math:`r_i` 处 :math:`F_i \le 0`)。当 :math:`F = \nabla E` 时,这就是带上下界
+最小化 :math:`E` 的 KKT 条件:障碍与接触问题、带不可逆性的损伤和相场模型、
+有界优化。:math:`l_i = r_i` 的分量被固定,可以用来施加 Dirichlet 值。对参数和
+上下界的梯度由伴随法给出。
+
+**示例** -- 障碍上的薄膜,:math:`-u'' = f`,:math:`u \ge \psi`:
+
+.. code-block:: python
+
+   import torch
+   from torch_sla import SparseTensor, vi_solve
+
+   A = SparseTensor(val, row, col, (n, n))      # 一维 Laplace / h^2
+   f = torch.full((n,), -10.0, dtype=torch.float64, requires_grad=True)
+
+   u, info = vi_solve(lambda u, f: A @ u - f, torch.zeros_like(f), f,
+                      lower=-0.2, jacobian_fn=lambda u, f: A, return_info=True)
+   info["active"]          # 贴在障碍上的节点数
+   u.sum().backward()      # 在接触区上 f.grad 为零
+
+**算法** 约化空间 active-set Newton,即 PETSc ``SNESVINEWTONRSLS`` 的方法:每次
+迭代固定那些停在界上、且 :math:`F` 指向界外的分量,对其余分量做一步 Newton,
+再投影回上下界。被固定分量在 Jacobian 中的行和列换成单位阵而不是删掉,因此
+每次线性求解看到的稀疏模式都相同。每次迭代只把 active 集在错误的地方推进大约
+一层,所以增量问题应该从上一步的解出发。不给 ``jacobian_fn`` 时,用 autograd
+的 Jacobian-向量积驱动 GMRES 或 CG。
+
+**可用于** 函数式 :func:`~torch_sla.vi_solve`;Jacobian 可以是
+:class:`~torch_sla.SparseTensor`、``(val, row, col, shape)`` 元组、torch 稀疏
+COO 张量,也可以不给(无矩阵)。
+
+**API** :func:`~torch_sla.vi_solve`。
+
+----
+
 特征值 / 谱
 -----------
 

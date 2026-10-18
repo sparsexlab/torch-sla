@@ -5,6 +5,24 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`vi_solve`: bound-constrained nonlinear solve (variational inequality).**
+  It finds `lower <= u <= upper` where every component either solves
+  `F_i(u) = 0` or rests on a bound that `F` pushes against. For `F = ∇E` these
+  are the KKT conditions of minimizing `E` under the bounds: obstacle and contact
+  problems, damage and phase-field fracture with irreversibility.
+  - The method is reduced-space active-set Newton, as in PETSc's
+    `SNESVINEWTONRSLS`. Components with `lower == upper` stay fixed, which
+    imposes Dirichlet values.
+  - The Jacobian comes from `jacobian_fn` as a `SparseTensor`, a COO tuple or a
+    torch sparse COO tensor. Without it the solve is matrix-free: autograd JVPs
+    with GMRES or CG.
+  - The reduced system keeps one sparsity pattern, so direct solvers can reuse
+    their analysis. `linear_solver` also accepts a callable.
+  - Gradients with respect to the parameters and both bounds come from implicit
+    differentiation (`VISolveAdjoint`).
+
 ## [0.3.3] - 2026-09-16
 
 Patch release. Every entry is a fix, and three of them silently produced wrong

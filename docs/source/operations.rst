@@ -265,6 +265,55 @@ pattern, which Newton reuses each iteration.
 
 ----
 
+.. _op-vi-solve:
+
+vi_solve
+~~~~~~~~
+
+``vi_solve(residual_fn, u0, *params, lower=None, upper=None, jacobian_fn=None, **kwargs) -> u``
+
+Solve :math:`F(u, \theta) = 0` subject to bounds :math:`l \le u \le r`: a
+component may rest on a bound only where :math:`F` pushes it outwards
+(:math:`F_i \ge 0` at :math:`l_i`, :math:`F_i \le 0` at :math:`r_i`). For
+:math:`F = \nabla E` these are the KKT conditions of minimizing :math:`E`
+under the bounds: obstacle and contact problems, damage and phase-field models
+with irreversibility, bound-constrained optimization. Components with
+:math:`l_i = r_i` are fixed, which imposes Dirichlet values. Gradients w.r.t.
+the parameters and the bounds come from the adjoint method.
+
+**Example** -- a membrane over an obstacle, :math:`-u'' = f`, :math:`u \ge \psi`:
+
+.. code-block:: python
+
+   import torch
+   from torch_sla import SparseTensor, vi_solve
+
+   A = SparseTensor(val, row, col, (n, n))      # 1D Laplacian / h^2
+   f = torch.full((n,), -10.0, dtype=torch.float64, requires_grad=True)
+
+   u, info = vi_solve(lambda u, f: A @ u - f, torch.zeros_like(f), f,
+                      lower=-0.2, jacobian_fn=lambda u, f: A, return_info=True)
+   info["active"]          # nodes resting on the obstacle
+   u.sum().backward()      # f.grad vanishes on the contact set
+
+**Algorithm** Reduced-space active-set Newton, the method of PETSc's
+``SNESVINEWTONRSLS``: each iteration fixes the components that sit on a bound
+with :math:`F` pointing outwards, takes a Newton step on the others and
+projects onto the bounds. The fixed rows and columns of the Jacobian are
+replaced by the identity instead of being removed, so every linear solve sees
+the same sparsity pattern. Each iteration moves the active set by about one
+layer where it is wrong, so start incremental problems from the previous
+solution. Without ``jacobian_fn``, Jacobian-vector products from autograd
+drive GMRES or CG.
+
+**Available on** functional :func:`~torch_sla.vi_solve`, with the Jacobian
+given as a :class:`~torch_sla.SparseTensor`, a ``(val, row, col, shape)``
+tuple, a torch sparse COO tensor, or not at all (matrix-free).
+
+**API** :func:`~torch_sla.vi_solve`.
+
+----
+
 Eigen / spectral
 ----------------
 
