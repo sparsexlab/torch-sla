@@ -148,6 +148,11 @@ from .nonlinear_solve import (
     NonlinearSolveAdjoint,
 )
 
+from .vi_solve import (
+    vi_solve,
+    VISolveAdjoint,
+)
+
 __version__ = "0.3.3"
 __author__ = "Mingyuan Chi, Shizheng Wen"
 
@@ -209,6 +214,9 @@ __all__ = [
     "nonlinear_solve",
     "adjoint_solve",
     "NonlinearSolveAdjoint",
+    # Bound-constrained nonlinear solve (variational inequality)
+    "vi_solve",
+    "VISolveAdjoint",
     # Version
     "__version__",
 ]
