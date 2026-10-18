@@ -108,9 +108,11 @@ def _linear_solve(cfg: Dict[str, Any], val: Tensor, row: Tensor, col: Tensor,
                   n: int, b: Tensor) -> Tensor:
     solver = cfg["linear_solver"]
     if callable(solver):
-        return solver(val, row, col, (n, n), b)
-    return spsolve(val, row, col, (n, n), b, backend=solver, method=cfg["linear_method"],
-                   **cfg["linear_kwargs"])
+        x = solver(val, row, col, (n, n), b)
+    else:
+        x = spsolve(val, row, col, (n, n), b, backend=solver, method=cfg["linear_method"],
+                    **cfg["linear_kwargs"])
+    return x.to(b.device)  # host backends (scipy) hand back CPU tensors
 
 
 def _cg(matvec: Callable, b: Tensor, rtol: float, maxiter: int) -> Tensor:

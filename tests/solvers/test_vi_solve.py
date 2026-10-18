@@ -273,14 +273,15 @@ def test_input_checks():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_obstacle_problem_cuda():
+@pytest.mark.parametrize("backend", ["pytorch", "scipy"])
+def test_obstacle_problem_cuda(backend):
     n = 199
     h = 1.0 / (n + 1)
     A = _tridiag(n, scale=1.0 / h**2).cuda()
     f = torch.full((n,), -10.0, device="cuda")
+    kwargs = {"linear_method": "cg", "linear_kwargs": {"atol": 1e-12}} if backend == "pytorch" else {}
     u = vi_solve(lambda u, f: A @ u - f, torch.zeros(n, device="cuda"), f, lower=-0.2,
-                 jacobian_fn=lambda u, f: A, linear_solver="pytorch", linear_method="cg",
-                 linear_kwargs={"atol": 1e-12})
+                 jacobian_fn=lambda u, f: A, linear_solver=backend, **kwargs)
     u_cpu = vi_solve(lambda u, f: A.cpu() @ u - f, torch.zeros(n), f.cpu(), lower=-0.2,
                      jacobian_fn=lambda u, f: A.cpu())
     assert u.is_cuda
