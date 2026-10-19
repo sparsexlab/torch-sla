@@ -5,6 +5,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-19
+
+Minor release: one new solver, no changes to existing behaviour.
+
 ### Added
 
 - **`vi_solve`: bound-constrained nonlinear solve (variational inequality).**

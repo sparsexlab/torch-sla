@@ -4,6 +4,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import os
+import re
 import sys
 sys.path.insert(0, os.path.abspath('../../'))
 
@@ -21,8 +22,12 @@ autodoc_mock_imports = [
 project = 'torch-sla'
 copyright = '2024-2026, Mingyuan Chi, Shizheng Wen'
 author = 'Mingyuan Chi, Shizheng Wen'
-version = '0.1.2'
-release = '0.1.2'
+# The version lives in torch_sla/__init__.py (and pyproject.toml); read it from
+# there rather than keeping a third copy, which had drifted to 0.1.2.
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'torch_sla', '__init__.py'),
+          encoding='utf-8') as _f:
+    release = re.search(r'^__version__ = "([^"]+)"', _f.read(), re.M).group(1)
+version = release
 
 # -- SEO & Metadata ----------------------------------------------------------
 # SEO-optimized title with high-value keywords

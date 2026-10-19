@@ -153,7 +153,7 @@ from .vi_solve import (
     VISolveAdjoint,
 )
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 __author__ = "Mingyuan Chi, Shizheng Wen"
 
 __all__ = [
