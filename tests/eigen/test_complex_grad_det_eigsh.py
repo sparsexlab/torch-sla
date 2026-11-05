@@ -80,11 +80,11 @@ def test_eigsh_backward_matches_analytic(dtype, device):
     w, _ = SparseTensor(vs, r, c, s).eigsh(k=1, which="LM")
     w.real.sum().backward()
 
-    # Per-entry analytic for a simple eigenvalue: d(lambda)/dA_ij = conj(v_i) v_j
-    # (global-phase invariant, unlike v_i v_j). No-op conj on real symmetric.
+    # Per-entry PyTorch VJP for a simple eigenvalue: grad_ij = v_i conj(v_j).
+    # (global-phase invariant; analytic form is conj(v_i) v_j). No-op on real.
     wd, Vd = torch.linalg.eigh(A0)
     vec = Vd[:, -1]
-    expected = torch.stack([vec[r[i]].conj() * vec[c[i]] for i in range(len(r))])
+    expected = torch.stack([vec[r[i]] * vec[c[i]].conj() for i in range(len(r))])
 
     rel = (vs.grad - expected).abs().max() / expected.abs().max()
     assert rel < 1e-5, f"eigsh backward mismatch ({dtype}, {device}): rel={rel:.2e}"
