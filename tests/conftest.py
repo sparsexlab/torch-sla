@@ -108,6 +108,12 @@ def benchmark_small_real() -> Benchmark:
 
 
 @pytest.fixture
+def benchmark_hermitian_complex() -> Benchmark:
+    """Hermitian complex matrix; skip when the external dataset is unavailable."""
+    return _safe_get("suitesparse", "complex_hpd")
+
+
+@pytest.fixture
 def benchmark_small_complex() -> Benchmark:
     """The smallest catalogued complex matrix (Bai/qc324, n=324) -- for
     complex-dtype fast tests like ``autograd.gradcheck`` whose runtime is

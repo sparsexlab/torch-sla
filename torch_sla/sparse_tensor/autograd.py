@@ -270,7 +270,7 @@ class EigshAdjoint(Function):
         A @ v = λ * v
     
     The gradient is:
-        ∂λ/∂A = conj(v) @ v.T  (outer product; v vᴴ for Hermitian A,
+        ∂λ/∂A = v vᴴ   (analytic conj(v)⊗v conjugated by PyTorch's VJP;
                                 v vᵀ for real symmetric A)
         ∂v/∂A requires solving a linear system (more complex)
     """
@@ -342,7 +342,7 @@ class EigshAdjoint(Function):
         Backward pass using adjoint method.
         
         For eigenvalue λ_i with eigenvector v_i (Hermitian A):
-            ∂L/∂A[j,k] = Σ_i (∂L/∂λ_i) * conj(v_i[j]) * v_i[k]
+            grad[j,k] = Σ_i (∂L/∂λ_i) * v_i[j] * conj(v_i[k])   (PyTorch VJP)
 
         ``.conj()`` is a no-op on real tensors (recovers v_i[j] * v_i[k]) and
         makes the gradient correct -- and global-phase invariant -- for
@@ -356,18 +356,19 @@ class EigshAdjoint(Function):
         if grad_eigenvalues is None:
             return None, None, None, None, None, None, None, None
         
-        # Compute gradient w.r.t. values
-        # ∂L/∂A[i,j] = Σ_m (∂L/∂λ_m) * conj(v_m[i]) * v_m[j]
-        # For sparse: ∂L/∂val[idx] = Σ_m (∂L/∂λ_m) * conj(v_m[row]) * v_m[col]
+        # Compute gradient w.r.t. values.
+        # PyTorch VJP: grad[i,j] = Σ_m (∂L/∂λ_m) * v_m[i] * conj(v_m[j])
+        # For sparse: grad_val[idx] = Σ_m (∂L/∂λ_m) * v_m[row] * conj(v_m[col])
 
         grad_val = torch.zeros_like(val)
 
         for m in range(k):
             if grad_eigenvalues[m] != 0:
-                # conj(v_m[row]) * v_m[col] -- no-op on real, correct +
-                # phase-invariant for complex Hermitian.
+                # v_m[row] * conj(v_m[col]) -- PyTorch's VJP conjugates the
+                # analytic conj(v_m[row]) * v_m[col]; no-op on real, correct
+                # and phase-invariant for complex Hermitian.
                 v_m = eigenvectors[:, m]
-                grad_val += grad_eigenvalues[m] * v_m[row].conj() * v_m[col]
+                grad_val += grad_eigenvalues[m] * v_m[row] * v_m[col].conj()
         
         # Handle eigenvector gradients if needed (more complex, skip for now)
         # The eigenvector gradient requires solving (A - λI) @ dv = ...

@@ -26,7 +26,6 @@ import pytest
 import torch
 
 from torch_sla import SparseTensor
-from torch_sla.datasets import SuiteSparse
 
 
 # Catalogued matrices whose condition number is so large that a random
@@ -121,19 +120,19 @@ def test_conj_is_elementwise(benchmark_complex):
 # Property sanity on the SuiteSparse complex catalogue entries
 # =====================================================================
 
-def test_hermitian_benchmark_has_real_diagonal():
+def test_hermitian_benchmark_has_real_diagonal(benchmark_hermitian_complex):
     """Sanity on Bai/mhd1280b: Hermitian implies real diagonal."""
-    b = SuiteSparse["complex_hpd"]
+    b = benchmark_hermitian_complex
     diag_mask = b.row == b.col
     assert b.val[diag_mask].imag.abs().max().item() < 1e-12, (
         f"{b.name}: diagonal has non-trivial imaginary part -- contradicts Hermitian"
     )
 
 
-def test_complex_symmetric_benchmark_may_have_complex_diagonal():
+def test_complex_symmetric_benchmark_may_have_complex_diagonal(benchmark_small_complex):
     """Sanity on Bai/qc324: complex symmetric (A=A^T, not A^H) is
     allowed to have a complex diagonal, and qc324 actually does."""
-    b = SuiteSparse["complex_sym"]
+    b = benchmark_small_complex
     diag_mask = b.row == b.col
     assert b.val[diag_mask].imag.abs().max().item() > 1e-3, (
         f"{b.name}: diagonal looks real -- expected complex entries"
