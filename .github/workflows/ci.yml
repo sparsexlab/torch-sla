@@ -8,8 +8,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Python 3.9 has no setup-python build for Ubuntu 26.04 (ubuntu-latest).
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12']
 
@@ -28,6 +30,9 @@ jobs:
         pip install numpy scipy
         pip install -e ".[test]" || pip install -e .
         pip install pytest
+
+    - name: Run eigenvalue regression tests
+      run: python -m pytest tests/eigen/ -v --tb=short
 
     - name: Run tests
       run: |
