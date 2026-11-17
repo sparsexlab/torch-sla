@@ -36,5 +36,5 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest tests/ -v --tb=short -x || echo "Tests completed with some failures"
+        python -m pytest tests/ -v --tb=short -x
 
